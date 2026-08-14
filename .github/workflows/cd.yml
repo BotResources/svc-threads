@@ -1,0 +1,166 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "svc-chat/v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Service version to (re)publish (defaults to Cargo.toml)"
+        required: false
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  detect-bump:
+    name: detect-bump
+    runs-on: ubuntu-latest
+    outputs:
+      publish_service: ${{ steps.detect.outputs.publish_service }}
+      service_version: ${{ steps.detect.outputs.service_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Detect version bumps
+        id: detect
+        shell: bash
+        run: |
+          if [ ! -f Cargo.toml ]; then
+            echo "Pre-scaffold repository — nothing to publish."
+            {
+              echo "publish_service=false"
+              echo "service_version="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          crate_version() {
+            grep -E '^version\s*=' "$1" | head -1 | sed 's/.*"\(.*\)".*/\1/'
+          }
+          is_release() {
+            case "$1" in
+              0.0.0|*-dev|*-rc*|*-pre*) return 1 ;;
+              *) return 0 ;;
+            esac
+          }
+          tag_exists() {
+            git ls-remote --tags origin "refs/tags/$1" | grep -q .
+          }
+
+          service_version="$(crate_version Cargo.toml)"
+          publish_service=false
+          case "${GITHUB_REF}" in
+            refs/tags/svc-chat/v*)
+              service_version="${GITHUB_REF#refs/tags/svc-chat/v}"
+              publish_service=true
+              echo "Tag trigger — republishing svc-chat ${service_version}"
+              ;;
+            *)
+              if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+                input_version="${{ inputs.version }}"
+                [ -n "$input_version" ] && service_version="$input_version"
+                publish_service=true
+                echo "Manual dispatch — publishing svc-chat ${service_version}"
+              elif is_release "$service_version" \
+                && ! tag_exists "svc-chat/v${service_version}" \
+                && ! tag_exists "v${service_version}"; then
+                if grep -qE "^## ${service_version}( |$)" CHANGELOG.md; then
+                  publish_service=true
+                else
+                  echo "::warning::svc-chat ${service_version} has no CHANGELOG heading — not publishing"
+                fi
+              else
+                echo "svc-chat ${service_version}: already released or not a release version"
+              fi
+              ;;
+          esac
+
+          {
+            echo "publish_service=${publish_service}"
+            echo "service_version=${service_version}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish image + chart
+    needs: detect-bump
+    if: needs.detect-bump.outputs.publish_service == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (Docker)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish image + chart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: ./scripts/publish.sh --skip-checks
+
+  tag-service:
+    name: Tag + Release svc-chat
+    needs: [detect-bump, publish]
+    if: needs.detect-bump.outputs.publish_service == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create tag + GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.detect-bump.outputs.service_version }}
+        run: |
+          tag="svc-chat/v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            echo "Tag $tag already exists"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --title "$tag" \
+            --notes "See the \`## ${VERSION}\` section of CHANGELOG.md."
