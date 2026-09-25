@@ -100,6 +100,16 @@ jobs:
     needs: detect-bump
     if: needs.detect-bump.outputs.publish_service == 'true'
     runs-on: ubuntu-latest
+    # GitHub-hosted (free for public repos — self-hosted ARC runners refuse
+    # public repos by design), but inside the org runner image so the job
+    # gets the same baked toolchain as arc-ubuntu, Zig included.
+    container:
+      image: ghcr.io/botresources/br-arc-runner:stable
+      # root: the image's `runner` user is in docker gid 123, the hosted VM's
+      # /var/run/docker.sock is gid 118 — as `runner`, every docker call is
+      # "permission denied". The VM is discarded after the job, so running
+      # the throwaway container as root costs nothing.
+      options: --user root
     defaults:
       run:
         shell: bash
@@ -113,10 +123,10 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
-
+      # Zig (cargo-zigbuild's linker) comes from the job container image rather
+      # than mlugg/setup-zig: that action's community-mirror download has no
+      # timeout and once held a publish job for 2h. See
+      # BotResources/infra.botresources.ai#241.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
