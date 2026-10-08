@@ -1,4 +1,4 @@
-# svc-chat
+# svc-threads
 
 Standalone generic chat service for the BotResources platform: stores
 multi-agent, multi-user conversations — threads, messages, participants. The
@@ -17,7 +17,7 @@ keepachangelog `CHANGELOG.md`, and built on the shared
 ## CI/CD
 
 CI (`.github/workflows/ci.yml`) gates pull requests; CD (`cd.yml`) owns pushes
-to `main` (image-first, tag-after: a `svc-chat/v*` tag is a receipt that the
+to `main` (image-first, tag-after: a `svc-threads/v*` tag is a receipt that the
 image shipped). While the repository is pre-scaffold, the `scaffold probe` job
 skips the Rust jobs; they arm automatically the moment a `Cargo.toml` lands.
 
