@@ -97,10 +97,10 @@ jobs:
         run: cargo test --lib
 
       - name: helm lint chart
-        run: helm lint charts/br-svc-chat
+        run: helm lint charts/br-svc-threads
 
       - name: helm template dry-run
-        run: helm template ci charts/br-svc-chat --debug > /dev/null
+        run: helm template ci charts/br-svc-threads --debug > /dev/null
 
   integration:
     name: integration (e2e)
@@ -182,7 +182,7 @@ jobs:
           fail=0
           if echo "$changed" | grep -qE '^(src/|migrations/|charts/|Cargo\.toml|Dockerfile)' \
             && ! echo "$changed" | grep -qx 'CHANGELOG.md'; then
-            echo "::error::svc-chat code changed without a CHANGELOG.md entry"
+            echo "::error::svc-threads code changed without a CHANGELOG.md entry"
             fail=1
           fi
           exit $fail

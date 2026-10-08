@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags:
-      - "svc-chat/v*"
+      - "svc-threads/v*"
   workflow_dispatch:
     inputs:
       version:
@@ -65,27 +65,27 @@ jobs:
           service_version="$(crate_version Cargo.toml)"
           publish_service=false
           case "${GITHUB_REF}" in
-            refs/tags/svc-chat/v*)
-              service_version="${GITHUB_REF#refs/tags/svc-chat/v}"
+            refs/tags/svc-threads/v*)
+              service_version="${GITHUB_REF#refs/tags/svc-threads/v}"
               publish_service=true
-              echo "Tag trigger — republishing svc-chat ${service_version}"
+              echo "Tag trigger — republishing svc-threads ${service_version}"
               ;;
             *)
               if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
                 input_version="${{ inputs.version }}"
                 [ -n "$input_version" ] && service_version="$input_version"
                 publish_service=true
-                echo "Manual dispatch — publishing svc-chat ${service_version}"
+                echo "Manual dispatch — publishing svc-threads ${service_version}"
               elif is_release "$service_version" \
-                && ! tag_exists "svc-chat/v${service_version}" \
+                && ! tag_exists "svc-threads/v${service_version}" \
                 && ! tag_exists "v${service_version}"; then
                 if grep -qE "^## ${service_version}( |$)" CHANGELOG.md; then
                   publish_service=true
                 else
-                  echo "::warning::svc-chat ${service_version} has no CHANGELOG heading — not publishing"
+                  echo "::warning::svc-threads ${service_version} has no CHANGELOG heading — not publishing"
                 fi
               else
-                echo "svc-chat ${service_version}: already released or not a release version"
+                echo "svc-threads ${service_version}: already released or not a release version"
               fi
               ;;
           esac
@@ -139,7 +139,7 @@ jobs:
         run: ./scripts/publish.sh --skip-checks
 
   tag-service:
-    name: Tag + Release svc-chat
+    name: Tag + Release svc-threads
     needs: [detect-bump, publish]
     if: needs.detect-bump.outputs.publish_service == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -154,7 +154,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.detect-bump.outputs.service_version }}
         run: |
-          tag="svc-chat/v${VERSION}"
+          tag="svc-threads/v${VERSION}"
           if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
             echo "Tag $tag already exists"
           else

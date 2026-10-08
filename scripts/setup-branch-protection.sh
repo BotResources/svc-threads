@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-REPO="BotResources/svc-chat"
+REPO="BotResources/svc-threads"
 BRANCH="main"
 
 REQUIRED_CHECKS=(
