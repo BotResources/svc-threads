@@ -4,9 +4,9 @@
 //! `THREAD_NOT_FOUND`, exactly as one that does not exist.
 
 use async_graphql::{Context, Object, Result, Subscription};
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt, future, stream};
 use service_engine::session::{WindowParams, WindowSpec};
-use service_engine::{OrInternal, Page, Query, WindowSize};
+use service_engine::{Delta, LaneNotice, OrInternal, Page, Query, WindowSize};
 use uuid::Uuid;
 
 use super::view::{MessageView, MessagesView, MessagesWindow};
@@ -93,6 +93,58 @@ impl MessageSubscription {
         )
         .await?;
         let notices = service_engine::graphql::lane_notice_stream::<ThreadsPrincipal>(ctx)?;
-        Ok(ThreadFeedDelta::subscribe(stream, notices))
+        Ok(feed(stream, notices))
+    }
+}
+
+/// What the thread's feed carries, in the order it arrives.
+enum FeedItem {
+    Delta(Delta),
+    Notice(LaneNotice),
+    /// The session ended: the engine closed it (its principal revoked or
+    /// faulted, a shutdown, its maximum age).
+    Ended,
+}
+
+/// The session's deltas merged with the lane notices, ending when the session
+/// ends.
+///
+/// ENGINE GAP (br-service-engine v0.4.1): the `subscribe` that
+/// `subscription_union!` generates merges the two through `stream::select`,
+/// which ends only once both streams end — and the lane notices never do — so a
+/// session the engine ends (a member deactivated, or out of the roster) would
+/// stay open, silent, instead of ending. This merge ends with the deltas. The
+/// engine would need its generated `subscribe` to end with the delta stream.
+fn feed(
+    deltas: impl Stream<Item = Delta> + Send + 'static,
+    notices: impl Stream<Item = LaneNotice> + Send + 'static,
+) -> impl Stream<Item = Result<ThreadFeedDelta>> {
+    let deltas = deltas
+        .map(FeedItem::Delta)
+        .chain(stream::once(future::ready(FeedItem::Ended)))
+        .boxed();
+    let notices = notices.map(FeedItem::Notice).boxed();
+    stream::select(deltas, notices)
+        .take_while(|item| future::ready(!matches!(item, FeedItem::Ended)))
+        .filter_map(|item| {
+            future::ready(match item {
+                FeedItem::Delta(delta) => Some(ThreadFeedDelta::from_delta(&delta)),
+                FeedItem::Notice(notice) => Some(Ok(ThreadFeedDelta::from_lane_notice(&notice))),
+                FeedItem::Ended => None,
+            })
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::StreamExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_feed_ends_when_the_session_ends_though_lane_notices_never_do() {
+        let merged = feed(stream::empty(), stream::pending());
+        let items: Vec<_> = merged.collect().await;
+        assert!(items.is_empty());
     }
 }

@@ -113,6 +113,22 @@ async fn store_message(
             Refusal::new(ReasonCode::KeyReused).with("message_id", command.message_id)
         ));
     }
+    // The parent is a message the command names: one nobody stored is not
+    // found; one of another thread is not a parent this message can have.
+    if let Some(parent) = command.parent_message_id {
+        match store::thread_of(cx.connection(), parent).await? {
+            None => {
+                return Ok(Err(
+                    Refusal::new(ReasonCode::MessageNotFound).with("parent_message_id", parent)
+                ));
+            }
+            Some(of) if of != thread.id => {
+                return Ok(Err(content::invalid(reason::PARENT_NOT_IN_THREAD)
+                    .with("parent_message_id", parent)));
+            }
+            Some(_) => {}
+        }
+    }
     let (author, status, blocks, items) = match &command.message {
         Incoming::User(user) => {
             if !thread.is_member(user.author_user_id) {
@@ -145,13 +161,6 @@ async fn store_message(
             }
         }
     };
-    if let Some(parent) = command.parent_message_id
-        && store::thread_of(cx.connection(), parent).await? != Some(thread.id)
-    {
-        return Ok(Err(
-            content::invalid(reason::PARENT_NOT_IN_THREAD).with("parent_message_id", parent)
-        ));
-    }
     let block_ids: Vec<Uuid> = blocks
         .iter()
         .chain(items.iter().flat_map(|item| item.blocks.iter()))

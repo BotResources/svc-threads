@@ -6,7 +6,8 @@
 //! - `store`: its row, soft EDA; it lists its blob reference, so deleting it
 //!   releases its bytes;
 //! - `lifecycle`: the upload request, attaching (by a message naming it), the
-//!   end of the upload window, removal with a message or a thread;
+//!   end of the upload window, removal with a message or a thread, and the
+//!   purge of the bytes once a removal committed;
 //! - `view`: the download's gate;
 //! - `graphql`: the roots.
 //!
@@ -64,6 +65,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
         "threads-artifact-upload-window-ended",
         lifecycle::upload_window_ended,
     )?;
+    engine.register_reaction("threads-artifact-bytes-released", lifecycle::bytes_released)?;
     engine.register_schema_slice(SliceFragment::derive::<
         graphql::ArtifactQuery,
         graphql::ArtifactMutation,

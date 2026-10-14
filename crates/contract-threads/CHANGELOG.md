@@ -36,5 +36,7 @@ exists.
     runner operations;
   - value objects: `ThreadTitle` (at most 200 characters), `SealDigest`;
   - the reason code `RESOURCE_KEY_INVALID` (proposed: a blank resource key);
+  - `message.store` names its refusals: `MESSAGE_NOT_FOUND` for a parent nobody
+    stored, `MESSAGE_INVALID` for a parent of another thread;
     statuses and kinds with a total wire mapping;
   - `br-llm-messages` v0.3.0 re-exported as `contract_threads::llm`.

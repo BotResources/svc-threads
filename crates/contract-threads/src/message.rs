@@ -37,9 +37,10 @@ macro_rules! message_command {
 /// Job.
 ///
 /// Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `KEY_REUSED` (the message id
-/// or a block id), `MESSAGE_INVALID` (content the library's rules refuse, or a
-/// parent that is not a message of the thread), `ARTIFACT_NOT_READY`,
-/// `NOT_A_MEMBER` (a user author outside the thread). No fact carries content.
+/// or a block id), `MESSAGE_NOT_FOUND` (a parent nobody stored),
+/// `MESSAGE_INVALID` (content the library's rules refuse, or a parent of
+/// another thread), `ARTIFACT_NOT_READY`, `NOT_A_MEMBER` (a user author outside
+/// the thread). No fact carries content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreMessage {
     pub message_id: Uuid,

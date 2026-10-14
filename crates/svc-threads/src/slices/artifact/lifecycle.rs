@@ -176,7 +176,8 @@ pub fn upload_window_ended<'r>(
             return Ok(());
         }
         let meta = reaction_meta(cx);
-        remove(cx, &artifact, Some((RemovalReason::NeverAttached, &meta))).await
+        remove(cx, &artifact, Some((RemovalReason::NeverAttached, &meta))).await?;
+        purge_after_commit(cx, &[artifact])
     })
 }
 
@@ -274,7 +275,7 @@ pub async fn delete_all_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(),
     for artifact in &artifacts {
         remove(ops, artifact, None).await?;
     }
-    Ok(())
+    purge_after_commit(ops, &artifacts)
 }
 
 /// Removes the artifacts of a message its author deleted.
@@ -289,7 +290,74 @@ pub async fn delete_all_of_message(
     for artifact in &artifacts {
         remove(ops, artifact, Some((RemovalReason::MessageDeleted, meta))).await?;
     }
+    purge_after_commit(ops, &artifacts)
+}
+
+// ── purging the bytes ───────────────────────────────────────────────────────
+//
+// ENGINE GAP (br-service-engine v0.4.1): deleting an artifact through the
+// pipeline releases its blob in the same transaction, but the engine's reaper
+// deletes a released blob only past its kind's orphan window — at least the
+// upload access's lifetime, 15 minutes by default — and offers no purge on
+// commit. Threads therefore schedules its own message in the deleting
+// transaction: it is published only once that transaction committed, and its
+// reaction purges the released bytes through the engine's blob reader. The
+// engine would need a released reference to be purged at commit.
+
+/// Threads' own scheduled message: blobs whose artifacts were deleted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BytesReleased {
+    pub blob_refs: Vec<Uuid>,
+}
+
+impl ReactionMessage for BytesReleased {
+    fn coordinates() -> ReactionCoordinates {
+        ReactionCoordinates::Command(contract_threads::coords::command_coords(
+            "artifact",
+            "bytes_released",
+        ))
+    }
+
+    fn decode(payload: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(payload)
+    }
+}
+
+fn purge_after_commit(ops: &mut Ops<'_>, artifacts: &[ArtifactState]) -> Result<(), Fault> {
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    let now = ops.now();
+    ops.schedule_at(
+        now,
+        BytesReleased {
+            blob_refs: artifacts.iter().map(|artifact| artifact.blob_ref).collect(),
+        },
+    )?;
     Ok(())
+}
+
+/// Purges released bytes. A reference some artifact still holds is never
+/// purged, so a forged or repeated message changes nothing.
+pub fn bytes_released<'r>(
+    cx: &'r mut Reaction<'r>,
+    message: BytesReleased,
+) -> BoxFuture<'r, Result<(), Fault>> {
+    Box::pin(async move {
+        let held: Vec<Uuid> =
+            sqlx::query_scalar("SELECT blob_ref FROM threads.artifact WHERE blob_ref = ANY($1)")
+                .bind(&message.blob_refs)
+                .fetch_all(cx.connection())
+                .await?;
+        let released: Vec<BlobRef> = message
+            .blob_refs
+            .iter()
+            .filter(|reference| !held.contains(reference))
+            .map(|reference| BlobRef(*reference))
+            .collect();
+        reader()?.purge_references(&released).await?;
+        Ok(())
+    })
 }
 
 /// The artifact itself, unlocked: its thread, for a reaction that must lock the
