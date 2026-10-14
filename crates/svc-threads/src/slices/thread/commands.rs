@@ -26,6 +26,7 @@ use crate::facts::{self, FactMeta, FactNoun};
 use crate::fault::Fault;
 use crate::principal::MEMBERSHIP_DEPS;
 use crate::slices::artifact;
+use crate::slices::message::closing;
 
 fn not_found() -> Refusal {
     Refusal::new(ReasonCode::ThreadNotFound)
@@ -68,6 +69,9 @@ async fn create_thread(
     call: &Call,
     command: &CreateThread,
 ) -> Result<Result<(), Refusal>, Fault> {
+    if let Err(refusal) = crate::command::minted("thread_id", command.thread_id) {
+        return Ok(Err(refusal));
+    }
     let exists = cx.load::<ThreadState>(&command.thread_id).await?.is_some();
     let parent = match command.parent_thread_id {
         None => ParentLookup::NotNamed,
@@ -238,7 +242,8 @@ pub fn delete<'r>(
 
 /// Deletes a loaded and locked thread with everything it holds: its running
 /// title Job is cancelled at Jobs, its artifacts deleted through their store
-/// (their bytes released), its `Deleted` fact recorded, its members entry
+/// (their bytes released), the streams of its streaming messages sealed, its
+/// `Deleted` fact recorded, its members entry
 /// retracted (the offer's dirty key, staged by the delete), its rows deleted.
 /// Its members' windows over it are repopulated.
 pub async fn delete_thread(
@@ -251,6 +256,7 @@ pub async fn delete_thread(
         title_job::publish_cancel(ops, job)?;
     }
     artifact::delete_all_of_thread(ops, thread.id).await?;
+    closing::seal_streams_of_thread(ops, thread.id).await?;
     let deleted = thread.deleted_fact(reason, meta)?;
     facts::append(
         ops.connection(),

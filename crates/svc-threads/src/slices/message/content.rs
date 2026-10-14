@@ -164,6 +164,7 @@ pub fn named_artifacts<'a>(blocks: impl IntoIterator<Item = &'a StoredBlock>) ->
 fn unique_ids<'a>(ids: impl IntoIterator<Item = &'a Uuid>) -> Result<(), Refusal> {
     let mut seen = BTreeSet::new();
     for id in ids {
+        crate::command::minted("block_id", *id)?;
         if !seen.insert(*id) {
             return Err(Refusal::new(ReasonCode::KeyReused).with("block_id", id));
         }

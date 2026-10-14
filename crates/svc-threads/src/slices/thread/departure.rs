@@ -105,10 +105,13 @@ impl CronJob for DepartedOwners {
             .bind(SWEEP_BATCH)
             .fetch_all(pg)
             .await?;
+            // One thread per transaction: the impacts of a deletion grow with
+            // its members, never with the batch. A thread that fails is left
+            // for the next sweep; the others are deleted meanwhile.
+            let mut failed = None;
             for (thread_id, owner_id) in owned {
-                // One thread per transaction: the impacts of a deletion grow
-                // with its members, never with the batch.
-                self.executor
+                if let Err(error) = self
+                    .executor
                     .run::<DeleteDepartedOwnersThread>(
                         ThreadsPrincipal::threads_itself(),
                         DeleteDepartedOwnersThread {
@@ -117,9 +120,19 @@ impl CronJob for DepartedOwners {
                         },
                     )
                     .await
-                    .map_err(|error| CronError::Job(Box::new(error)))?;
+                {
+                    tracing::warn!(
+                        %thread_id,
+                        reason = %service_engine::error::describe(&error),
+                        "a departed owner's thread could not be deleted; the next sweep retries it"
+                    );
+                    failed = Some(error);
+                }
             }
-            Ok(())
+            match failed {
+                Some(error) => Err(CronError::Job(Box::new(error))),
+                None => Ok(()),
+            }
         })
     }
 }

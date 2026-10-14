@@ -56,6 +56,7 @@ pub mod chunk_error {
     pub const BLOCK_ID_REQUIRED: &str = "block_id_required";
     pub const BLOCK_ID_NOT_ALLOWED: &str = "block_id_not_allowed";
     pub const BLOCK_ID_REUSED: &str = "block_id_reused";
+    pub const BLOCK_ID_NOT_UUIDV7: &str = "block_id_not_uuidv7";
     pub const MODEL_NOT_FIRST: &str = "model_not_first";
     pub const NOT_A_THREADS_BLOCK: &str = "not_a_threads_block";
     pub const NOT_A_TOOL_RESULTS_BLOCK: &str = "not_a_tool_results_block";
@@ -418,6 +419,18 @@ impl MessageDraft {
         });
     }
 
+    /// Claims a block id for the message; `Err` names why it cannot be.
+    fn claim(&mut self, id: Uuid) -> Result<(), &'static str> {
+        if id.get_version_num() != 7 {
+            return Err(chunk_error::BLOCK_ID_NOT_UUIDV7);
+        }
+        if self.claim_block_id(id) {
+            Ok(())
+        } else {
+            Err(chunk_error::BLOCK_ID_REUSED)
+        }
+    }
+
     fn claim_block_id(&mut self, id: Uuid) -> bool {
         if self.block_ids.contains(&id) {
             return false;
@@ -530,9 +543,7 @@ fn fold_chunk(draft: &mut MessageDraft, chunk: Chunk) -> Result<(), &'static str
             match (opens_block, block_id) {
                 (true, None) => return Err(chunk_error::BLOCK_ID_REQUIRED),
                 (false, Some(_)) => return Err(chunk_error::BLOCK_ID_NOT_ALLOWED),
-                (true, Some(id)) if !draft.claim_block_id(id) => {
-                    return Err(chunk_error::BLOCK_ID_REUSED);
-                }
+                (true, Some(id)) => draft.claim(id)?,
                 _ => {}
             }
             let DraftItem::Step(step) = &mut draft.items[index] else {
@@ -562,9 +573,7 @@ fn fold_chunk(draft: &mut MessageDraft, chunk: Chunk) -> Result<(), &'static str
             let mut results = DraftResults::default();
             let mut collected = ToolResults::empty();
             for (position, block) in blocks.iter().enumerate() {
-                if !draft.claim_block_id(block.id) {
-                    return Err(chunk_error::BLOCK_ID_REUSED);
-                }
+                draft.claim(block.id)?;
                 if block.kind().is_library() {
                     let (result, json) = tool_result_block(block)
                         .map_err(|_| chunk_error::NOT_A_TOOL_RESULTS_BLOCK)?;
@@ -605,9 +614,7 @@ fn append_threads_block(
     if Some(index) != latest {
         return Err(chunk_error::ITEM_OUT_OF_ORDER);
     }
-    if !draft.claim_block_id(block.id) {
-        return Err(chunk_error::BLOCK_ID_REUSED);
-    }
+    draft.claim(block.id)?;
     match &mut draft.items[index] {
         DraftItem::Step(step) => {
             let stored = threads_block(block, step.entries.len())

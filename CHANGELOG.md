@@ -35,7 +35,14 @@ heading exists.
     when the library can finish it, and answers every open tool call with an
     interrupted error result.
   - The stream watch: a writer silent for the idle window, or a stream the
-    library refused, has its message failed.
+    library refused, has its message failed; deleting a thread seals the
+    streams of its streaming messages.
+  - Live views: a stream's folds re-render the streaming message only
+    (`message_stream` noun) and a read mark the reader's thread only
+    (`thread_reader` noun); list and feed heads are repopulated by a thread's or
+    a message's own change. A member revoked mid-session has their feed ended.
+  - Caller-minted thread, message, block and artifact ids must be UUIDv7
+    (`ID_NOT_UUIDV7`, `ARTIFACT_ID_NOT_UUIDV7`).
   - Forks and branches: the active branch ends at the most recent message;
     any branch is read page by page; a deleted message stays in the tree
     without content; only its user author deletes it.

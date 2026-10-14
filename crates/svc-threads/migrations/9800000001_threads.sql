@@ -120,8 +120,6 @@ CREATE INDEX message_parent_idx ON threads.message (parent_message_id)
 -- A user's messages: the audience of a change of their name.
 CREATE INDEX message_author_user_idx ON threads.message (author_user_id)
     WHERE author_user_id IS NOT NULL;
--- The messages still streaming: the stream window's sweep.
-CREATE INDEX message_streaming_idx ON threads.message (created_at) WHERE status = 'STREAMING';
 
 -- The items of an AI message, in the library's order: a STEP keeps what the
 -- library gives for it (stop reason, optional usage, optional model — not read
@@ -209,7 +207,9 @@ CREATE INDEX artifact_message_idx ON threads.artifact (message_id) WHERE message
 CREATE TABLE threads.stream_watch (
     message_id   uuid        PRIMARY KEY REFERENCES threads.message (id) ON DELETE CASCADE,
     seen_through bigint      CHECK (seen_through >= 0),
-    since        timestamptz NOT NULL
+    since        timestamptz NOT NULL,
+    -- The look the watch last scheduled: only that one is acted on.
+    tick         uuid        NOT NULL
 );
 
 -- A member's read mark: the reader's own state, with no fact and no thread

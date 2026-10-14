@@ -20,6 +20,8 @@ wire_enum! {
         /// *Proposed*: a child thread names its parent without the block it was
         /// started from.
         OriginBlockRequired => "ORIGIN_BLOCK_REQUIRED",
+        /// *Proposed*: an id the caller mints that is not a UUIDv7.
+        IdNotUuidV7 => "ID_NOT_UUIDV7",
         /// *Proposed*: a resource key that is blank.
         ResourceKeyInvalid => "RESOURCE_KEY_INVALID",
         /// The thread is completed, failed or cancelled.

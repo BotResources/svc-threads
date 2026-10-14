@@ -26,15 +26,16 @@
 //! |---|---|---|---|
 //! | message row (status, deleted) | store, complete, fail, cancel, delete, stream watch | resource, `message` noun, caused | Upsert; the open head repopulates on a new message (it enters the page, the oldest leaves) |
 //! | items, blocks | store (whole), close (folded content), delete (content gone) | resource, `message` noun | Upsert |
-//! | a streaming message's content | a chunk folded on any pod (lane A) | resource, `message` noun, staged by the engine | Upsert with the content so far; `FAILED` as soon as a refused chunk folds |
+//! | a streaming message's content | a chunk folded on any pod (lane A) | resource, `message_stream` noun, staged by the engine | Upsert of that message only, with the content so far; never a repopulation |
 //! | the thread's members | add/remove members, thread deleted | principal facts of each user added or removed, `MEMBERSHIP_DEPS` | the member's windows repopulated: Upsert / Remove |
 //! | a user author's name | directory mirror | foreign `threads.known_user`, inverted to the messages they wrote | Upsert |
 //! | the caller's standing | directory mirror | principal facts, `ROSTER_DEPS`; the resolver ends the sessions of a caller no longer active | windows repopulated, or sessions ended |
 //!
-//! An open head repopulates on every change of its noun, the accumulated lane's
-//! folds included: one branch read per session and render pass while messages
-//! stream anywhere. Measured cost, not correctness; a narrower interest would
-//! need the engine to filter a repopulation by the impact.
+//! A head page is a query window whose interest is the `message` noun and the
+//! caller's membership and standing (`view::live_head`): a message's change
+//! repopulates every connected head (one branch read each) — the engine filters
+//! a repopulation by noun, not by thread — while a stream's folds re-render the
+//! streaming message alone.
 
 pub mod closing;
 pub mod commands;
@@ -55,21 +56,22 @@ use service_engine::error::EngineError;
 use service_engine::graphql::SliceFragment;
 use uuid::Uuid;
 
+use crate::literal::literal_enum;
 use crate::principal::ThreadsPrincipal;
 
 pub use state::{Message, MessageState};
 pub use view::{MessageView, MessagesView};
 
-/// What changed a message, as its delta's cause says: a small fact naming the
-/// thread, never the content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum MessageCause {
-    Stored,
-    Closed,
-    Deleted,
+literal_enum! {
+    pub enum MessageCause {
+        Stored => "STORED",
+        Closed => "CLOSED",
+        Deleted => "DELETED",
+    }
 }
 
+/// What changed a message, as its delta's cause says: a small fact naming the
+/// thread, never the content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MessageImpact {
     pub kind: MessageCause,

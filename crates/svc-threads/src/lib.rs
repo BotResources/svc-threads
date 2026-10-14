@@ -32,6 +32,7 @@ pub mod config;
 pub mod directory;
 pub mod facts;
 pub mod fault;
+mod literal;
 pub mod principal;
 pub mod register;
 pub mod scopes;

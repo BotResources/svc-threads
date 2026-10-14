@@ -12,20 +12,27 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use contract_threads::ThreadStatus;
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use service_engine::KeyCeiling;
 use service_engine::Page;
 use service_engine::error::EngineError;
 use service_engine::gate::{Affordances, Gated};
+use service_engine::impact::Dims;
 use service_engine::impact::ForeignKey;
-use service_engine::name::ProjectorName;
-use service_engine::population::{Inverse, Population};
-use service_engine::view::{Populate, Projector};
+use service_engine::name::{NounName, ProjectorName};
+use service_engine::population::{Interest, Inverse, Population, WindowQuery};
+use service_engine::projector::{LoadScope, Projector as RawProjector};
+use service_engine::session::WindowParams;
+use service_engine::view::{Populate, Projector, ViewFacts, ViewProjector};
+use service_engine::wire::Noun;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::state::{Thread, ThreadState};
 use super::store::{self, ThreadStore};
 use crate::directory::KNOWN_USER_NAMESPACE;
-use crate::principal::ThreadsPrincipal;
+use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
 
 /// A thread's status, as GraphQL shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
@@ -210,6 +217,95 @@ impl Projector for ThreadsView {
                 Ok(threads.into_iter().collect())
             })
         }))
+    }
+}
+
+/// A reader's own state on a thread — their read mark — keyed by the thread:
+/// the noun a read mark's impact names, so that it re-renders the thread where
+/// it is shown and never repopulates a list.
+pub struct ThreadReader;
+
+impl Noun for ThreadReader {
+    type Key = Uuid;
+    const NAME: NounName = NounName::from_static("thread_reader");
+}
+
+static NOUNS: [NounName; 2] = [<Thread as Noun>::NAME, <ThreadReader as Noun>::NAME];
+
+/// [`ThreadsView`] as the engine renders it live: the same view, loads and
+/// projection, rendering the thread on its reader noun too, and with a list's
+/// head page as a query window repopulated only when a thread itself or the
+/// caller's membership or standing changes.
+///
+/// An open head (`Population::Ordered`) would be repopulated by every impact on
+/// any noun the projector renders — a read mark included. Its keys are a set:
+/// the client orders the list by its threads' activity, as the query root does.
+#[derive(Default)]
+pub struct ThreadsFeed(ViewProjector<ThreadsView>);
+
+impl RawProjector for ThreadsFeed {
+    type Principal = ThreadsPrincipal;
+    type Key = Uuid;
+    type Facts = ViewFacts<ThreadsView>;
+    type View = ThreadView;
+
+    fn name(&self) -> ProjectorName {
+        ThreadsView::NAME
+    }
+
+    fn nouns(&self) -> &'static [NounName] {
+        &NOUNS
+    }
+
+    fn populate<'a>(
+        &'a self,
+        pg: &'a PgPool,
+        window: &'a WindowParams,
+        ceiling: KeyCeiling,
+        principal: &'a ThreadsPrincipal,
+    ) -> BoxFuture<'a, Result<Population<Uuid>, EngineError>> {
+        Box::pin(async move {
+            Ok(
+                match self.0.populate(pg, window, ceiling, principal).await? {
+                    Population::Ordered {
+                        keys,
+                        open_head: true,
+                    } => {
+                        let interest = Interest::new()
+                            .on_noun(<Thread as Noun>::NAME, Dims::EMPTY)
+                            .on_deps(ROSTER_DEPS.union(MEMBERSHIP_DEPS));
+                        Population::Query(
+                            WindowQuery::new(interest, Arc::new(|_, _| false)).with_keys(keys),
+                        )
+                    }
+                    other => other,
+                },
+            )
+        })
+    }
+
+    fn inverse(&self, foreign: &ForeignKey) -> Inverse<Uuid> {
+        self.0.inverse(foreign)
+    }
+
+    fn load<'a>(
+        &'a self,
+        scope: LoadScope<'a, Uuid, ThreadsPrincipal>,
+    ) -> BoxFuture<'a, Result<ViewFacts<ThreadsView>, EngineError>> {
+        self.0.load(scope)
+    }
+
+    fn project(
+        &self,
+        facts: &ViewFacts<ThreadsView>,
+        key: &Uuid,
+        principal: &ThreadsPrincipal,
+    ) -> Result<Option<ThreadView>, EngineError> {
+        self.0.project(facts, key, principal)
+    }
+
+    fn open_access_reason(&self) -> Option<&'static str> {
+        self.0.open_access_reason()
     }
 }
 

@@ -35,9 +35,13 @@ impl ThreadQuery {
         before: Option<Uuid>,
     ) -> Result<Vec<ThreadView>> {
         access::human_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        Query::<ThreadsPrincipal>::new(ctx)?
+        let mut threads = Query::<ThreadsPrincipal>::new(ctx)?
             .fetch_view_window::<ThreadsView>(&ThreadsWindow::page(Page::new(before, size)))
-            .await
+            .await?;
+        // A head page is a set of keys (see `view::ThreadsFeed`): the most
+        // recently active first.
+        threads.sort_by(|a, b| (b.last_activity_at, b.id).cmp(&(a.last_activity_at, a.id)));
+        Ok(threads)
     }
 
     /// One thread, or `null` when the caller is not a member of it — exactly as

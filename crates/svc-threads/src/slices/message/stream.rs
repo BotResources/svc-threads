@@ -17,14 +17,28 @@ use serde::{Deserialize, Serialize};
 use service_engine::accumulator::{Accumulator, ChunkSeq};
 use service_engine::name::AccumulatorName;
 
+use service_engine::name::NounName;
+use service_engine::wire::Noun;
+use uuid::Uuid;
+
 use super::draft::{self, MessageDraft};
-use super::state::Message;
 
 /// One chunk as the engine stores it: raw JSON, read with the contract by the
 /// fold.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RawChunk(pub serde_json::Value);
+
+/// The streamed content of a message, keyed by the message: the noun its
+/// folded chunks are impacts on. Apart from the `message` noun so that a fold
+/// re-renders the message where it is shown, and never repopulates a window
+/// (only a message's own change can move a branch).
+pub struct MessageStream;
+
+impl Noun for MessageStream {
+    type Key = Uuid;
+    const NAME: NounName = NounName::from_static("message_stream");
+}
 
 /// The accumulator of a message's content.
 pub struct MessageContent;
@@ -35,7 +49,7 @@ impl MessageContent {
 }
 
 impl Accumulator for MessageContent {
-    type Noun = Message;
+    type Noun = MessageStream;
     type Chunk = RawChunk;
     type State = MessageDraft;
 

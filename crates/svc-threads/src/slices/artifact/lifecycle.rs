@@ -31,6 +31,8 @@ use crate::slices::thread::store::ThreadStore;
 pub const ARTIFACT_DECLARATION_INVALID: Reason = Reason::new("ARTIFACT_DECLARATION_INVALID");
 /// A declared digest that is not 64 lowercase hexadecimal characters.
 pub const ARTIFACT_DIGEST_INVALID: Reason = Reason::new("ARTIFACT_DIGEST_INVALID");
+/// An artifact id that is not a UUIDv7.
+pub const ARTIFACT_ID_NOT_UUIDV7: Reason = Reason::new("ARTIFACT_ID_NOT_UUIDV7");
 /// A declared size above what Threads stores.
 pub const ARTIFACT_TOO_LARGE: Reason = Reason::new("ARTIFACT_TOO_LARGE");
 
@@ -77,6 +79,9 @@ pub fn request_upload<'m>(
 ) -> BoxFuture<'m, Result<OneShot<UploadUrl>, Fault>> {
     Box::pin(async move {
         access::runner_surface(cx.principal()).require()?;
+        if input.artifact_id.get_version_num() != 7 {
+            return Err(ARTIFACT_ID_NOT_UUIDV7.into());
+        }
         if input.name.trim().is_empty() || input.media_type.trim().is_empty() {
             return Err(ARTIFACT_DECLARATION_INVALID.into());
         }

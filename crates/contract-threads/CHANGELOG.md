@@ -35,7 +35,9 @@ exists.
   - `TitleJobConfig`, the configuration of the title Job and the names of the
     runner operations;
   - value objects: `ThreadTitle` (at most 200 characters), `SealDigest`;
-  - the reason code `RESOURCE_KEY_INVALID` (proposed: a blank resource key);
+  - the reason codes `RESOURCE_KEY_INVALID` (proposed: a blank resource key) and
+    `ID_NOT_UUIDV7` (proposed: a caller-minted thread, message or block id that
+    is not a UUIDv7);
   - `message.store` names its refusals: `MESSAGE_NOT_FOUND` for a parent nobody
     stored, `MESSAGE_INVALID` for a parent of another thread;
     statuses and kinds with a total wire mapping;

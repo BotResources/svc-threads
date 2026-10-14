@@ -19,6 +19,7 @@ use service_engine::{Cohort, Deps};
 use uuid::Uuid;
 
 use crate::facts::{Fact, FactMeta};
+use crate::literal::literal_enum;
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
 use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
@@ -80,15 +81,15 @@ impl ArtifactStatus {
     }
 }
 
-/// Why an artifact was removed, as its `Removed` fact says. A thread's deletion
-/// records none: the thread's `Deleted` fact covers its artifacts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum RemovalReason {
-    /// The upload window ended with no message naming it.
-    NeverAttached,
-    /// Its message was deleted.
-    MessageDeleted,
+literal_enum! {
+    /// Why an artifact was removed, as its `Removed` fact says. A thread's
+    /// deletion records none: the thread's `Deleted` fact covers its artifacts.
+    pub enum RemovalReason {
+        /// The upload window ended with no message naming it.
+        NeverAttached => "NEVER_ATTACHED",
+        /// Its message was deleted.
+        MessageDeleted => "MESSAGE_DELETED",
+    }
 }
 
 // The fact types of the noun `artifact`.

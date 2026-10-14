@@ -311,6 +311,23 @@ fn the_chunk_format_has_its_own_rules() {
         Some("turn_must_start_with_step")
     );
 
+    let mut not_v7 = Writer::default();
+    not_v7.push(
+        0,
+        ChunkPart::StepEvent {
+            event: StreamEvent::BlockStart {
+                index: 0,
+                kind: StreamKind::Text,
+            },
+            block_id: Some(Uuid::new_v4()),
+            model: None,
+        },
+    );
+    assert_eq!(
+        not_v7.draft.refusal().map(|r| r.code),
+        Some(chunk_error::BLOCK_ID_NOT_UUIDV7)
+    );
+
     let mut reused = Writer::default();
     let id = Uuid::now_v7();
     for index in 0..2 {

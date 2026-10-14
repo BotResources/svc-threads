@@ -27,7 +27,8 @@
 //! | title Job | started, ended by its runner or by Jobs, cancelled | resource, `thread` noun | none shown (no field) — re-render, no delta |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
-//! | read marks | the member's own gesture, member removal | resource, `thread` noun | Upsert to the reader (only their own mark shows); no delta to the others |
+//! | read marks | the member's own gesture | resource, `thread_reader` noun (re-render by key, no list repopulation) | Upsert to the reader (only their own mark shows); no delta to the others |
+//! | read marks | member removal | with the membership change | as members |
 //! | thread deleted | delete command, owner left the roster | resource, `thread` noun + principal facts of every member | Remove |
 //! | a member's name, standing | directory mirror | foreign `threads.known_user`, inverted to the user's threads | Upsert |
 //! | the caller's standing | directory mirror | principal facts, `ROSTER_DEPS`; the resolver ends the sessions of a caller no longer active | windows repopulated, or sessions ended |
@@ -48,34 +49,34 @@ pub mod title_job;
 pub mod transitions;
 pub mod view;
 
-use serde::Serialize;
 use service_engine::Engine;
 use service_engine::error::EngineError;
 use service_engine::graphql::SliceFragment;
 
+use crate::literal::literal_enum;
 use crate::principal::ThreadsPrincipal;
 
 pub use state::{Thread, ThreadState};
 pub use view::{ThreadView, ThreadsView};
 
-/// What changed a thread, as its delta's cause says. A small fact, never the
-/// content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ThreadCause {
-    Created,
-    MembersChanged,
-    ResourcesChanged,
-    TitleChanged,
-    TitleJobEnded,
-    Closed,
-    Deleted,
-    ReadMarkSet,
-    MessageStored,
+literal_enum! {
+    /// What changed a thread, as its delta's cause says. A small fact, never
+    /// the content.
+    pub enum ThreadCause {
+        Created => "CREATED",
+        MembersChanged => "MEMBERS_CHANGED",
+        ResourcesChanged => "RESOURCES_CHANGED",
+        TitleChanged => "TITLE_CHANGED",
+        TitleJobEnded => "TITLE_JOB_ENDED",
+        Closed => "CLOSED",
+        Deleted => "DELETED",
+        ReadMarkSet => "READ_MARK_SET",
+        MessageStored => "MESSAGE_STORED",
+    }
 }
 
 pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError> {
-    engine.register_view(ThreadsView)?;
+    engine.register_projector(view::ThreadsFeed::default())?;
     engine.register_offer::<offer::MembersOffer>()?;
 
     engine.register_reaction("threads-thread-create", commands::create)?;

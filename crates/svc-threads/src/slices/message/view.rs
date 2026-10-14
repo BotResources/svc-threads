@@ -29,10 +29,11 @@ use futures_util::future::{BoxFuture, try_join_all};
 use serde::{Deserialize, Serialize};
 use service_engine::error::EngineError;
 use service_engine::gate::{Affordances, Gated};
+use service_engine::impact::Dims;
 use service_engine::impact::ForeignKey;
 use service_engine::name::{NounName, ProjectorName};
 use service_engine::persistence::Persistence;
-use service_engine::population::{Inverse, Population};
+use service_engine::population::{Interest, Inverse, Population, WindowQuery};
 use service_engine::projector::{LoadScope, Projector};
 use service_engine::session::WindowParams;
 use service_engine::visibility::Visibility;
@@ -44,9 +45,9 @@ use uuid::Uuid;
 use super::draft::MessageDraft;
 use super::state::{ItemKind, Message, MessageAuthor, MessageState, StoredBlock, StoredItem};
 use super::store::{self, MessageStore};
-use super::stream::MessageContent;
+use super::stream::{MessageContent, MessageStream};
 use crate::directory::KNOWN_USER_NAMESPACE;
-use crate::principal::ThreadsPrincipal;
+use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
 
 /// A message's status, as GraphQL shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
@@ -210,7 +211,7 @@ pub struct MessageFacts {
     streams: BTreeMap<Uuid, MessageDraft>,
 }
 
-static NOUNS: [NounName; 1] = [<Message as Noun>::NAME];
+static NOUNS: [NounName; 2] = [<Message as Noun>::NAME, <MessageStream as Noun>::NAME];
 
 #[derive(Default)]
 pub struct MessagesView;
@@ -285,7 +286,10 @@ impl Projector for MessagesView {
                         limit,
                     )
                     .await?;
-                    Ok(page.population(keys))
+                    Ok(match page.cursor() {
+                        None => live_head(keys),
+                        Some(_) => page.population(keys),
+                    })
                 }
                 _ => Ok(Population::Keys(BTreeSet::new())),
             }
@@ -360,6 +364,22 @@ impl Projector for MessagesView {
             .filter(|message| <Message as Visibility>::visible(message, principal))
             .map(|message| Self::render(message, facts.streams.get(key), principal)))
     }
+}
+
+/// The head page of a branch, live: repopulated when a message changes (a new
+/// message enters, a fork moves the branch) or the caller's membership or
+/// standing does — never when a stream folds, which re-renders the streaming
+/// message only (`message_stream` noun, a member of the window by key).
+///
+/// An open head (`Population::Ordered`) would be repopulated by every impact on
+/// any noun the projector renders, folds included; a query window is
+/// repopulated only by the impacts its interest names. Its keys are a set: the
+/// client orders the branch by its messages' dates.
+fn live_head(keys: Vec<Uuid>) -> Population<Uuid> {
+    let interest = Interest::new()
+        .on_noun(<Message as Noun>::NAME, Dims::EMPTY)
+        .on_deps(ROSTER_DEPS.union(MEMBERSHIP_DEPS));
+    Population::Query(WindowQuery::new(interest, Arc::new(|_, _| false)).with_keys(keys))
 }
 
 fn author_view(author: &MessageAuthor) -> AuthorView {

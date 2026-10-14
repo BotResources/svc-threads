@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use super::ThreadCause;
 use super::decision;
-use super::state::{Thread, ThreadState};
+use super::state::ThreadState;
+use super::view::ThreadReader;
 use crate::access::{self, MESSAGE_NOT_FOUND};
 use crate::fault::Fault;
 use crate::principal::ThreadsPrincipal;
@@ -56,7 +57,7 @@ pub fn set_read_mark<'m>(
         }
         thread.set_read_mark(user, message.id);
         cx.save(&thread).await?;
-        cx.impact_caused::<Thread, _>(&thread.id, ThreadCause::ReadMarkSet)?;
+        cx.impact_caused::<ThreadReader, _>(&thread.id, ThreadCause::ReadMarkSet)?;
         Ok(())
     })
 }

@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::state::{Member, ThreadChange, ThreadOrigin, ThreadState};
 use crate::command::Refusal;
 use crate::facts::{Fact, FactMeta};
+use crate::literal::literal_enum;
 
 /// Whether a transition changed the thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,22 +28,22 @@ pub enum Applied {
     Unchanged,
 }
 
-/// Why a thread was deleted, as its `Deleted` fact says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum DeletionReason {
-    /// A `thread.delete` command.
-    Command,
-    /// Its owner left the roster.
-    OwnerLeftRoster,
+literal_enum! {
+    /// Why a thread was deleted, as its `Deleted` fact says.
+    pub enum DeletionReason {
+        /// A `thread.delete` command.
+        Command => "COMMAND",
+        /// Its owner left the roster.
+        OwnerLeftRoster => "OWNER_LEFT_ROSTER",
+    }
 }
 
-/// Who set a title, as its `TitleChanged` fact says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum TitleSource {
-    Command,
-    TitleJob,
+literal_enum! {
+    /// Who set a title, as its `TitleChanged` fact says.
+    pub enum TitleSource {
+        Command => "COMMAND",
+        TitleJob => "TITLE_JOB",
+    }
 }
 
 // The fact types of the noun `thread`.

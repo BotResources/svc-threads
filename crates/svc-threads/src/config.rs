@@ -67,13 +67,10 @@ impl ThreadsConfig {
     }
 
     /// How often the watch looks at a streaming message: a quarter of the idle
-    /// window, so that a silent writer is failed at most a quarter late, and at
-    /// most two seconds, so that a stream the library refused is failed (its
-    /// fact recorded, its members shown) within two seconds.
+    /// window, so that a silent writer is failed at most a quarter late — and a
+    /// stream the library refused is failed within that quarter.
     pub fn stream_watch_period(&self) -> Duration {
-        (self.stream_idle_window / 4)
-            .min(Duration::from_secs(2))
-            .max(Duration::from_millis(100))
+        (self.stream_idle_window / 4).max(Duration::from_millis(100))
     }
 }
 
@@ -94,21 +91,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_watch_looks_four_times_per_idle_window_and_every_two_seconds_at_most() {
+    fn the_watch_looks_four_times_per_idle_window() {
         let config = ThreadsConfig {
             stream_idle_window: Duration::from_secs(8),
             ..ThreadsConfig::default()
         };
         assert_eq!(config.stream_watch_period(), Duration::from_secs(2));
-        let short = ThreadsConfig {
-            stream_idle_window: Duration::from_secs(3),
-            ..ThreadsConfig::default()
-        };
-        assert_eq!(short.stream_watch_period(), Duration::from_millis(750));
         assert_eq!(
             ThreadsConfig::default().stream_watch_period(),
-            Duration::from_secs(2),
-            "a refused stream is failed within two seconds whatever the window"
+            Duration::from_secs(150)
         );
     }
 }

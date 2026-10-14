@@ -104,6 +104,7 @@ async fn store_message(
     command: &StoreMessage,
 ) -> Result<Verdict, Fault> {
     let mut thread = refuse_on!(open_thread(cx, command.thread_id).await?);
+    refuse_on!(crate::command::minted("message_id", command.message_id));
     if cx
         .load::<MessageState>(&command.message_id)
         .await?

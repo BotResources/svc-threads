@@ -72,6 +72,18 @@ impl Refusal {
     }
 }
 
+/// `ID_NOT_UUIDV7` when an id the caller mints for a new object is not a
+/// UUIDv7.
+pub fn minted(field: &str, id: Uuid) -> Result<(), Refusal> {
+    if id.get_version_num() == 7 {
+        Ok(())
+    } else {
+        Err(Refusal::new(ReasonCode::IdNotUuidV7)
+            .with("field", field)
+            .with("id", id))
+    }
+}
+
 /// What a command reaction knows of the command it answers.
 #[derive(Debug, Clone)]
 pub struct Call {
@@ -217,6 +229,14 @@ pub fn answer_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_minted_id_must_be_a_uuidv7() {
+        assert!(minted("thread_id", Uuid::now_v7()).is_ok());
+        let refused = minted("thread_id", Uuid::new_v4()).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7);
+        assert_eq!(refused.params["field"], "thread_id");
+    }
 
     #[test]
     fn a_refusal_carries_its_code_and_structured_params() {

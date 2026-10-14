@@ -13,6 +13,7 @@
 //! ([`precheck_completion`]), so that it can be refused and change nothing.
 
 use contract_threads::{BlockKind, ReasonCode};
+use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Ops;
 use uuid::Uuid;
 
@@ -20,6 +21,7 @@ use super::content::named_artifacts;
 use super::draft::{self, CloseKind, MessageDraft};
 use super::state::{Message, MessageState, StoredItem};
 use super::store;
+use super::stream::MessageContent;
 use super::watch;
 use super::{MessageCause, message_cause};
 use crate::command::{MessageOutcome, Refusal};
@@ -124,5 +126,53 @@ fn drop_artifact_blocks(items: &mut [StoredItem], artifact: Uuid) {
         for (index, block) in item.blocks.iter_mut().enumerate() {
             block.index = index as i32;
         }
+    }
+}
+
+/// Seals the stream of every message of `thread` still `STREAMING`, in the
+/// transaction that deletes the thread: its stored chunks go with the seal, and
+/// a chunk pushed after it is refused on every pod, so nothing of a deleted
+/// thread's content survives in the accumulated lane. The thread is loaded and
+/// locked by the caller; the messages go with it by cascade.
+pub async fn seal_streams_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(), Fault> {
+    let streaming: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM threads.message WHERE thread_id = $1 AND status = 'STREAMING' ORDER BY id",
+    )
+    .bind(thread)
+    .fetch_all(ops.connection())
+    .await?;
+    for message in streaming {
+        sealed_or_already(
+            ops.seal_current::<MessageContent>(&message)
+                .await
+                .map(|_| ()),
+        )?;
+    }
+    Ok(())
+}
+
+/// A stream already sealed is as sealed as it gets: a lost race, not a fault.
+fn sealed_or_already(outcome: Result<(), EngineError>) -> Result<(), Fault> {
+    match outcome {
+        Ok(()) | Err(EngineError::Accumulator(AccumulatorError::AlreadySealed { .. })) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use service_engine::name::AccumulatorName;
+
+    use super::*;
+
+    #[test]
+    fn a_stream_already_sealed_counts_as_sealed_and_any_other_error_is_a_fault() {
+        assert!(sealed_or_already(Ok(())).is_ok());
+        let already = EngineError::Accumulator(AccumulatorError::AlreadySealed {
+            accumulator: AccumulatorName::from_static("message_content"),
+            high_water: 3,
+        });
+        assert!(sealed_or_already(Err(already)).is_ok());
+        assert!(sealed_or_already(Err(EngineError::Config("down".into()))).is_err());
     }
 }
