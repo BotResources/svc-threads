@@ -30,6 +30,25 @@ pub const ENV_S3_ACCESS_KEY: &str = "S3_ACCESS_KEY";
 pub const ENV_S3_SECRET_KEY: &str = "S3_SECRET_KEY";
 pub const ENV_S3_REGION: &str = "S3_REGION";
 
+// ── Threads' own configuration (proposed by the oracle) ────────────────────
+//
+// The specification fixes three values the suite cannot wait out or must name:
+// a writer silent for 10 minutes has its message failed, a PENDING artifact is
+// removed after the upload window, and the title Job runs on "the title runner
+// type". The 0.1.0 scaffold hard-codes the first two (`STREAM_IDLE_WINDOW`,
+// `UPLOAD_WINDOW`) and names no runner type, so the oracle proposes these three
+// keys, read at `serve`, defaulting to the specified values. Real
+// configuration, like `ENGINE_BEAT_MS` — never a test seam.
+
+/// Milliseconds a writer may stay silent before its `STREAMING` message is
+/// failed (specified: 10 minutes).
+pub const ENV_STREAM_IDLE_MS: &str = "THREADS_STREAM_IDLE_MS";
+/// Milliseconds a `PENDING` artifact waits for its message before it is
+/// removed.
+pub const ENV_UPLOAD_WINDOW_MS: &str = "THREADS_UPLOAD_WINDOW_MS";
+/// The runner type of the title Job.
+pub const ENV_TITLE_RUNNER_TYPE: &str = "THREADS_TITLE_RUNNER_TYPE";
+
 pub const MIGRATE_ARG: &str = "migrate";
 pub const SERVE_ARG: &str = "serve";
 pub const SCHEMA_ARG: &str = "schema";
@@ -50,9 +69,22 @@ pub const DECLARED_SCOPES: [&str; 1] = [SCOPE_RUNNER];
 /// Named by the registry.
 pub const ACTIVE_USER_REQUIRED: &str = "ACTIVE_USER_REQUIRED";
 pub const THREAD_NOT_FOUND: &str = "THREAD_NOT_FOUND";
+pub const MESSAGE_NOT_FOUND: &str = "MESSAGE_NOT_FOUND";
+pub const KEY_REUSED: &str = "KEY_REUSED";
+pub const TITLE_TOO_LONG: &str = "TITLE_TOO_LONG";
 /// Not named by the registry (it describes the refusal): the scaffold's, to
 /// ratify.
 pub const RUNNER_SCOPE_REQUIRED: &str = "RUNNER_SCOPE_REQUIRED";
+/// Not named by the functional specification ("accepted only for that
+/// thread's active title Job"): the draft registry tests' (T12), to ratify.
+pub const JOB_NOT_ACTIVE: &str = "JOB_NOT_ACTIVE";
+
+/// The title runner type this suite configures ([`ENV_TITLE_RUNNER_TYPE`]).
+pub const TITLE_RUNNER_TYPE: &str = "thread-title-e2e";
+/// The stream window this suite configures ([`ENV_STREAM_IDLE_MS`]).
+pub const STREAM_IDLE_WINDOW: Duration = Duration::from_secs(3);
+/// The upload window this suite configures ([`ENV_UPLOAD_WINDOW_MS`]).
+pub const UPLOAD_WINDOW: Duration = Duration::from_secs(4);
 
 // ── GraphQL documents ───────────────────────────────────────────────────────
 
@@ -75,11 +107,45 @@ pub const Q_MESSAGES: &str = "query($thread: UUID!, $size: Int!, $before: UUID, 
 pub const Q_CONTEXT: &str = "query($thread: UUID!) { threadsContext(threadId: $thread) { \
     threadId conversation members { userId displayName } resources { key ids } } }";
 
+/// The context, whole (`ai` null) or lightened for the AI named.
+pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $ai: AiPerspective) { \
+    threadsContext(threadId: $thread, ai: $ai) { \
+    threadId conversation members { userId displayName } resources { key ids } } }";
+
+pub const Q_ARTIFACT_DOWNLOAD: &str = "query($thread: UUID!, $artifact: UUID!) { \
+    threadsArtifactDownload(threadId: $thread, artifactId: $artifact) }";
+
+pub const M_SET_READ_MARK: &str = "mutation($thread: UUID!, $message: UUID!) { \
+    threadsSetReadMark(threadId: $thread, messageId: $message) { success } }";
+
+pub const M_REQUEST_UPLOAD: &str = "mutation($thread: UUID!, $artifact: UUID!, $name: String!, \
+    $mediaType: String!, $size: Int!, $sha256: String!) { \
+    threadsRequestArtifactUpload(threadId: $thread, artifactId: $artifact, name: $name, \
+    mediaType: $mediaType, size: $size, sha256: $sha256) { url fields } }";
+
+pub const M_SET_TITLE: &str = "mutation($thread: UUID!, $job: UUID!, $title: String!) { \
+    threadsSetTitle(threadId: $thread, jobId: $job, title: $title) { success } }";
+
+pub const M_FAIL_TITLE_JOB: &str = "mutation($thread: UUID!, $job: UUID!, $reason: String!, \
+    $message: String) { threadsFailTitleJob(threadId: $thread, jobId: $job, \
+    reasonCode: $reason, message: $message) { success } }";
+
 pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(size: $size) { \
     __typename \
     ... on ThreadsReset { revision views { ... on ThreadView { id title version } } } \
     ... on ThreadsUpsert { revision view { ... on ThreadView { id title version } } } \
     ... on ThreadsRemove { revision key } } }";
+
+/// The fields of a message the suite reads, on every channel.
+pub const MESSAGE_FIELDS: &str = "id threadId parentMessageId jobId status deleted createdAt \
+    version affordances author { kind userId aiId name } \
+    blocks { id index kind content } \
+    items { index kind status stopReason usage model blocks { id index kind content } }";
+
+/// The fields of a thread the suite reads on its live channels.
+pub const THREAD_FIELDS: &str = "id ownerId title parentThreadId originBlockId status \
+    lastActivityAt version readMark affordances members { userId displayName inRoster } \
+    resources { key ids }";
 
 // ── timeouts ────────────────────────────────────────────────────────────────
 

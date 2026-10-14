@@ -51,8 +51,19 @@ br-core-auth = { workspace = true, features = ["test-support"] }
 br-core-scope.workspace = true
 br-scope-declaration-contract.workspace = true
 br-util-nats-fabric.workspace = true
+# The directory consumer kit: Threads mirrors Identity's `identity/users/`.
+conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-directory", tag = "v1.2.1", version = "1.2.1" }
+# Jobs' published language — the title Job's commands Threads sends Jobs and the
+# facts the suite, playing Jobs, answers with — decoded and built through the
+# real types. Its tag pins the same br-rust-common v1.3.0.
+contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.0", version = "0.5.0", features = [
+    "integration",
+] }
 dotenvy = "0.15"
-# The kubelet's half of readiness (`GET /readyz`) and the object store's POST:
-# the harness GraphQL client answers JSON envelopes only.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The kubelet's half of readiness (`GET /readyz`), the object store's POST (a
+# multipart form carrying the presigned fields, the file last) and the GET of
+# a read access: the harness GraphQL client answers JSON envelopes only.
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rusty-s3 = "0.10"
+# The digest a runner declares for its artifact, computed independently.
+sha2.workspace = true
