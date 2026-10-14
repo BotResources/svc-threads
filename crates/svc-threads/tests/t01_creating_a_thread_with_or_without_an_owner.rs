@@ -147,21 +147,9 @@ async fn t01_a_thread_is_created_with_or_without_an_owner_each_command_answered_
     let kv_before = ctx.members_entry(t).await.expect("T's entry").1;
     common::flows::redeliver(&ctx, first_command, &first).await;
 
-    // Then the same confirmation is published again, and nothing changes: no
-    // fact, no version, no rewrite of the members entry.
-    common::eventually(
-        "the replay re-publishes the answer",
-        common::PUSH_TIMEOUT,
-        || async { ctx.answers.for_command(first_command).len() >= 2 },
-    )
-    .await;
-    tokio::time::sleep(common::QUIET_WINDOW).await;
-    let answers = ctx.answers.for_command(first_command);
-    assert_eq!(answers.len(), 2, "one answer per delivery: {answers:?}");
-    assert_eq!(
-        answers[0], answers[1],
-        "the replay re-publishes the same answer"
-    );
+    // Then nothing changes — no fact, no version, no rewrite of the members
+    // entry — and no second distinct answer is published.
+    common::flows::replayed_alike(&ctx, first_command, "the redelivered creation").await;
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
     assert_eq!(version(&ctx, &a.passport, t).await, 1);
     let kv_after = ctx.members_entry(t).await.expect("T's entry").1;

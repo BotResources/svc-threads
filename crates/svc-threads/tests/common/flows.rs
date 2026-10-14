@@ -128,6 +128,20 @@ pub async fn answered_once(ctx: &TestContext, command_id: Uuid, what: &str) {
     );
 }
 
+/// After a redelivery of `command_id`, held over the quiet window: no second
+/// distinct answer. The replayed answer may never arrive (it is re-published
+/// under its first message id, which the broker deduplicates); any that does
+/// is identical to the first.
+pub async fn replayed_alike(ctx: &TestContext, command_id: Uuid, what: &str) {
+    tokio::time::sleep(QUIET_WINDOW).await;
+    let answers = ctx.answers.for_command(command_id);
+    assert!(!answers.is_empty(), "{what}: the command was answered");
+    assert!(
+        answers.iter().all(|answer| *answer == answers[0]),
+        "{what}: a redelivery answers alike, never anew: {answers:?}"
+    );
+}
+
 // ── threads ─────────────────────────────────────────────────────────────────
 
 /// A creation under a fresh UUIDv7.
