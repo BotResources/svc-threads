@@ -61,7 +61,7 @@ impl MessageQuery {
             .await?;
         // A head page is a set of keys (see `view::live_head`); a branch is
         // ordered by its messages' dates, a child always after its parent.
-        messages.sort_by(|a, b| (b.created_at, b.id).cmp(&(a.created_at, a.id)));
+        messages.sort_by_key(|message| std::cmp::Reverse((message.created_at, message.id)));
         Ok(messages)
     }
 }

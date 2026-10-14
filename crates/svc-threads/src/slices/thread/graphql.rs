@@ -40,7 +40,7 @@ impl ThreadQuery {
             .await?;
         // A head page is a set of keys (see `view::ThreadsFeed`): the most
         // recently active first.
-        threads.sort_by(|a, b| (b.last_activity_at, b.id).cmp(&(a.last_activity_at, a.id)));
+        threads.sort_by_key(|thread| std::cmp::Reverse((thread.last_activity_at, thread.id)));
         Ok(threads)
     }
 
