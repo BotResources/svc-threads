@@ -83,6 +83,14 @@ pub enum Handshake {
     Withhold,
 }
 
+/// The windows a scenario shortens to wait them out; `None` leaves the
+/// service on its specified default.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Windows {
+    pub stream_idle: Option<Duration>,
+    pub upload: Option<Duration>,
+}
+
 /// A person of the scenario: the roster entry Identity published for them, and
 /// the Passport they call with.
 #[derive(Clone)]
@@ -138,6 +146,12 @@ pub struct TestContext {
     pods: Vec<SpawnedProcess>,
     /// How many processes this context spawned: each one's `HOSTNAME`.
     pod: u32,
+    windows: Windows,
+    /// Every command a scenario sent through [`flows::command`], and those it
+    /// delivered again on purpose: at teardown, each sent command was answered
+    /// exactly once, each redelivered one alike every time.
+    pub(crate) sent: std::sync::Mutex<Vec<Uuid>>,
+    pub(crate) redelivered: std::sync::Mutex<Vec<Uuid>>,
 }
 
 /// Another pod of the same deployment: its own process and port, the same
@@ -159,7 +173,16 @@ impl TestContext {
         Self::boot(Handshake::Accept).await
     }
 
+    /// The nominal boot, with the windows a scenario waits out shortened.
+    pub async fn setup_with(windows: Windows) -> Self {
+        Self::boot_with(Handshake::Accept, windows).await
+    }
+
     pub async fn boot(handshake: Handshake) -> Self {
+        Self::boot_with(handshake, Windows::default()).await
+    }
+
+    pub async fn boot_with(handshake: Handshake, windows: Windows) -> Self {
         let _ = dotenvy::dotenv();
 
         let suffix = Uuid::now_v7().simple().to_string();
@@ -223,13 +246,16 @@ impl TestContext {
             service: None,
             pods: Vec::new(),
             pod: 0,
+            windows,
+            sent: std::sync::Mutex::new(Vec::new()),
+            redelivered: std::sync::Mutex::new(Vec::new()),
         };
         ctx.spawn(handshake).await;
         ctx
     }
 
     fn service_env(&self, port: u16) -> Vec<(&'static str, String)> {
-        vec![
+        let mut env = vec![
             (ENV_DATABASE_URL, self.db.app_url()),
             (ENV_APP_ROLE, APP_ROLE.to_string()),
             (ENV_NATS_URL, self.nats.url()),
@@ -245,13 +271,15 @@ impl TestContext {
             (ENV_S3_ACCESS_KEY, self.minio.access_key().to_string()),
             (ENV_S3_SECRET_KEY, self.minio.secret_key().to_string()),
             (ENV_S3_REGION, infra::S3_REGION.to_string()),
-            (
-                ENV_STREAM_IDLE_MS,
-                STREAM_IDLE_WINDOW.as_millis().to_string(),
-            ),
-            (ENV_UPLOAD_WINDOW_MS, UPLOAD_WINDOW.as_millis().to_string()),
             (ENV_TITLE_RUNNER_TYPE, TITLE_RUNNER_TYPE.to_string()),
-        ]
+        ];
+        if let Some(idle) = self.windows.stream_idle {
+            env.push((ENV_STREAM_IDLE_MS, idle.as_millis().to_string()));
+        }
+        if let Some(upload) = self.windows.upload {
+            env.push((ENV_UPLOAD_WINDOW_MS, upload.as_millis().to_string()));
+        }
+        env
     }
 
     /// Spawn `serve` against this context's infra as its first pod; with
@@ -351,6 +379,7 @@ impl TestContext {
     }
 
     pub async fn teardown(mut self) {
+        self.assert_each_command_answered_once().await;
         self.stop().await;
         for pod in self.pods.drain(..) {
             pod.shutdown().await;
@@ -379,6 +408,29 @@ impl TestContext {
             ));
         }
         logs
+    }
+
+    /// Every command sent through [`flows::command`] was answered exactly
+    /// once — two pods consuming one command would answer it twice — and every
+    /// command delivered again was answered alike each time.
+    async fn assert_each_command_answered_once(&self) {
+        tokio::time::sleep(QUIET_WINDOW).await;
+        let redelivered = self.redelivered.lock().expect("the ledger").clone();
+        for command in self.sent.lock().expect("the ledger").iter() {
+            let answers = self.answers.for_command(*command);
+            if redelivered.contains(command) {
+                assert!(
+                    answers.windows(2).all(|pair| pair[0] == pair[1]),
+                    "a redelivered command is answered alike every time: {answers:?}"
+                );
+            } else {
+                assert_eq!(
+                    answers.len(),
+                    1,
+                    "command {command} is answered exactly once: {answers:?}"
+                );
+            }
+        }
     }
 
     /// The first pod's readiness endpoint, for the conformance battery.

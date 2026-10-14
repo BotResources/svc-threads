@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::commands::{Answer, commanding_service, send};
+use super::commands::{Answer, commanding_service, send, send_as};
 use super::{
     PUSH_TIMEOUT, Person, Q_CONTEXT_FOR, Q_MESSAGES, Q_THREAD, Q_THREADS, QUIET_WINDOW,
     TestContext, eventually, gql,
@@ -25,9 +25,22 @@ use super::{
 
 // ── commands and their one answer ───────────────────────────────────────────
 
-/// Sends `command` as the commanding service; answers its id.
+/// Sends `command` as the commanding service; answers its id. The id is
+/// entered in the ledger the teardown checks: one answer per command.
 pub async fn command<C: ThreadsCommand + Serialize>(ctx: &TestContext, command: &C) -> Uuid {
-    send(&ctx.nats, commanding_service(), command).await
+    let command_id = send(&ctx.nats, commanding_service(), command).await;
+    ctx.sent.lock().expect("the ledger").push(command_id);
+    command_id
+}
+
+/// The bus delivers `command` again under its own id.
+pub async fn redeliver<C: ThreadsCommand + Serialize>(
+    ctx: &TestContext,
+    command_id: Uuid,
+    command: &C,
+) {
+    ctx.redelivered.lock().expect("the ledger").push(command_id);
+    send_as(&ctx.nats, commanding_service(), command_id, command).await;
 }
 
 pub async fn thread_confirmed(
@@ -144,6 +157,43 @@ pub async fn create(ctx: &TestContext, creation: CreateThread) -> Uuid {
     thread_confirmed(ctx, command_id, "the creation").await;
     await_members(ctx, thread, "the creation's members entry").await;
     thread
+}
+
+/// Waits until `threads.members.{thread}` lists exactly `users` (and
+/// `owner`): the entry leaves by its own relay, not with the confirmation.
+pub async fn await_members_equal(
+    ctx: &TestContext,
+    thread: Uuid,
+    owner: Option<Uuid>,
+    users: &[Uuid],
+    what: &str,
+) {
+    let expected = sorted(users);
+    let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
+    loop {
+        let entry = ctx.published_members(thread).await;
+        if entry
+            .as_ref()
+            .is_some_and(|entry| entry.owner_id == owner && sorted(&entry.users) == expected)
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{what}: threads.members.{thread} never listed {owner:?} / {expected:?}; last {entry:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// The members entry's revision once the quiet window has passed: a
+/// comparison of two such revisions proves no rewrite was in flight.
+pub async fn settled_revision(ctx: &TestContext, thread: Uuid) -> br_util_nats_fabric::Revision {
+    tokio::time::sleep(QUIET_WINDOW).await;
+    ctx.members_entry(thread)
+        .await
+        .unwrap_or_else(|| panic!("threads.members.{thread} is published"))
+        .1
 }
 
 /// Waits until `threads.members.{thread}` is published, and answers it.
@@ -456,6 +506,29 @@ pub async fn version(ctx: &TestContext, passport: &Passport, thread: Uuid) -> i6
     thread_view(ctx, passport, thread).await["version"]
         .as_i64()
         .unwrap_or_else(|| panic!("thread {thread} has a version"))
+}
+
+/// `text` with every UUID it holds replaced by `<uuid>`: two payloads of the
+/// same shape then compare on what is not an identity.
+pub fn mask_uuids(text: &str) -> String {
+    const LEN: usize = 36;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let candidate = rest.get(..LEN);
+        if let Some(candidate) = candidate
+            && candidate.as_bytes()[8] == b'-'
+            && Uuid::parse_str(candidate).is_ok()
+        {
+            out.push_str("<uuid>");
+            rest = &rest[LEN..];
+        } else {
+            let next = rest.chars().next().expect("not empty");
+            out.push(next);
+            rest = &rest[next.len_utf8()..];
+        }
+    }
+    out
 }
 
 pub fn uuid_of(value: &Value) -> Uuid {

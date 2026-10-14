@@ -81,10 +81,13 @@ pub const JOB_NOT_ACTIVE: &str = "JOB_NOT_ACTIVE";
 
 /// The title runner type this suite configures ([`ENV_TITLE_RUNNER_TYPE`]).
 pub const TITLE_RUNNER_TYPE: &str = "thread-title-e2e";
-/// The stream window this suite configures ([`ENV_STREAM_IDLE_MS`]).
-pub const STREAM_IDLE_WINDOW: Duration = Duration::from_secs(3);
-/// The upload window this suite configures ([`ENV_UPLOAD_WINDOW_MS`]).
-pub const UPLOAD_WINDOW: Duration = Duration::from_secs(4);
+/// The stream window a scenario that waits it out configures
+/// ([`ENV_STREAM_IDLE_MS`]); every other scenario runs on the service's own
+/// default, the specified 10 minutes.
+pub const SHORT_STREAM_IDLE: Duration = Duration::from_secs(4);
+/// The upload window a scenario that waits it out configures
+/// ([`ENV_UPLOAD_WINDOW_MS`]); every other scenario runs on the default.
+pub const SHORT_UPLOAD_WINDOW: Duration = Duration::from_secs(4);
 
 // ── GraphQL documents ───────────────────────────────────────────────────────
 

@@ -21,8 +21,9 @@ mod common;
 
 use std::collections::BTreeMap;
 
+use br_core_integration::{Actor, UserId};
 use br_util_nats_fabric::KvKey;
-use common::commands::{commanding_service, send_as};
+use common::commands::{Answer, commanding_service, send};
 use common::facts;
 use common::feed::{Live, upsert_of, views};
 use common::flows::{
@@ -144,7 +145,7 @@ async fn t01_a_thread_is_created_with_or_without_an_owner_each_command_answered_
     // When the bus redelivers the first command, under its own envelope id.
     let facts_before = facts::count(&ctx.pool).await;
     let kv_before = ctx.members_entry(t).await.expect("T's entry").1;
-    send_as(&ctx.nats, commanding_service(), first_command, &first).await;
+    common::flows::redeliver(&ctx, first_command, &first).await;
 
     // Then the same confirmation is published again, and nothing changes: no
     // fact, no version, no rewrite of the members entry.
@@ -178,6 +179,32 @@ async fn t01_a_thread_is_created_with_or_without_an_owner_each_command_answered_
         Value::String(o.id.to_string())
     );
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
+
+    // When a person — not a service account — sends a creation on the bus.
+    let by_hand = creation(Some(a.id), &[]);
+    let by_hand_thread = by_hand.thread_id;
+    let by_hand_command = send(&ctx.nats, Actor::Human(UserId::from(a.id)), &by_hand).await;
+
+    // Then it is never confirmed and creates nothing: commands are accepted
+    // from service accounts only.
+    tokio::time::sleep(common::QUIET_WINDOW).await;
+    assert!(
+        ctx.answers
+            .for_command(by_hand_command)
+            .iter()
+            .all(|answer| !matches!(answer, Answer::ThreadConfirmed(_))),
+        "a person's command is never confirmed"
+    );
+    assert_eq!(
+        thread_view(&ctx, &a.passport, by_hand_thread).await,
+        Value::Null
+    );
+    assert!(ctx.published_members(by_hand_thread).await.is_none());
+    assert!(
+        facts::of(&ctx.pool, "thread", by_hand_thread)
+            .await
+            .is_empty()
+    );
 
     // When creations name a user absent from the roster, or one the roster
     // marks out — as owner, or as member.

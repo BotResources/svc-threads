@@ -29,8 +29,8 @@ use common::content::{ai_text, artifact_block, step};
 use common::facts;
 use common::feed::{Live, removes};
 use common::flows::{
-    ai, answer, command, create_thread, member_ids, message_view, say, sorted, thread_confirmed,
-    thread_refused, thread_view,
+    ai, answer, command, create_thread, mask_uuids, member_ids, message_view, say, sorted,
+    thread_confirmed, thread_refused, thread_view,
 };
 use common::{
     ACTIVE_USER_REQUIRED, Handshake, M_SET_READ_MARK, Q_THREADS, TestContext, gql, identity,
@@ -38,14 +38,6 @@ use common::{
 use contract_threads::llm::StopReason;
 use contract_threads::{AddMembers, DeleteThread, ReasonCode};
 use serde_json::{Value, json};
-use uuid::Uuid;
-
-/// A Deleted fact's payload with every id of `ids` blanked.
-fn blanked(payload: &Value, ids: &[Uuid]) -> String {
-    ids.iter().fold(payload.to_string(), |text, id| {
-        text.replace(&id.to_string(), "<id>")
-    })
-}
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
@@ -100,9 +92,23 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     );
     let o_on_t2 = say(&ctx, t2, None, &o, "on the shared thread").await;
     let mut a_list = Live::list(&ctx, &a.passport).await;
+    let mut o_feed_sse = Live::thread(&ctx, &o.passport, t2).await;
+    let mut o_feed_ws = Live::thread_ws(&ctx, &o.passport, t2).await;
 
     // When Identity deactivates O.
     ctx.deactivate(&o).await;
+
+    // Then (3) O's open live views of T2, over both transports, are revoked —
+    // T2 removed, or the stream ended — and nothing of T2 reaches O after.
+    for (feed, transport) in [(&mut o_feed_sse, "SSE"), (&mut o_feed_ws, "WS")] {
+        feed.until_revoked(&format!("O loses T2 over {transport}"), t2)
+            .await;
+    }
+    say(&ctx, t2, Some(o_on_t2), &a, "while O is away").await;
+    for (feed, transport) in [(&mut o_feed_sse, "SSE"), (&mut o_feed_ws, "WS")] {
+        feed.silent_or_ended(&format!("a deactivated member's {transport} view"))
+            .await;
+    }
 
     // Then O is refused everything…
     gql::assert_refused(
@@ -190,31 +196,53 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     // Then refused USER_UNKNOWN.
     thread_refused(&ctx, naming_o, ReasonCode::UserUnknown, "naming O").await;
 
-    // And T1's Deleted fact tells a departure apart from a deletion on
-    // command, and was not sent by the commanding service.
-    let by_command = create_thread(&ctx, Some(&a), &[]).await;
+    // And T1's Deleted fact was not sent by the commanding service.
+    let departure = facts::of(&ctx.pool, "thread", t1).await;
+    assert_ne!(
+        facts::the(&departure, "Deleted").actor_id,
+        common::commands::commanding_service().id()
+    );
+
+    // Given two threads of the same shape — an owner and one member, nothing
+    // else: TQ owned by Q, TC owned by P.
+    let q = ctx.enrol("quin").await;
+    let tq = create_thread(&ctx, Some(&q), &[&p]).await;
+    let tc = create_thread(&ctx, Some(&p), &[&q]).await;
+
+    // When TC is deleted on command and Q, TQ's owner, leaves the roster.
     let deleted = command(
         &ctx,
         &DeleteThread {
-            thread_id: by_command,
-            acting_user_id: Some(a.id),
+            thread_id: tc,
+            acting_user_id: Some(p.id),
         },
     )
     .await;
     thread_confirmed(&ctx, deleted, "a deletion on command").await;
-    let departure = facts::of(&ctx.pool, "thread", t1).await;
-    let departure = facts::the(&departure, "Deleted");
-    let on_command = facts::of(&ctx.pool, "thread", by_command).await;
+    ctx.retract(&q).await;
+    common::eventually("TQ is deleted", common::PUSH_TIMEOUT, || async {
+        ctx.published_members(tq).await.is_none()
+    })
+    .await;
+
+    // Then the two Deleted facts, every id masked, still differ: each says why
+    // the thread was deleted, in a field of its own.
+    let on_command = facts::of(&ctx.pool, "thread", tc).await;
     let on_command = facts::the(&on_command, "Deleted");
+    let on_departure = facts::of(&ctx.pool, "thread", tq).await;
+    let on_departure = facts::the(&on_departure, "Deleted");
     assert_ne!(
-        blanked(&departure.payload, &[t1, o.id]),
-        blanked(&on_command.payload, &[by_command, a.id]),
+        mask_uuids(&on_command.payload.to_string()),
+        mask_uuids(&on_departure.payload.to_string()),
         "the Deleted fact says why the thread was deleted"
     );
-    assert_ne!(
-        departure.actor_id,
-        common::commands::commanding_service().id()
-    );
+    let reason = |payload: &Value| {
+        payload["reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a Deleted fact names its reason: {payload}"))
+            .to_string()
+    };
+    assert_ne!(reason(&on_command.payload), reason(&on_departure.payload));
 
     // When Identity writes O's entry back.
     identity::publish_user(&ctx.nats, o.id, &identity::roster_entry("olga", None)).await;

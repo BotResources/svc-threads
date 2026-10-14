@@ -16,6 +16,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::content::answer as text_answer;
+use common::feed::{Live, removes, upsert_of};
 use common::flows::{
     active_branch, ai, answer, branch, branch_answer, context, conversation_of, create_thread, say,
     uuid_of,
@@ -44,6 +45,8 @@ async fn t10_the_active_branch_ends_at_the_most_recent_message_and_every_branch_
     let m3 = say(&ctx, t, Some(m2), &a, "follow-up").await;
     assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1, m2, m3]);
 
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
+
     // When M2 is regenerated as M2b (same parent M1), and M3b answers M2b.
     let m2b = answer(
         &ctx,
@@ -53,6 +56,15 @@ async fn t10_the_active_branch_ends_at_the_most_recent_message_and_every_branch_
         text_answer("better answer"),
     )
     .await;
+    // (3) A's live view switches branch: M2b enters, M2 and M3 — now off the
+    // active branch — leave it.
+    a_feed
+        .collect_until("A's view switches to M2b's branch", |seen| {
+            seen.iter().any(|delta| upsert_of(delta, m2b).is_some())
+                && seen.iter().any(|delta| removes(delta, m2))
+                && seen.iter().any(|delta| removes(delta, m3))
+        })
+        .await;
     let m3b = say(&ctx, t, Some(m2b), &a, "follow-up, again").await;
 
     // Then the active branch is M1, M2b, M3b.

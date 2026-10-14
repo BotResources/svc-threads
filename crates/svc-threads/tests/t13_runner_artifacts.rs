@@ -18,8 +18,9 @@
 //! removal of an attached artifact with its bytes is asserted where it is
 //! reachable, at the thread's deletion (T17); the gap is the operator's.
 //!
-//! The upload window is configured short for the suite
-//! (`THREADS_UPLOAD_WINDOW_MS`, see `common::constants`).
+//! The upload window is configured short for the one scenario that waits it
+//! out (`THREADS_UPLOAD_WINDOW_MS`, see `common::constants`); the main one runs
+//! on the service's default.
 //!
 //! Channels: the runner operation's verdict and access (1); the object store's
 //! own refusal; the answers (4); the read access as members and strangers get
@@ -37,7 +38,8 @@ use common::flows::{
     ai, ai_message, command, create_thread, message_confirmed, message_refused, say,
 };
 use common::{
-    KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, TestContext, UPLOAD_WINDOW, eventually, gql,
+    KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
+    eventually, gql,
 };
 use contract_threads::llm::StopReason;
 use contract_threads::{MessageStatus, ReasonCode, StoreMessage};
@@ -145,6 +147,13 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
         blank(download_answer(&ctx, &u.passport, t, random).await, random)
     );
     assert_eq!(download_url(&ctx, &u.passport, t, x).await, None);
+    // And A, a member of T2 too, reaching X through T2 is answered exactly as
+    // for an artifact nobody created.
+    assert_eq!(
+        blank(download_answer(&ctx, &a.passport, t2, x).await, x),
+        blank(download_answer(&ctx, &a.passport, t2, random).await, random)
+    );
+    assert_eq!(download_url(&ctx, &a.passport, t2, x).await, None);
 
     // When a message of T2 names X.
     let foreign = command(&ctx, &naming(t2, m1_t2, x)).await;
@@ -171,12 +180,35 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
         gql::assert_refused(&refused, RUNNER_SCOPE_REQUIRED);
     }
 
-    // Given Y, uploaded for T and never attached.
+    ctx.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t13_an_upload_never_attached_is_removed_after_the_upload_window() {
+    // Given Threads running with a short upload window; T with member A; X,
+    // uploaded and attached at once; Y, uploaded and never attached.
+    let ctx = TestContext::setup_with(Windows {
+        upload: Some(SHORT_UPLOAD_WINDOW),
+        ..Windows::default()
+    })
+    .await;
+    let a = ctx.enrol("ada").await;
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let m1 = say(&ctx, t, None, &a, "Send me both").await;
+    let runner = ctx.service_account(true);
+    let file = File::csv("kept\n");
+    let x = upload(&ctx, &runner.passport, t, &file).await;
+    let stored = command(&ctx, &naming(t, m1, x)).await;
+    message_confirmed(&ctx, stored, MessageStatus::Completed, "attaching X").await;
+    let url = download_url(&ctx, &a.passport, t, x)
+        .await
+        .expect("a member reads X");
     let y = upload(&ctx, &runner.passport, t, &File::csv("orphan\n")).await;
     let objects = object_count(&ctx).await;
 
     // When the upload window elapses.
-    tokio::time::sleep(UPLOAD_WINDOW).await;
+    tokio::time::sleep(SHORT_UPLOAD_WINDOW).await;
 
     // Then Y is removed, with its bytes.
     eventually("Y is removed after the window", PUSH_TIMEOUT, || async {
@@ -188,8 +220,7 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     })
     .await;
     // And a message naming Y is refused ARTIFACT_NOT_READY.
-    let m3 = say(&ctx, t, Some(m2), &a, "and the other one?").await;
-    let late = command(&ctx, &naming(t, m3, y)).await;
+    let late = command(&ctx, &naming(t, m1, y)).await;
     message_refused(
         &ctx,
         late,
@@ -199,6 +230,7 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     .await;
     // And X, attached, is untouched by the window.
     assert_eq!(fetch(&url).await, (200, file.bytes));
+    assert!(!facts::types(&facts::of(&ctx.pool, "artifact", x).await).contains(&"Removed"));
 
     ctx.teardown().await;
 }

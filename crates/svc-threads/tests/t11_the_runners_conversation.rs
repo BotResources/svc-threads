@@ -25,7 +25,10 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::artifacts::{File, upload};
-use common::content::{ai_text, artifact_block, step, text_step, thinking, user_text};
+use common::content::{
+    ai_text, artifact_block, citation_block, redacted_thinking, step, text_step, thinking,
+    user_text, warning_block,
+};
 use common::flows::{
     ai, answer, command, context, context_answer, conversation_of, create, creation,
     message_confirmed, open_stream, resources_of, say, store, user_message,
@@ -34,7 +37,7 @@ use common::{RUNNER_SCOPE_REQUIRED, TestContext, gql, identity, stream};
 use contract_threads::llm::{
     AssistantBlock, Entry, Perspective, StopReason, Text, Thinking, UserBlock, lighten, render,
 };
-use contract_threads::{CancelMessage, DeleteMessage, FailMessage, MessageStatus};
+use contract_threads::{CancelMessage, DeleteMessage, FailMessage, MessageStatus, StreamSeal};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -55,6 +58,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     let (analyst, critic) = (ai("a1", "Analyst"), ai("a2", "Critic"));
     const THOUGHT: &str = "  let me think\n\twith whitespace ";
     const SIGNATURE: &str = "c2lnPT0=";
+    const REDACTED: &str = "ZW5jcnlwdGVkIHRoaW5raW5n";
 
     // M1, A's question;
     let m1 = say(&ctx, t, None, &a, "Hello team").await;
@@ -67,7 +71,11 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         vec![step(
             StopReason::EndTurn,
             Some("m-1"),
-            vec![thinking(THOUGHT, SIGNATURE), ai_text("Analysis")],
+            vec![
+                thinking(THOUGHT, SIGNATURE),
+                redacted_thinking(REDACTED),
+                ai_text("Analysis"),
+            ],
         )],
     )
     .await;
@@ -82,7 +90,12 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         vec![step(
             StopReason::EndTurn,
             None,
-            vec![ai_text("Critique"), artifact_block(x)],
+            vec![
+                ai_text("Critique"),
+                artifact_block(x),
+                warning_block("PARTIAL_ANSWER", "a source was unreachable"),
+                citation_block("quoted passage", &["doc-9"]),
+            ],
         )],
     )
     .await;
@@ -100,20 +113,19 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     message_confirmed(&ctx, deleted, MessageStatus::Completed, "deleting M5").await;
     // M6, a1's turn, cancelled after a whole step;
     let m6 = open_stream(&ctx, t, Some(m5), analyst.clone()).await;
-    stream::push(
+    let (last_seq, hash) = stream::push(
         &ctx.nats.url(),
         m6,
         0,
         &text_step(0, None, &["cancelled words"], StopReason::EndTurn),
     )
     .await;
-    tokio::time::sleep(common::QUIET_WINDOW).await;
     let cancelled = command(
         &ctx,
         &CancelMessage {
             message_id: m6,
             thread_id: t,
-            seal: None,
+            seal: Some(StreamSeal { last_seq, hash }),
             acting_user_id: Some(a.id),
         },
     )
@@ -221,7 +233,12 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     );
     let raw = whole_context["conversation"].to_string();
     assert!(!raw.contains(&x.to_string()), "no ARTIFACT block: {raw}");
-    for absent in ["scratch that", "cancelled words"] {
+    for absent in [
+        "scratch that",
+        "cancelled words",
+        "PARTIAL_ANSWER",
+        "quoted passage",
+    ] {
         assert!(!raw.contains(absent), "{absent} is left out: {raw}");
     }
 
@@ -239,10 +256,31 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         })
     );
     assert_eq!(
+        analysis_step.content()[1],
+        AssistantBlock::RedactedThinking(
+            contract_threads::llm::RedactedThinking::new(REDACTED).unwrap()
+        )
+    );
+    assert_eq!(
         analysis_step
             .model()
             .map(|model| model.as_str().to_string()),
         Some("m-1".to_string())
+    );
+
+    // And members still see M4's Threads blocks, in the order the writer gave
+    // them.
+    let m4_view = common::flows::message_view(&ctx, &a.passport, t, m4).await;
+    let kinds: Vec<&str> = m4_view["items"][0]["blocks"]
+        .as_array()
+        .expect("M4's blocks")
+        .iter()
+        .map(|block| block["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(kinds, vec!["TEXT", "ARTIFACT", "WARNING", "CITATION"]);
+    assert_eq!(
+        m4_view["items"][0]["blocks"][2]["content"],
+        json!({ "code": "PARTIAL_ANSWER", "text": "a source was unreachable" })
     );
 
     // When the runner reads it again, naming a1.

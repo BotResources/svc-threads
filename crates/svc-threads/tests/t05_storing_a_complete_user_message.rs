@@ -22,13 +22,13 @@
 
 mod common;
 
-use common::commands::{commanding_service, send_as};
-use common::content::{raw_text, text_content, tool_result, user_text};
+use common::content::{raw_text, text_content, tool_result, tool_results, user_text};
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, command, context, conversation_of, create_thread, message_confirmed,
-    message_refused, message_view, say, thread_confirmed, thread_refused, user_message,
+    active_branch, ai, ai_message, command, context, conversation_of, create_thread,
+    message_confirmed, message_refused, message_view, say, thread_confirmed, thread_refused,
+    user_message,
 };
 use common::{TestContext, identity};
 use contract_threads::llm::{Entry, UserBlock};
@@ -124,7 +124,7 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "a message's text").await;
 
     // When the bus redelivers M1's store, under its own envelope id.
-    send_as(&ctx.nats, commanding_service(), store_command, &store_m1).await;
+    common::flows::redeliver(&ctx, store_command, &store_m1).await;
     // Then it is answered again alike, and M1 is stored once.
     common::eventually(
         "the redelivery is answered",
@@ -200,6 +200,57 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
         "a foreign parent",
     )
     .await;
+
+    // When a message of T names a parent nobody stored.
+    let unknown_parent = command(
+        &ctx,
+        &user_message(t, Some(Uuid::now_v7()), a.id, vec![user_text("hi")]),
+    )
+    .await;
+    // Then refused MESSAGE_NOT_FOUND: "A command naming a thread or a message
+    // that does not exist is refused THREAD_NOT_FOUND or MESSAGE_NOT_FOUND".
+    message_refused(
+        &ctx,
+        unknown_parent,
+        ReasonCode::MessageNotFound,
+        "an unknown parent",
+    )
+    .await;
+
+    // When a message is stored on a thread nobody created.
+    let nowhere = command(
+        &ctx,
+        &user_message(Uuid::now_v7(), None, a.id, vec![user_text("hi")]),
+    )
+    .await;
+    // Then refused THREAD_NOT_FOUND.
+    message_refused(
+        &ctx,
+        nowhere,
+        ReasonCode::ThreadNotFound,
+        "an unknown thread",
+    )
+    .await;
+
+    // When an AI message is stored complete with content the library refuses:
+    // a turn opening on tool results instead of a step.
+    let no_step = ai_message(
+        t,
+        Some(m1),
+        ai("a1", "Analyst"),
+        vec![tool_results(vec![tool_result("c1", "search", "found")])],
+    );
+    let no_step_id = no_step.message_id;
+    let no_step_command = command(&ctx, &no_step).await;
+    // Then refused MESSAGE_INVALID, nothing stored.
+    message_refused(
+        &ctx,
+        no_step_command,
+        ReasonCode::MessageInvalid,
+        "a turn without a first step",
+    )
+    .await;
+    assert!(facts::of(&ctx.pool, "message", no_step_id).await.is_empty());
 
     // When a new store reuses M1's id.
     let mut reuse = user_message(t, None, b.id, vec![user_text("mine")]);

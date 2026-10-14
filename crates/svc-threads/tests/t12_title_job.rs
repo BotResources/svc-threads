@@ -32,16 +32,17 @@ mod common;
 
 use br_core_auth::Passport;
 use common::facts;
+use common::feed::{Live, upsert_of};
 use common::flows::{
     ai, answer, command, context, create, create_thread, creation, say, thread_confirmed,
-    thread_view,
+    thread_refused, thread_view,
 };
-use common::jobs::{failed_coords, urls_in};
+use common::jobs::{await_consumed, failed_coords, urls_in};
 use common::{
     JOB_NOT_ACTIVE, M_FAIL_TITLE_JOB, M_SET_TITLE, RUNNER_SCOPE_REQUIRED, TITLE_RUNNER_TYPE,
     TITLE_TOO_LONG, TestContext, gql,
 };
-use contract_threads::{SetTitle, TitleJobConfig};
+use contract_threads::{ReasonCode, SetTitle, TitleJobConfig};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -156,6 +157,7 @@ async fn t12_the_first_user_message_starts_one_title_job_which_the_runner_ends_b
     ctx.jobs.expect_creates(titled, 0, "a titled thread").await;
 
     // When the runner reads T's context, then sets the title naming the Job.
+    let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
     let read = context(&ctx, &runner.passport, t, None).await;
     assert!(read.is_object(), "the runner reads T's context: {read}");
     let set = set_title(&ctx, &runner.passport, t, job, "Q3 review").await;
@@ -169,6 +171,12 @@ async fn t12_the_first_user_message_starts_one_title_job_which_the_runner_ends_b
             "Q3 review"
         );
     }
+    // And (3) B's live view of T carries it.
+    b_feed
+        .until("the title reaches B's feed", |delta| {
+            upsert_of(delta, t).is_some_and(|view| view["title"] == "Q3 review")
+        })
+        .await;
     // And a TitleChanged fact records it, sent by the runner.
     let t_facts = facts::of(&ctx.pool, "thread", t).await;
     let changed = facts::the(&t_facts, "TitleChanged");
@@ -339,27 +347,27 @@ async fn t12_a_title_job_jobs_rejected_failed_or_cancelled_ends_and_its_runner_i
 
     // When Jobs answers creation_rejected, failed (delivered twice) and
     // cancelled.
-    ctx.jobs
+    let rejection = ctx
+        .jobs
         .creation_rejected(&ctx.nats, rejected_job, "runner_type_unknown")
-        .await;
+        .await
+        .event_id;
     let failure = ctx.jobs.failed(&ctx.nats, failed_job).await;
     ctx.jobs
         .redeliver(&ctx.nats, failed_coords(), &failure)
         .await;
-    ctx.jobs.cancelled(&ctx.nats, cancelled_job).await;
+    let cancellation = ctx.jobs.cancelled(&ctx.nats, cancelled_job).await.event_id;
 
-    // Then each Job is ended: its runner is refused JOB_NOT_ACTIVE, and the
-    // thread stays untitled.
-    for (thread, job, what) in [
-        (rejected_thread, rejected_job, "rejected"),
-        (failed_thread, failed_job, "failed"),
-        (cancelled_thread, cancelled_job, "cancelled"),
+    // Then each Job is ended — once Threads consumed Jobs' fact, its runner is
+    // refused JOB_NOT_ACTIVE, and the thread stays untitled.
+    for (thread, job, fact, what) in [
+        (rejected_thread, rejected_job, rejection, "rejected"),
+        (failed_thread, failed_job, failure.event_id, "failed"),
+        (cancelled_thread, cancelled_job, cancellation, "cancelled"),
     ] {
-        common::eventually(what, common::PUSH_TIMEOUT, || async {
-            let answer = set_title(&ctx, &runner.passport, thread, job, "Late").await;
-            gql::code(&answer).as_deref() == Some(JOB_NOT_ACTIVE)
-        })
-        .await;
+        await_consumed(&ctx.pool, fact, what).await;
+        let answer = set_title(&ctx, &runner.passport, thread, job, "Late").await;
+        gql::assert_refused(&answer, JOB_NOT_ACTIVE);
         assert_eq!(
             thread_view(&ctx, &a.passport, thread).await["title"],
             Value::Null,
@@ -382,6 +390,26 @@ async fn t12_a_title_set_by_command_while_the_title_job_runs_wins_and_cancels_th
     let a = ctx.enrol("ada").await;
     let runner = ctx.service_account(true);
     let (t6, j6) = thread_with_title_job(&ctx, &a).await;
+
+    // When the commanding service sets a title of 201 characters.
+    let too_long = command(
+        &ctx,
+        &SetTitle {
+            thread_id: t6,
+            title: "é".repeat(201),
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    // Then refused TITLE_TOO_LONG; J6 runs on, nothing cancelled.
+    thread_refused(
+        &ctx,
+        too_long,
+        ReasonCode::TitleTooLong,
+        "a 201-character title",
+    )
+    .await;
+    assert!(ctx.jobs.cancels_for(j6).is_empty());
 
     // When the commanding service sets T6's title on A's gesture.
     let set = command(

@@ -18,6 +18,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::facts;
+use common::feed::{Live, upsert_of};
 use common::flows::{
     command, context, create_thread, resources_of, thread_confirmed, thread_refused, thread_view,
     version,
@@ -86,6 +87,7 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, None, &[&a]).await;
     let runner = ctx.service_account(true);
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
     // When the harness adds d1 and d2 under `documents`.
     let before = published(&ctx, t).await;
@@ -107,6 +109,15 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
             .is_empty(),
         "a ResourceIdsAdded fact records the change"
     );
+    // And (3) A's live view of T carries the resources.
+    a_feed
+        .until("the resources reach A's feed", |delta| {
+            upsert_of(delta, t).is_some_and(|view| {
+                resources_of(view)
+                    == BTreeMap::from([("documents".to_string(), ids(&["d1", "d2"]))])
+            })
+        })
+        .await;
     // And (4) the confirmation is all that was published.
     assert_only_the_answer(&before, &published(&ctx, t).await, "adding d1 and d2");
 
@@ -148,6 +159,11 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
 
     // Then confirmed, and the emptied key disappears from the thread.
     thread_confirmed(&ctx, emptied, "emptying documents").await;
+    a_feed
+        .until("the emptied key leaves A's feed", |delta| {
+            upsert_of(delta, t).is_some_and(|view| resources_of(view).is_empty())
+        })
+        .await;
     assert!(resources_of(&thread_view(&ctx, &a.passport, t).await).is_empty());
     assert_only_the_answer(&before, &published(&ctx, t).await, "emptying documents");
 

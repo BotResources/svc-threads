@@ -199,5 +199,29 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
     }
     assert_eq!(message_view(&ctx, &a.passport, t, m9).await, completed);
 
+    // When the writer completes, fails or cancels a message nobody stored.
+    let ghost = Uuid::now_v7();
+    for (command_id, what) in [
+        (
+            command(
+                &ctx,
+                &common::flows::completion(t, ghost, 0, &"0".repeat(64)),
+            )
+            .await,
+            "completing an unknown message",
+        ),
+        (
+            command(&ctx, &fail(t, ghost, None)).await,
+            "failing an unknown message",
+        ),
+        (
+            command(&ctx, &cancel(t, ghost, None)).await,
+            "cancelling an unknown message",
+        ),
+    ] {
+        // Then each is refused MESSAGE_NOT_FOUND.
+        message_refused(&ctx, command_id, ReasonCode::MessageNotFound, what).await;
+    }
+
     ctx.teardown().await;
 }

@@ -5,11 +5,12 @@
 //! library's rules; the raw builders exist to send what the library refuses.
 
 use contract_threads::llm::{
-    AssistantBlock, BlockKind as StreamBlockKind, Signature, StopReason, StreamEvent, Text,
-    Thinking, ToolCall, ToolCallId, ToolName, ToolResult, ToolResultBlock,
+    AssistantBlock, BlockKind as StreamBlockKind, RedactedThinking, Signature, StopReason,
+    StreamEvent, Text, Thinking, ToolCall, ToolCallId, ToolName, ToolResult, ToolResultBlock,
 };
 use contract_threads::{
-    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, Item, LibraryBlock, StepItem, ToolResultsItem,
+    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, Citation, Item, LibraryBlock, Notice,
+    StepItem, ToolResultsItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -55,6 +56,35 @@ pub fn tool_call(id: &str, name: &str, arguments: Value) -> Block {
         name: ToolName::new(name).expect("a tool name"),
         arguments,
     }))
+}
+
+/// A step's redacted thinking, kept byte for byte.
+pub fn redacted_thinking(data: &str) -> Block {
+    assistant(&AssistantBlock::RedactedThinking(
+        RedactedThinking::new(data).expect("a redacted thinking"),
+    ))
+}
+
+/// A Threads `WARNING` block.
+pub fn warning_block(code: &str, text: &str) -> Block {
+    Block::new(
+        Uuid::now_v7(),
+        BlockBody::Warning(Notice {
+            code: code.to_string(),
+            text: Some(text.to_string()),
+        }),
+    )
+}
+
+/// A Threads `CITATION` block.
+pub fn citation_block(text: &str, sources: &[&str]) -> Block {
+    Block::new(
+        Uuid::now_v7(),
+        BlockBody::Citation(Citation {
+            text: text.to_string(),
+            source_ids: sources.iter().map(|id| id.to_string()).collect(),
+        }),
+    )
 }
 
 fn assistant(block: &AssistantBlock) -> Block {
