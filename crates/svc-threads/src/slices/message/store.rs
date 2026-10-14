@@ -4,8 +4,9 @@
 //!
 //! A batch read is four statements whatever its size: the messages with their
 //! user author's current name, their items, their blocks, and the members of
-//! their threads. The write path (`save`, `create`, each with the facts it
-//! records in `threads.fact`) is the implementation pass's.
+//! their threads. A save writes the message row, the content its transition
+//! wrote or removed (items before their blocks), and the facts of the change,
+//! in the pipeline's transaction.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -20,9 +21,10 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use super::state::{ItemKind, MessageAuthor, MessageState, StoredBlock, StoredItem};
+use super::state::{ItemKind, MessageAuthor, MessageChange, MessageState, StoredBlock, StoredItem};
 use crate::directory::KNOWN_USERS_TABLE;
-use crate::fault::{self, corrupt};
+use crate::facts::{self, FactNoun};
+use crate::fault::corrupt;
 use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
 pub const TABLE: &str = "threads.message";
@@ -32,8 +34,7 @@ pub struct MessageStore;
 impl Persistence for MessageStore {
     type Aggregate = MessageState;
     type Key = Uuid;
-    // The message's facts are the implementation pass's, with its transitions.
-    type Event = ();
+    type Event = MessageChange;
 
     const STYLE: PersistenceStyle = PersistenceStyle::SoftEda;
 
@@ -52,19 +53,54 @@ impl Persistence for MessageStore {
     }
 
     fn save<'a>(
-        _conn: &'a mut PgConnection,
-        _message: &'a MessageState,
-        _events: &'a [()],
+        conn: &'a mut PgConnection,
+        message: &'a MessageState,
+        changes: &'a [MessageChange],
     ) -> BoxFuture<'a, Result<(), EngineError>> {
-        Box::pin(async { Err(fault::write_path_pending("message")) })
+        Box::pin(async move {
+            sqlx::query(&format!(
+                "UPDATE {TABLE} SET status = $2, deleted = $3, version = $4 WHERE id = $1"
+            ))
+            .bind(message.id)
+            .bind(message.status.as_str())
+            .bind(message.deleted)
+            .bind(message.version)
+            .execute(&mut *conn)
+            .await?;
+            write_changes(conn, message, changes).await
+        })
     }
 
     fn create<'a>(
-        _conn: &'a mut PgConnection,
-        _message: &'a MessageState,
-        _events: &'a [()],
+        conn: &'a mut PgConnection,
+        message: &'a MessageState,
+        changes: &'a [MessageChange],
     ) -> BoxFuture<'a, Result<(), EngineError>> {
-        Box::pin(async { Err(fault::write_path_pending("message")) })
+        Box::pin(async move {
+            let (user, ai_id, ai_name) = match &message.author {
+                MessageAuthor::User { user_id, .. } => (Some(*user_id), None, None),
+                MessageAuthor::Ai { id, name } => (None, Some(id.as_str()), Some(name.as_str())),
+            };
+            sqlx::query(&format!(
+                "INSERT INTO {TABLE} (id, thread_id, parent_message_id, author_user_id, \
+                     author_ai_id, author_ai_name, job_id, status, deleted, created_at, version) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+            ))
+            .bind(message.id)
+            .bind(message.thread_id)
+            .bind(message.parent_message_id)
+            .bind(user)
+            .bind(ai_id)
+            .bind(ai_name)
+            .bind(message.job_id)
+            .bind(message.status.as_str())
+            .bind(message.deleted)
+            .bind(message.created_at)
+            .bind(message.version)
+            .execute(&mut *conn)
+            .await?;
+            write_changes(conn, message, changes).await
+        })
     }
 }
 
@@ -74,6 +110,165 @@ impl Aggregate for MessageState {
     fn key(&self) -> Uuid {
         self.id
     }
+
+    fn pending_events(&self) -> &[MessageChange] {
+        &self.pending
+    }
+}
+
+async fn write_changes(
+    conn: &mut PgConnection,
+    message: &MessageState,
+    changes: &[MessageChange],
+) -> Result<(), EngineError> {
+    for change in changes {
+        match change {
+            MessageChange::ContentWritten => write_content(conn, message).await?,
+            MessageChange::ContentRemoved => remove_content(conn, message.id).await?,
+            MessageChange::Recorded(_) => {}
+        }
+    }
+    facts::append(
+        conn,
+        FactNoun::Message,
+        message.id,
+        message.version,
+        &message.pending_facts(),
+    )
+    .await
+}
+
+async fn remove_content(conn: &mut PgConnection, message: Uuid) -> Result<(), EngineError> {
+    sqlx::query("DELETE FROM threads.message_block WHERE message_id = $1")
+        .bind(message)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM threads.message_item WHERE message_id = $1")
+        .bind(message)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The message's content, whole: its items, then every block, in two inserts.
+async fn write_content(conn: &mut PgConnection, message: &MessageState) -> Result<(), EngineError> {
+    remove_content(conn, message.id).await?;
+    if !message.items.is_empty() {
+        let items = &message.items;
+        sqlx::query(
+            "INSERT INTO threads.message_item \
+                 (message_id, index, kind, status, stop_reason, usage, model) \
+             SELECT $1, i.index, i.kind, i.status, i.stop_reason, i.usage, i.model \
+             FROM unnest($2::int[], $3::text[], $4::text[], $5::jsonb[], $6::jsonb[], $7::text[]) \
+                  AS i(index, kind, status, stop_reason, usage, model)",
+        )
+        .bind(message.id)
+        .bind(items.iter().map(|item| item.index).collect::<Vec<_>>())
+        .bind(
+            items
+                .iter()
+                .map(|item| item.kind.as_db())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            items
+                .iter()
+                .map(|item| item.status.as_str())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            items
+                .iter()
+                .map(|item| item.stop_reason.clone())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            items
+                .iter()
+                .map(|item| item.usage.clone())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            items
+                .iter()
+                .map(|item| item.model.clone())
+                .collect::<Vec<_>>(),
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
+    let blocks: Vec<(Option<i32>, &StoredBlock)> = message
+        .blocks
+        .iter()
+        .map(|block| (None, block))
+        .chain(message.items.iter().flat_map(|item| {
+            item.blocks
+                .iter()
+                .map(move |block| (Some(item.index), block))
+        }))
+        .collect();
+    if blocks.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO threads.message_block (id, message_id, item_index, index, kind, content) \
+         SELECT b.id, $1, b.item_index, b.index, b.kind, b.content \
+         FROM unnest($2::uuid[], $3::int[], $4::int[], $5::text[], $6::jsonb[]) \
+              AS b(id, item_index, index, kind, content)",
+    )
+    .bind(message.id)
+    .bind(blocks.iter().map(|(_, block)| block.id).collect::<Vec<_>>())
+    .bind(blocks.iter().map(|(item, _)| *item).collect::<Vec<_>>())
+    .bind(
+        blocks
+            .iter()
+            .map(|(_, block)| block.index)
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        blocks
+            .iter()
+            .map(|(_, block)| block.kind.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        blocks
+            .iter()
+            .map(|(_, block)| block.content.clone())
+            .collect::<Vec<_>>(),
+    )
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Of `ids`, those some block already holds: a block id is used once.
+pub async fn held_block_ids(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, EngineError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        sqlx::query_scalar("SELECT id FROM threads.message_block WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(conn)
+            .await?,
+    )
+}
+
+/// The thread a message belongs to, if it exists.
+pub async fn thread_of(
+    conn: &mut PgConnection,
+    message: Uuid,
+) -> Result<Option<Uuid>, EngineError> {
+    Ok(
+        sqlx::query_scalar("SELECT thread_id FROM threads.message WHERE id = $1")
+            .bind(message)
+            .fetch_optional(conn)
+            .await?,
+    )
 }
 
 /// The messages of the threads of the members named, one read bounded by the
@@ -222,6 +417,7 @@ fn message_of_row(row: &PgRow) -> Result<MessageState, EngineError> {
         blocks: Vec::new(),
         items: Vec::new(),
         members: BTreeSet::new(),
+        pending: Vec::new(),
     })
 }
 
@@ -303,6 +499,30 @@ async fn members_of(
         by_thread.entry(thread).or_default().insert(user);
     }
     Ok(by_thread)
+}
+
+/// The active branch of `thread` — the one ending at its most recent message —
+/// from its first message to its last. One statement.
+pub async fn active_branch(
+    conn: &mut PgConnection,
+    thread: Uuid,
+) -> Result<Vec<Uuid>, EngineError> {
+    Ok(sqlx::query_scalar(
+        "WITH RECURSIVE tip AS ( \
+             SELECT m.id FROM threads.message m WHERE m.thread_id = $1 \
+             ORDER BY m.created_at DESC, m.id DESC LIMIT 1 \
+         ), branch AS ( \
+             SELECT m.id, m.parent_message_id, 0 AS depth \
+             FROM threads.message m JOIN tip ON m.id = tip.id \
+             UNION ALL \
+             SELECT p.id, p.parent_message_id, b.depth + 1 \
+             FROM threads.message p JOIN branch b ON p.id = b.parent_message_id \
+         ) \
+         SELECT id FROM branch ORDER BY depth DESC",
+    )
+    .bind(thread)
+    .fetch_all(conn)
+    .await?)
 }
 
 #[cfg(test)]

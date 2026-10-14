@@ -10,9 +10,9 @@ use service_engine::session::WindowSpec;
 use service_engine::{MutationAck, OrInternal, Page, Query, WindowSize};
 use uuid::Uuid;
 
+use super::read_mark::SetReadMark;
 use super::view::{ThreadView, ThreadsView, ThreadsWindow};
 use crate::access;
-use crate::fault::not_implemented;
 use crate::principal::ThreadsPrincipal;
 
 service_engine::subscription_union! {
@@ -56,7 +56,9 @@ pub struct ThreadMutation;
 #[Object]
 impl ThreadMutation {
     /// Sets the caller's own read mark on a thread they are a member of, at one
-    /// of its messages. The reader's own state: no fact, no thread version.
+    /// of its messages. The reader's own state: no fact, no thread version. A
+    /// thread the caller is not a member of is refused `THREAD_NOT_FOUND`; a
+    /// message that is not one of its, `MESSAGE_NOT_FOUND`.
     async fn threads_set_read_mark(
         &self,
         ctx: &Context<'_>,
@@ -64,8 +66,14 @@ impl ThreadMutation {
         message_id: Uuid,
     ) -> Result<MutationAck> {
         access::human_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        let _ = (thread_id, message_id);
-        Err(not_implemented("threadsSetReadMark"))
+        service_engine::ack::<ThreadsPrincipal, SetReadMark>(
+            ctx,
+            SetReadMark {
+                thread_id,
+                message_id,
+            },
+        )
+        .await
     }
 }
 

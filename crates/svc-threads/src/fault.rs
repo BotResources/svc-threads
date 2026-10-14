@@ -11,6 +11,10 @@ use service_engine::pipeline::MutationFault;
 pub enum Fault {
     #[error("{}", .0.code())]
     Refused(Reason),
+    /// A command whose envelope names no service account: Threads answers the
+    /// commanding services only, and dead-letters anything else.
+    #[error("a command reached Threads from something other than a service account")]
+    NotACommandingService,
     #[error("the store or the engine failed")]
     Engine(#[source] EngineError),
 }
@@ -19,7 +23,7 @@ impl MutationFault for Fault {
     fn reason(&self) -> Option<Reason> {
         match self {
             Self::Refused(reason) => Some(*reason),
-            Self::Engine(_) => None,
+            Self::NotACommandingService | Self::Engine(_) => None,
         }
     }
 }
@@ -27,7 +31,7 @@ impl MutationFault for Fault {
 impl ReactionError for Fault {
     fn disposition(&self) -> Disposition {
         match self {
-            Self::Refused(_) => Disposition::Terminal,
+            Self::Refused(_) | Self::NotACommandingService => Disposition::Terminal,
             Self::Engine(EngineError::Db(db)) if sqlx_is_terminal(db) => Disposition::Terminal,
             Self::Engine(_) => Disposition::Retry,
         }
@@ -58,25 +62,9 @@ pub fn corrupt<E: std::error::Error + Send + Sync + 'static>(error: E) -> Engine
     EngineError::Service(Box::new(error))
 }
 
-/// The code a root of the scaffold answers until the implementation lands.
-pub const NOT_IMPLEMENTED: &str = "NOT_IMPLEMENTED";
-
-/// The answer of a root whose gesture the implementation pass writes: a coded
-/// refusal, never a silent success.
-pub fn not_implemented(root: &'static str) -> async_graphql::Error {
-    service_engine::coded_error(NOT_IMPLEMENTED, format!("{root} is not implemented yet"))
-}
-
-/// The write path of a store, which the implementation pass writes with the
-/// transitions and the facts it persists. Nothing of the scaffold calls it.
-#[derive(Debug, thiserror::Error)]
-#[error("the {store} write path is not implemented yet")]
-pub struct WritePathPending {
-    pub store: &'static str,
-}
-
-pub fn write_path_pending(store: &'static str) -> EngineError {
-    EngineError::Service(Box::new(WritePathPending { store }))
+/// A value Threads could not encode: a fault, never a refusal.
+pub fn encode(what: &'static str, source: serde_json::Error) -> EngineError {
+    EngineError::Encode { what, source }
 }
 
 #[cfg(test)]
@@ -92,5 +80,9 @@ mod tests {
         let fault = Fault::Engine(EngineError::Config("absent".into()));
         assert_eq!(fault.reason(), None);
         assert_eq!(fault.disposition(), Disposition::Retry);
+        assert_eq!(
+            Fault::NotACommandingService.disposition(),
+            Disposition::Terminal
+        );
     }
 }

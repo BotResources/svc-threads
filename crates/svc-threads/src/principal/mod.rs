@@ -67,7 +67,31 @@ pub struct ThreadsPrincipal {
     facts: CallerFacts,
 }
 
+/// The service account Threads acts under when nobody commanded it: the sweep
+/// that deletes the threads of an owner who left the roster. No Passport the
+/// gateway issues reaches a gesture as Threads itself: its only gesture has no
+/// GraphQL root.
+const THREADS_ITSELF: Uuid = Uuid::from_u128(0x0199_7000_7468_7265_6164_7300_0000_0001);
+
 impl ThreadsPrincipal {
+    /// Threads itself, acting on its own.
+    pub fn threads_itself() -> Self {
+        Self {
+            id: PrincipalId::from(THREADS_ITSELF),
+            passport: Passport::service(THREADS_ITSELF, br_core_auth::PassportClaims::new()),
+            facts: CallerFacts::default(),
+        }
+    }
+
+    /// The frontier's actor of this principal.
+    pub fn actor(&self) -> br_core_integration::Actor {
+        self.passport.to_actor()
+    }
+
+    pub fn is_threads_itself(&self) -> bool {
+        self.service_account() == Some(THREADS_ITSELF)
+    }
+
     /// The person, when the caller is one.
     pub fn user(&self) -> Option<Uuid> {
         self.passport.user_id()

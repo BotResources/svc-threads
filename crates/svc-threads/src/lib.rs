@@ -18,14 +18,19 @@
 //! - [`slices::runner`]: the operations reserved to runners — a thread's
 //!   context, and the title Job's.
 //!
-//! Shared mechanics: [`boot`] (the engine boot kit), [`register`] (everything
-//! the engine is told), [`principal`] (who is asking), [`access`] (the two
-//! admission rules every root asks first), [`directory`] (the local copy of
-//! Identity's roster), [`scopes`], [`fault`].
+//! Shared mechanics: [`boot`] (the engine boot kit), [`config`] (Threads' own
+//! settings), [`register`] (everything the engine is told), [`principal`] (who
+//! is asking), [`access`] (the two admission rules every root asks first),
+//! [`directory`] (the local copy of Identity's roster), [`command`] (a command
+//! reaction's sender check and its one answer), [`facts`] (the fact log),
+//! [`scopes`], [`fault`].
 
 pub mod access;
 pub mod boot;
+pub mod command;
+pub mod config;
 pub mod directory;
+pub mod facts;
 pub mod fault;
 pub mod principal;
 pub mod register;

@@ -3,13 +3,19 @@
 //! refused with its code.
 
 use async_graphql::{Context, InputObject, Object, Result, SimpleObject};
-use service_engine::{JsonScalar, MutationAck};
+use contract_threads::llm::Author;
+use service_engine::gate::Reason;
+use service_engine::{JsonScalar, MutationAck, Query};
 use uuid::Uuid;
 
+use super::context::{self, RunnerThreads};
 use crate::access;
-use crate::fault::not_implemented;
 use crate::principal::ThreadsPrincipal;
+use crate::slices::thread::title_job::{RunnerFailTitleJob, RunnerSetTitle};
 use crate::slices::thread::view::{MemberView, ResourceView};
+
+/// An AI perspective whose id or name is blank.
+pub const AI_PERSPECTIVE_INVALID: Reason = Reason::new("AI_PERSPECTIVE_INVALID");
 
 /// The AI a runner answers for: the context is then lightened for it by the
 /// library's rule, so that its render is the same as from the whole one.
@@ -43,8 +49,39 @@ impl RunnerQuery {
         ai: Option<AiPerspective>,
     ) -> Result<Option<ThreadContext>> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        let _ = (thread_id, ai);
-        Err(not_implemented("threadsContext"))
+        let ai = match ai {
+            Some(ai) => Some(Author::new(ai.id, ai.name).map_err(|_| AI_PERSPECTIVE_INVALID)?),
+            None => None,
+        };
+        Query::<ThreadsPrincipal>::new(ctx)?
+            .behind::<RunnerThreads>(&thread_id)
+            .read(|thread, conn| {
+                Box::pin(async move {
+                    let conversation = context::read(conn, thread.id, ai).await?;
+                    Ok(ThreadContext {
+                        thread_id: thread.id,
+                        conversation: async_graphql::Json(conversation),
+                        members: thread
+                            .members
+                            .iter()
+                            .map(|(user_id, member)| MemberView {
+                                user_id: *user_id,
+                                display_name: member.display_name.clone(),
+                                in_roster: member.in_roster,
+                            })
+                            .collect(),
+                        resources: thread
+                            .resources
+                            .iter()
+                            .map(|(key, ids)| ResourceView {
+                                key: key.clone(),
+                                ids: ids.clone(),
+                            })
+                            .collect(),
+                    })
+                })
+            })
+            .await
     }
 }
 
@@ -55,6 +92,8 @@ pub struct RunnerMutation;
 impl RunnerMutation {
     /// Sets the title of a thread for its active title Job (at most 200
     /// characters, `TITLE_TOO_LONG`); Threads then declares the Job finished.
+    /// A Job that is not the thread's active title Job is refused
+    /// `JOB_NOT_ACTIVE`.
     async fn threads_set_title(
         &self,
         ctx: &Context<'_>,
@@ -63,13 +102,21 @@ impl RunnerMutation {
         title: String,
     ) -> Result<MutationAck> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        let _ = (thread_id, job_id, title);
-        Err(not_implemented("threadsSetTitle"))
+        service_engine::ack::<ThreadsPrincipal, RunnerSetTitle>(
+            ctx,
+            RunnerSetTitle {
+                thread_id,
+                job_id,
+                title,
+            },
+        )
+        .await
     }
 
     /// Declares the thread's active title Job failed, with a reason code
     /// (`[a-z][a-z0-9_]*`) and an optional message; the thread stays untitled
-    /// for good and Threads declares the Job failed.
+    /// for good and Threads declares the Job failed. A Job that is not the
+    /// thread's active title Job is refused `JOB_NOT_ACTIVE`.
     async fn threads_fail_title_job(
         &self,
         ctx: &Context<'_>,
@@ -79,7 +126,15 @@ impl RunnerMutation {
         message: Option<String>,
     ) -> Result<MutationAck> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        let _ = (thread_id, job_id, reason_code, message);
-        Err(not_implemented("threadsFailTitleJob"))
+        service_engine::ack::<ThreadsPrincipal, RunnerFailTitleJob>(
+            ctx,
+            RunnerFailTitleJob {
+                thread_id,
+                job_id,
+                reason_code,
+                message,
+            },
+        )
+        .await
     }
 }

@@ -201,6 +201,17 @@ CREATE TABLE threads.artifact (
 CREATE INDEX artifact_thread_idx ON threads.artifact (thread_id);
 CREATE INDEX artifact_message_idx ON threads.artifact (message_id) WHERE message_id IS NOT NULL;
 
+-- The watch over a STREAMING message's writer: how far its stream had come
+-- (`seen_through`, the last contiguous sequence folded, NULL before the first
+-- chunk) when the watch last looked, and since when that has not moved. The
+-- watch fails the message once its writer pushed nothing for the idle window.
+-- It goes with its message's stream: a closed message has none.
+CREATE TABLE threads.stream_watch (
+    message_id   uuid        PRIMARY KEY REFERENCES threads.message (id) ON DELETE CASCADE,
+    seen_through bigint      CHECK (seen_through >= 0),
+    since        timestamptz NOT NULL
+);
+
 -- A member's read mark: the reader's own state, with no fact and no thread
 -- version. It goes with its member (removing a member removes their mark) and
 -- names a message of the same thread.

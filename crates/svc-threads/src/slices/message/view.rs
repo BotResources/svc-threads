@@ -8,25 +8,44 @@
 //! deleted message stays in its branch, without content, so that its forks
 //! remain readable.
 //!
-//! The view renders what the store holds. The live content of a `STREAMING`
-//! message is the accumulated lane's ([`super::stream`]); rendering it needs the
-//! engine's chunk reader, which only the low-level projector receives (engine
-//! v0.4.1: `view::Projector` has no access to it) — the implementation pass
-//! moves this view there.
+//! A `STREAMING` message shows the content its stream folded so far, read from
+//! the engine's accumulated lane: the view is the engine's low-level projector,
+//! the one that receives the chunk reader (`view::Projector` does not). A
+//! stream the library refused shows as `FAILED`, with the content its failure
+//! keeps ([`super::draft::close`]), from the moment the refused chunk folds —
+//! the stream watch stores that failure on its next look.
+//!
+//! ENGINE GAP (br-service-engine v0.4.1): the chunk reader reads one stream per
+//! call. A frame reads the streams of the `STREAMING` messages it renders
+//! concurrently, one read each (typically one per thread); the engine would
+//! need a batched `ChunkReader::states`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use contract_threads::{BlockKind, MessageStatus};
+use futures_util::future::{BoxFuture, try_join_all};
 use serde::{Deserialize, Serialize};
 use service_engine::error::EngineError;
 use service_engine::gate::{Affordances, Gated};
-use service_engine::name::ProjectorName;
-use service_engine::population::Population;
-use service_engine::view::{Populate, Projector};
-use service_engine::{JsonScalar, Page};
+use service_engine::impact::ForeignKey;
+use service_engine::name::{NounName, ProjectorName};
+use service_engine::persistence::Persistence;
+use service_engine::population::{Inverse, Population};
+use service_engine::projector::{LoadScope, Projector};
+use service_engine::session::WindowParams;
+use service_engine::visibility::Visibility;
+use service_engine::wire::Noun;
+use service_engine::{JsonScalar, KeyCeiling, Page};
+use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::draft::{self, CloseKind, MessageDraft};
 use super::state::{ItemKind, Message, MessageAuthor, MessageState, StoredBlock, StoredItem};
 use super::store::{self, MessageStore};
+use super::stream::MessageContent;
+use crate::directory::KNOWN_USER_NAMESPACE;
 use crate::principal::ThreadsPrincipal;
 
 /// A message's status, as GraphQL shows it.
@@ -127,8 +146,8 @@ pub struct BlockView {
     pub id: Uuid,
     pub index: i32,
     pub kind: BlockKindView,
-    /// The library's JSON for a library block, the typed content of a Threads
-    /// block.
+    /// The library's JSON for a library block (its text so far while its item
+    /// streams), the typed content of a Threads block.
     pub content: JsonScalar,
 }
 
@@ -159,7 +178,7 @@ pub struct MessageView {
     pub version: i64,
     /// A user message's blocks.
     pub blocks: Vec<BlockView>,
-    /// An AI message's items.
+    /// An AI message's items: while it streams, those its stream folded so far.
     pub items: Vec<ItemView>,
     /// `{ markRead: { allowed, reason? } }`.
     pub affordances: Affordances,
@@ -184,62 +203,168 @@ impl MessagesWindow {
     }
 }
 
+/// What a frame loads: the messages, and the folded stream of each one that
+/// streams.
+pub struct MessageFacts {
+    rows: BTreeMap<Uuid, MessageState>,
+    streams: BTreeMap<Uuid, MessageDraft>,
+}
+
+static NOUNS: [NounName; 1] = [<Message as Noun>::NAME];
+
 #[derive(Default)]
 pub struct MessagesView;
 
 impl MessagesView {
     pub const NAME: ProjectorName = ProjectorName::from_static("messages");
-}
 
-impl Projector for MessagesView {
-    type Principal = ThreadsPrincipal;
-    type Noun = Message;
-    type Store = MessageStore;
-    type Query = MessagesWindow;
-    type Out = MessageView;
-    type Visibility = Message;
-
-    const NAME: ProjectorName = Self::NAME;
-
-    async fn populate(
-        cx: &Populate<'_, ThreadsPrincipal>,
-        query: &MessagesWindow,
-    ) -> Result<Population<Uuid>, EngineError> {
-        match (query.thread, &query.page, cx.principal().active_user()) {
-            (Some(thread), Some(page), Some(member)) => {
-                let keys = store::branch_page(
-                    cx.pool(),
-                    member,
-                    thread,
-                    query.tip,
-                    page.cursor().copied(),
-                    cx.limit(page),
-                )
-                .await?;
-                Ok(page.population(keys))
-            }
-            _ => Ok(Population::Keys(Default::default())),
-        }
-    }
-
-    fn project(
+    /// The view of one message, its stream's content included: the one
+    /// projection of every entry point.
+    pub fn render(
         message: &MessageState,
+        stream: Option<&MessageDraft>,
         principal: &ThreadsPrincipal,
-    ) -> Result<MessageView, EngineError> {
-        Ok(MessageView {
+    ) -> MessageView {
+        let (status, items) = match (message.status, stream) {
+            (MessageStatus::Streaming, Some(stream)) if stream.refusal().is_some() => {
+                let closed = draft::close(stream, CloseKind::Fail);
+                (closed.status, closed.items)
+            }
+            (MessageStatus::Streaming, Some(stream)) => {
+                (MessageStatus::Streaming, stream.preview())
+            }
+            (status, _) => (status, message.items.clone()),
+        };
+        MessageView {
             id: message.id,
             thread_id: message.thread_id,
             parent_message_id: message.parent_message_id,
             author: author_view(&message.author),
             job_id: message.job_id,
-            status: message.status.into(),
+            status: status.into(),
             deleted: message.deleted,
             created_at: message.created_at,
             version: message.version,
             blocks: message.blocks.iter().map(block_view).collect(),
-            items: message.items.iter().map(item_view).collect(),
+            items: items.iter().map(item_view).collect(),
             affordances: message.affordances(principal),
+        }
+    }
+}
+
+impl Projector for MessagesView {
+    type Principal = ThreadsPrincipal;
+    type Key = Uuid;
+    type Facts = MessageFacts;
+    type View = MessageView;
+
+    fn name(&self) -> ProjectorName {
+        Self::NAME
+    }
+
+    fn nouns(&self) -> &'static [NounName] {
+        &NOUNS
+    }
+
+    fn populate<'a>(
+        &'a self,
+        pg: &'a PgPool,
+        window: &'a WindowParams,
+        ceiling: KeyCeiling,
+        principal: &'a ThreadsPrincipal,
+    ) -> BoxFuture<'a, Result<Population<Uuid>, EngineError>> {
+        Box::pin(async move {
+            let query: MessagesWindow = if window.as_value().is_null() {
+                MessagesWindow::default()
+            } else {
+                window.decode()?
+            };
+            match (query.thread, &query.page, principal.active_user()) {
+                (Some(thread), Some(page), Some(member)) => {
+                    let limit = i64::from(page.size().get()).min(ceiling.limit());
+                    let keys = store::branch_page(
+                        pg,
+                        member,
+                        thread,
+                        query.tip,
+                        page.cursor().copied(),
+                        limit,
+                    )
+                    .await?;
+                    Ok(page.population(keys))
+                }
+                _ => Ok(Population::Keys(BTreeSet::new())),
+            }
         })
+    }
+
+    /// A change of a known user's row (their name, their standing) re-renders
+    /// the messages they wrote.
+    fn inverse(&self, foreign: &ForeignKey) -> Inverse<Uuid> {
+        if foreign.namespace().as_str() != KNOWN_USER_NAMESPACE {
+            return Inverse::None;
+        }
+        Inverse::Lookup(Arc::new(|conn, foreign: &ForeignKey| {
+            let user = Uuid::parse_str(foreign.key().as_str());
+            Box::pin(async move {
+                let Ok(user) = user else {
+                    return Ok(BTreeSet::new());
+                };
+                let messages: Vec<Uuid> =
+                    sqlx::query_scalar("SELECT id FROM threads.message WHERE author_user_id = $1")
+                        .bind(user)
+                        .fetch_all(conn)
+                        .await?;
+                Ok(messages.into_iter().collect())
+            })
+        }))
+    }
+
+    fn load<'a>(
+        &'a self,
+        scope: LoadScope<'a, Uuid, ThreadsPrincipal>,
+    ) -> BoxFuture<'a, Result<MessageFacts, EngineError>> {
+        Box::pin(async move {
+            let keys = scope.keys().to_vec();
+            let chunks = scope.chunks();
+            let rows = match scope {
+                LoadScope::Bulk { pg, .. } => {
+                    let mut conn = pg.acquire().await.map_err(EngineError::from)?;
+                    MessageStore::read_many(&mut conn, &keys).await?
+                }
+                LoadScope::PerPrincipal { conn, .. } => {
+                    MessageStore::read_many(conn, &keys).await?
+                }
+            };
+            let rows: BTreeMap<Uuid, MessageState> = rows.into_iter().collect();
+            let streaming: Vec<Uuid> = rows
+                .values()
+                .filter(|message| message.status == MessageStatus::Streaming)
+                .map(|message| message.id)
+                .collect();
+            let streams = try_join_all(streaming.iter().map(|id| async move {
+                let held = chunks.state::<MessageContent>(id).await?;
+                Ok::<_, EngineError>((*id, held.state))
+            }))
+            .await?;
+            Ok(MessageFacts {
+                rows,
+                streams: streams.into_iter().collect(),
+            })
+        })
+    }
+
+    fn project(
+        &self,
+        facts: &MessageFacts,
+        key: &Uuid,
+        principal: &ThreadsPrincipal,
+    ) -> Result<Option<MessageView>, EngineError> {
+        Ok(facts
+            .rows
+            .get(key)
+            .filter(|message| <Message as Visibility>::visible(message, principal))
+            .map(|message| Self::render(message, facts.streams.get(key), principal)))
     }
 }
 
@@ -339,7 +464,7 @@ mod tests {
                 content: serde_json::json!({ "type": "text", "text": "hi" }),
             }],
         }];
-        let view = MessagesView::project(&message, &member).unwrap();
+        let view = MessagesView::render(&message, None, &member);
         assert_eq!(view.author.kind, AuthorKindView::Ai);
         assert_eq!(view.author.name.as_deref(), Some("Analyst"));
         assert_eq!(view.items[0].model.as_deref(), Some("m-1"));
@@ -348,5 +473,28 @@ mod tests {
             serde_json::to_value(&view.affordances).unwrap(),
             serde_json::json!({ "markRead": { "allowed": true } })
         );
+    }
+
+    #[test]
+    fn a_message_whose_stream_was_refused_shows_failed_at_once() {
+        let member = person(false, active());
+        let mut message = message_in(&[member.user().unwrap()]);
+        message.status = MessageStatus::Streaming;
+        let mut stream = MessageDraft::default();
+        draft::fold(
+            &mut stream,
+            0,
+            serde_json::json!({
+                "item_index": 0,
+                "kind": "STEP_EVENT",
+                "event": { "type": "text_delta", "index": 0, "text": "orphan" }
+            }),
+        );
+        assert!(stream.refusal().is_some());
+        let view = MessagesView::render(&message, Some(&stream), &member);
+        assert_eq!(view.status, MessageStatusView::Failed);
+        assert!(view.items.is_empty());
+        let open = MessagesView::render(&message, Some(&MessageDraft::default()), &member);
+        assert_eq!(open.status, MessageStatusView::Streaming);
     }
 }

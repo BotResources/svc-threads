@@ -5,7 +5,7 @@
 
 use async_graphql::{Context, Object, Result, Subscription};
 use futures_util::Stream;
-use service_engine::session::WindowSpec;
+use service_engine::session::{WindowParams, WindowSpec};
 use service_engine::{OrInternal, Page, Query, WindowSize};
 use uuid::Uuid;
 
@@ -19,7 +19,7 @@ service_engine::subscription_union! {
     view = ThreadFeedView;
     delta = ThreadFeedDelta { reset = ThreadFeedReset, upsert = ThreadFeedUpsert, remove = ThreadFeedRemove };
     Thread => service_engine::view::ViewProjector<ThreadsView> => ThreadView,
-    Message => service_engine::view::ViewProjector<MessagesView> => MessageView,
+    Message => MessagesView => MessageView,
 }
 
 /// The human admission, then the thread's visibility: what every message root
@@ -53,12 +53,11 @@ impl MessageQuery {
         branch_tip: Option<Uuid>,
     ) -> Result<Vec<MessageView>> {
         admit_to_thread(ctx, thread_id).await?;
+        let window = MessagesWindow::of(thread_id, branch_tip, Page::new(before, size));
         Query::<ThreadsPrincipal>::new(ctx)?
-            .fetch_view_window::<MessagesView>(&MessagesWindow::of(
-                thread_id,
-                branch_tip,
-                Page::new(before, size),
-            ))
+            .fetch_window::<MessagesView>(
+                WindowParams::encode(&window).or_internal("encode the messages window")?,
+            )
             .await
     }
 }
@@ -84,11 +83,12 @@ impl MessageSubscription {
             vec![
                 WindowSpec::view::<ThreadsView>(&ThreadsWindow::one(thread_id), false)
                     .or_internal("encode the thread window")?,
-                WindowSpec::view::<MessagesView>(
-                    &MessagesWindow::of(thread_id, None, Page::head(size)),
+                WindowSpec::new(
+                    MessagesView::NAME,
+                    WindowParams::encode(&MessagesWindow::of(thread_id, None, Page::head(size)))
+                        .or_internal("encode the messages window")?,
                     false,
-                )
-                .or_internal("encode the messages window")?,
+                ),
             ],
         )
         .await?;

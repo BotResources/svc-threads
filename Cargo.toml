@@ -8,10 +8,10 @@ members = ["crates/contract-threads", "crates/svc-threads"]
 # alone (consumers pull it as a git dependency). See `.github/workflows/cd.yml`.
 [workspace.package]
 edition = "2024"
-# The floor of the two libraries the published language and the service are
-# built on: br-service-engine v0.4.1 and br-llm-messages v0.3.0 both declare
-# 1.89. CI builds on stable.
-rust-version = "1.89"
+# The floor of what the service is built on: br-service-engine v0.4.1 and
+# br-llm-messages v0.3.0 declare 1.89, contract-jobs v0.5.0 (the title Job's
+# published language) 1.94. CI builds on stable.
+rust-version = "1.94"
 license = "Apache-2.0"
 repository = "https://github.com/BotResources/svc-threads"
 publish = false
@@ -33,6 +33,10 @@ br-core-integration = { git = "https://github.com/BotResources/br-rust-common", 
 br-core-scope = { git = "https://github.com/BotResources/br-rust-common", package = "br-core-scope", tag = "v1.3.0", version = "1.3.0" }
 br-scope-declaration-contract = { git = "https://github.com/BotResources/br-rust-common", package = "br-scope-declaration-contract", tag = "v1.3.0", version = "1.3.0" }
 br-util-nats-fabric = { git = "https://github.com/BotResources/br-rust-common", package = "br-util-nats-fabric", tag = "v1.3.0", version = "1.3.0" }
+
+# The published language of Jobs: the title Job Threads creates, finishes,
+# fails and cancels, and the events it reacts to.
+contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.0", version = "0.5.0", features = ["integration"] }
 
 # The e2e harness; its tag pins the same br-rust-common v1.3.0.
 br-test-harness = { git = "https://github.com/BotResources/br-e2e-harness", package = "br-test-harness", tag = "v1.2.1", version = "1.2.1", default-features = false }

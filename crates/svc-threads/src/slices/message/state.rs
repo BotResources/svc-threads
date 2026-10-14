@@ -1,10 +1,12 @@
 //! A message's canonical state, as its store reads it back: the message row,
 //! its author (with the roster copy's name for a user author), its blocks or
 //! its items with theirs, and the members of its thread, which decide who sees
-//! it.
+//! it — plus the changes a transition made and not yet saved
+//! ([`MessageChange`]).
 //!
-//! The transitions — storing, completing, failing, cancelling, deleting — and
-//! the facts they record are the implementation pass's.
+//! While a message streams, its content is the accumulated lane's
+//! ([`super::draft`]): the row holds none until the stream closes. The guarded
+//! transitions live in [`super::transitions`].
 
 use std::collections::BTreeSet;
 
@@ -16,6 +18,7 @@ use service_engine::wire::Noun;
 use service_engine::{Cohort, Deps};
 use uuid::Uuid;
 
+use crate::facts::Fact;
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
 use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
@@ -115,8 +118,20 @@ pub struct StoredItem {
     pub blocks: Vec<StoredBlock>,
 }
 
+/// What a transition changed and the store has yet to write beside the message
+/// row.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MessageChange {
+    /// The message's content is written: at its creation when it arrives
+    /// whole, at its close when it streamed.
+    ContentWritten,
+    /// Its author deleted it: its content goes, the node stays.
+    ContentRemoved,
+    Recorded(Fact),
+}
+
 /// One message, whole.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MessageState {
     pub id: Uuid,
     pub thread_id: Uuid,
@@ -135,6 +150,35 @@ pub struct MessageState {
     pub items: Vec<StoredItem>,
     /// The members of the message's thread.
     pub members: BTreeSet<Uuid>,
+    /// Unsaved changes, in order.
+    pub pending: Vec<MessageChange>,
+}
+
+impl MessageState {
+    pub fn pending_facts(&self) -> Vec<Fact> {
+        self.pending
+            .iter()
+            .filter_map(|change| match change {
+                MessageChange::Recorded(fact) => Some(fact.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The user who wrote it, when a user did.
+    pub fn author_user(&self) -> Option<Uuid> {
+        match &self.author {
+            MessageAuthor::User { user_id, .. } => Some(*user_id),
+            MessageAuthor::Ai { .. } => None,
+        }
+    }
+
+    /// Every block of the message, its own and its items'.
+    pub fn all_blocks(&self) -> impl Iterator<Item = &StoredBlock> {
+        self.blocks
+            .iter()
+            .chain(self.items.iter().flat_map(|item| item.blocks.iter()))
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +202,7 @@ pub(crate) mod tests {
             blocks: Vec::new(),
             items: Vec::new(),
             members: members.iter().copied().collect(),
+            pending: Vec::new(),
         }
     }
 

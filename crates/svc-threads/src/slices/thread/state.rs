@@ -1,10 +1,11 @@
 //! A thread's canonical state, as its store reads it back: the thread row, its
 //! members (with the name the roster copy holds for each), its resources, its
-//! read marks and its title Job.
+//! read marks and its title Job — plus the changes a transition made to it and
+//! not yet saved ([`ThreadChange`]), which its store writes and appends to the
+//! fact log in the transaction of the change.
 //!
-//! The transitions — creation, membership, resources, title, closing, deletion
-//! — and the facts they record are the implementation pass's; this module holds
-//! the state they act on and its total mapping from the store.
+//! The guarded transitions live in [`super::transitions`] and
+//! [`super::title_job`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +18,7 @@ use service_engine::wire::Noun;
 use service_engine::{Cohort, Deps};
 use uuid::Uuid;
 
+use crate::facts::Fact;
 use crate::principal::{ROSTER_DEPS, ThreadsPrincipal};
 
 /// The thread noun: what a thread's impacts name.
@@ -126,10 +128,40 @@ pub struct UnknownStoredValue {
 pub struct TitleJob {
     pub job_id: Uuid,
     pub state: TitleJobState,
+    pub created_at: DateTime<Utc>,
+    /// Set once the Job is no longer the thread's active title Job.
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl TitleJob {
+    pub fn is_active(&self) -> bool {
+        self.state == TitleJobState::Running
+    }
+}
+
+/// What a transition changed and the store has yet to write: the rows beside
+/// the thread row (members, resources, read marks), and the facts the change
+/// records. The thread row and its title Job are written whole at every save.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThreadChange {
+    MembersAdded(Vec<Uuid>),
+    /// Their read marks go with them.
+    MembersRemoved(Vec<Uuid>),
+    /// The whole list of `key` after the change; an empty list removes the key.
+    ResourceSet {
+        key: String,
+        ids: Vec<String>,
+    },
+    /// The reader's own state: no fact, no version.
+    ReadMarkSet {
+        user: Uuid,
+        message: Uuid,
+    },
+    Recorded(Fact),
 }
 
 /// One thread, whole.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ThreadState {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
@@ -145,9 +177,31 @@ pub struct ThreadState {
     /// Each member's last read message.
     pub read_marks: BTreeMap<Uuid, Uuid>,
     pub title_job: Option<TitleJob>,
+    /// Unsaved changes, in order.
+    pub pending: Vec<ThreadChange>,
 }
 
 impl ThreadState {
+    /// The facts the unsaved changes record.
+    pub fn pending_facts(&self) -> Vec<Fact> {
+        self.pending
+            .iter()
+            .filter_map(|change| match change {
+                ThreadChange::Recorded(fact) => Some(fact.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `user` is the thread's owner.
+    pub fn is_owner(&self, user: Uuid) -> bool {
+        self.owner_id == Some(user)
+    }
+
+    pub fn active_title_job(&self) -> Option<&TitleJob> {
+        self.title_job.as_ref().filter(|job| job.is_active())
+    }
+
     pub fn is_member(&self, user: Uuid) -> bool {
         self.members.contains_key(&user)
     }
@@ -191,6 +245,7 @@ pub(crate) mod tests {
             resources: BTreeMap::new(),
             read_marks: BTreeMap::new(),
             title_job: None,
+            pending: Vec::new(),
         }
     }
 

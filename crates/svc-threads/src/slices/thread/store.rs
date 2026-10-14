@@ -4,12 +4,15 @@
 //!
 //! A batch read is four statements whatever its size: the threads with their
 //! title Job, their members with the roster copy's name, their resources, their
-//! read marks. The write path (`save`, `create`, `delete`, each with the facts
-//! it records in `threads.fact`) is the implementation pass's.
+//! read marks. A save writes the thread row and its title Job whole, applies the
+//! row changes its transition made (members, resources, read marks) and appends
+//! the facts of the change, in the pipeline's transaction.
 //!
 //! Concurrency: the engine serialises commands on one key with a per-key
 //! transaction advisory lock taken when the pipeline loads it; `lock` adds a row
-//! lock that pins the row image.
+//! lock that pins the row image. A gesture that holds a thread and its messages
+//! locks the thread first, then the messages, then the artifacts — every
+//! gesture takes them in that one order.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,23 +29,25 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use super::state::{
-    MEMBER_DIM, Member, ThreadOrigin, ThreadState, TitleJob, TitleJobState, UnknownStoredValue,
+    MEMBER_DIM, Member, ThreadChange, ThreadOrigin, ThreadState, TitleJob, TitleJobState,
+    UnknownStoredValue,
 };
 use crate::directory::KNOWN_USERS_TABLE;
-use crate::fault::{self, corrupt};
+use crate::facts::{self, FactNoun};
+use crate::fault::corrupt;
 
 pub const TABLE: &str = "threads.thread";
 const COLUMNS: &str = "t.id, t.owner_id, t.title, t.parent_thread_id, t.origin_block_id, \
                        t.status, t.created_at, t.last_activity_at, t.version, \
-                       j.job_id AS title_job_id, j.state AS title_job_state";
+                       j.job_id AS title_job_id, j.state AS title_job_state, \
+                       j.created_at AS title_job_created_at, j.ended_at AS title_job_ended_at";
 
 pub struct ThreadStore;
 
 impl Persistence for ThreadStore {
     type Aggregate = ThreadState;
     type Key = Uuid;
-    // The thread's facts are the implementation pass's, with its transitions.
-    type Event = ();
+    type Event = ThreadChange;
 
     const STYLE: PersistenceStyle = PersistenceStyle::SoftEda;
 
@@ -61,19 +66,91 @@ impl Persistence for ThreadStore {
     }
 
     fn save<'a>(
-        _conn: &'a mut PgConnection,
-        _thread: &'a ThreadState,
-        _events: &'a [()],
+        conn: &'a mut PgConnection,
+        thread: &'a ThreadState,
+        changes: &'a [ThreadChange],
     ) -> BoxFuture<'a, Result<(), EngineError>> {
-        Box::pin(async { Err(fault::write_path_pending("thread")) })
+        Box::pin(async move {
+            sqlx::query(&format!(
+                "UPDATE {TABLE} SET title = $2, status = $3, last_activity_at = $4, version = $5 \
+                 WHERE id = $1"
+            ))
+            .bind(thread.id)
+            .bind(thread.title.as_ref().map(ThreadTitle::as_str))
+            .bind(thread.status.as_str())
+            .bind(thread.last_activity_at)
+            .bind(thread.version)
+            .execute(&mut *conn)
+            .await?;
+            write_title_job(conn, thread).await?;
+            for change in changes {
+                apply(conn, thread.id, change).await?;
+            }
+            facts::append(
+                conn,
+                FactNoun::Thread,
+                thread.id,
+                thread.version,
+                &thread.pending_facts(),
+            )
+            .await
+        })
     }
 
     fn create<'a>(
-        _conn: &'a mut PgConnection,
-        _thread: &'a ThreadState,
-        _events: &'a [()],
+        conn: &'a mut PgConnection,
+        thread: &'a ThreadState,
+        _changes: &'a [ThreadChange],
     ) -> BoxFuture<'a, Result<(), EngineError>> {
-        Box::pin(async { Err(fault::write_path_pending("thread")) })
+        Box::pin(async move {
+            sqlx::query(&format!(
+                "INSERT INTO {TABLE} (id, owner_id, title, parent_thread_id, origin_block_id, \
+                     status, created_at, last_activity_at, version) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+            ))
+            .bind(thread.id)
+            .bind(thread.owner_id)
+            .bind(thread.title.as_ref().map(ThreadTitle::as_str))
+            .bind(thread.origin.map(|origin| origin.thread_id))
+            .bind(thread.origin.map(|origin| origin.block_id))
+            .bind(thread.status.as_str())
+            .bind(thread.created_at)
+            .bind(thread.last_activity_at)
+            .bind(thread.version)
+            .execute(&mut *conn)
+            .await?;
+            let members: Vec<Uuid> = thread.members.keys().copied().collect();
+            add_members(conn, thread.id, &members).await?;
+            for (key, ids) in &thread.resources {
+                set_resource(conn, thread.id, key, ids).await?;
+            }
+            write_title_job(conn, thread).await?;
+            facts::append(
+                conn,
+                FactNoun::Thread,
+                thread.id,
+                thread.version,
+                &thread.pending_facts(),
+            )
+            .await
+        })
+    }
+
+    /// The thread row; its members, resources, messages, items, blocks, read
+    /// marks and title Job go with it by cascade. Its artifacts do not: they are
+    /// deleted first, through their own store, so that their bytes are
+    /// released.
+    fn delete<'a>(
+        conn: &'a mut PgConnection,
+        key: &'a Uuid,
+    ) -> BoxFuture<'a, Result<(), EngineError>> {
+        Box::pin(async move {
+            sqlx::query(&format!("DELETE FROM {TABLE} WHERE id = $1"))
+                .bind(key)
+                .execute(conn)
+                .await?;
+            Ok(())
+        })
     }
 }
 
@@ -83,6 +160,111 @@ impl Aggregate for ThreadState {
     fn key(&self) -> Uuid {
         self.id
     }
+
+    fn pending_events(&self) -> &[ThreadChange] {
+        &self.pending
+    }
+}
+
+async fn apply(
+    conn: &mut PgConnection,
+    thread: Uuid,
+    change: &ThreadChange,
+) -> Result<(), EngineError> {
+    match change {
+        ThreadChange::MembersAdded(users) => add_members(conn, thread, users).await,
+        ThreadChange::MembersRemoved(users) => {
+            // Their read marks go by cascade.
+            sqlx::query(
+                "DELETE FROM threads.thread_member WHERE thread_id = $1 AND user_id = ANY($2)",
+            )
+            .bind(thread)
+            .bind(users)
+            .execute(conn)
+            .await?;
+            Ok(())
+        }
+        ThreadChange::ResourceSet { key, ids } => set_resource(conn, thread, key, ids).await,
+        ThreadChange::ReadMarkSet { user, message } => {
+            sqlx::query(
+                "INSERT INTO threads.read_mark (thread_id, user_id, last_read_message_id) \
+                 VALUES ($1, $2, $3) \
+                 ON CONFLICT (thread_id, user_id) \
+                 DO UPDATE SET last_read_message_id = EXCLUDED.last_read_message_id",
+            )
+            .bind(thread)
+            .bind(user)
+            .bind(message)
+            .execute(conn)
+            .await?;
+            Ok(())
+        }
+        ThreadChange::Recorded(_) => Ok(()),
+    }
+}
+
+async fn add_members(
+    conn: &mut PgConnection,
+    thread: Uuid,
+    users: &[Uuid],
+) -> Result<(), EngineError> {
+    if users.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO threads.thread_member (thread_id, user_id) \
+         SELECT $1, unnest($2::uuid[]) ON CONFLICT DO NOTHING",
+    )
+    .bind(thread)
+    .bind(users)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+async fn set_resource(
+    conn: &mut PgConnection,
+    thread: Uuid,
+    key: &str,
+    ids: &[String],
+) -> Result<(), EngineError> {
+    if ids.is_empty() {
+        sqlx::query("DELETE FROM threads.thread_resource WHERE thread_id = $1 AND key = $2")
+            .bind(thread)
+            .bind(key)
+            .execute(conn)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO threads.thread_resource (thread_id, key, ids) VALUES ($1, $2, $3) \
+             ON CONFLICT (thread_id, key) DO UPDATE SET ids = EXCLUDED.ids",
+        )
+        .bind(thread)
+        .bind(key)
+        .bind(ids)
+        .execute(conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn write_title_job(conn: &mut PgConnection, thread: &ThreadState) -> Result<(), EngineError> {
+    let Some(job) = &thread.title_job else {
+        return Ok(());
+    };
+    sqlx::query(
+        "INSERT INTO threads.title_job (thread_id, job_id, state, created_at, ended_at) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (thread_id) DO UPDATE SET state = EXCLUDED.state, ended_at = EXCLUDED.ended_at",
+    )
+    .bind(thread.id)
+    .bind(job.job_id)
+    .bind(job.state.as_db())
+    .bind(job.created_at)
+    .bind(job.ended_at)
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// The threads of the members named, one read bounded by the engine's ceiling.
@@ -197,10 +379,13 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
     };
     let job_id: Option<Uuid> = row.try_get("title_job_id")?;
     let job_state: Option<String> = row.try_get("title_job_state")?;
-    let title_job = match (job_id, job_state) {
-        (Some(job_id), Some(state)) => Some(TitleJob {
+    let job_created_at: Option<DateTime<Utc>> = row.try_get("title_job_created_at")?;
+    let title_job = match (job_id, job_state, job_created_at) {
+        (Some(job_id), Some(state), Some(created_at)) => Some(TitleJob {
             job_id,
             state: TitleJobState::from_db(&state).map_err(corrupt)?,
+            created_at,
+            ended_at: row.try_get("title_job_ended_at")?,
         }),
         _ => None,
     };
@@ -218,6 +403,7 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
         resources: BTreeMap::new(),
         read_marks: BTreeMap::new(),
         title_job,
+        pending: Vec::new(),
     })
 }
 

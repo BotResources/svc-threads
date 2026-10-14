@@ -21,7 +21,9 @@ runner = []
 async-graphql.workspace = true
 br-core-auth.workspace = true
 br-core-directory.workspace = true
+br-core-integration.workspace = true
 chrono.workspace = true
+contract-jobs.workspace = true
 contract-threads.workspace = true
 futures-util.workspace = true
 serde.workspace = true
@@ -46,7 +48,6 @@ uuid.workspace = true
 br-test-harness = { workspace = true, features = ["e2e-db", "graphql", "sse", "ws", "nats-fabric", "spawned-nats"] }
 conformance-scope.workspace = true
 br-core-auth = { workspace = true, features = ["test-support"] }
-br-core-integration.workspace = true
 br-core-scope.workspace = true
 br-scope-declaration-contract.workspace = true
 br-util-nats-fabric.workspace = true

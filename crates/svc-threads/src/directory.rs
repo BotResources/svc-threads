@@ -143,6 +143,37 @@ impl KnownRow for KnownUser {
     }
 }
 
+/// Of `user_ids`, those the roster copy holds and still in the roster: the only
+/// users a command may name as an owner or a member. One statement.
+pub async fn in_roster(
+    conn: &mut sqlx::PgConnection,
+    user_ids: &[Uuid],
+) -> Result<std::collections::BTreeSet<Uuid>, EngineError> {
+    if user_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let held: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT user_id FROM {KNOWN_USERS_TABLE} WHERE user_id = ANY($1) AND in_roster"
+    ))
+    .bind(user_ids)
+    .fetch_all(conn)
+    .await?;
+    Ok(held.into_iter().collect())
+}
+
+/// The current display name of `user`, if the roster copy holds them.
+pub async fn display_name(
+    conn: &mut sqlx::PgConnection,
+    user: Uuid,
+) -> Result<Option<String>, EngineError> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT display_name FROM {KNOWN_USERS_TABLE} WHERE user_id = $1"
+    ))
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
 fn user_key(user_id: Uuid) -> KvKey {
     KvKey::new(br_core_directory::user_kv_key(user_id))
         .expect("the roster key of a UUID is a valid KV key")

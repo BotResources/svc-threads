@@ -26,8 +26,16 @@ const S3_REGION: &str = "S3_REGION";
 const S3_PUBLIC_ENDPOINT: &str = "S3_PUBLIC_ENDPOINT";
 const DEFAULT_S3_REGION: &str = "us-east-1";
 
+/// How often the engine's reaper looks at pending uploads. A member's read
+/// access to an artifact waits for the reaper to verify its bytes, so Threads
+/// keeps it short.
+const BLOB_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub async fn run() -> Result<(), EngineError> {
-    let config = engine_config(EngineConfig::from_env()?, object_storage_from_env()?);
+    let threads = crate::config::ThreadsConfig::from_env()?;
+    let blob = object_storage_from_env()?.map(|blob| blob.with_upload_ttl(threads.upload_window));
+    crate::config::install(threads);
+    let config = engine_config(EngineConfig::from_env()?, blob);
 
     run_service(BootPlan {
         component: "svc-threads",
@@ -52,7 +60,9 @@ pub fn engine_config(base: EngineConfig, blob: Option<BlobConfig>) -> EngineConf
         .with_service(crate::SERVICE)
         .with_service_version(env!("CARGO_PKG_VERSION"));
     match blob {
-        Some(blob) => config.with_blob_storage(blob),
+        Some(blob) => config
+            .with_blob_storage(blob)
+            .with_blob_reaper_interval(BLOB_REAPER_INTERVAL),
         None => config,
     }
 }
