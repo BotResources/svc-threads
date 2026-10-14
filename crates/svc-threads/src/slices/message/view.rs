@@ -10,8 +10,9 @@
 //!
 //! The view renders what the store holds. The live content of a `STREAMING`
 //! message is the accumulated lane's ([`super::stream`]); rendering it needs the
-//! engine's chunk reader, which only the low-level projector receives — the
-//! implementation pass moves this view there (see the scaffold's report).
+//! engine's chunk reader, which only the low-level projector receives (engine
+//! v0.4.1: `view::Projector` has no access to it) — the implementation pass
+//! moves this view there.
 
 use chrono::{DateTime, Utc};
 use contract_threads::{BlockKind, MessageStatus};

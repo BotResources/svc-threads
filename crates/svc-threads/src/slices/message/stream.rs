@@ -16,8 +16,10 @@
 //!
 //! The fold keeps the decoded chunks in order. Folding them with the library —
 //! a step draft per item, the item completing on its `finish`, a refused event
-//! failing the message — is the implementation pass's, once the library gaps it
-//! depends on are settled (see the scaffold's report).
+//! failing the message — is the implementation pass's. It depends on what
+//! `br-llm-messages` v0.3.0 does not offer yet: a `StepDraft` that is `Clone`
+//! (an accumulator state must be), a snapshot of a draft's partial blocks, and
+//! a way to close an unfinished draft.
 
 use contract_threads::{Chunk, MESSAGE_CONTENT_ACCUMULATOR};
 use serde::{Deserialize, Serialize};
