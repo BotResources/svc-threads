@@ -195,6 +195,12 @@ fn reaction_meta(cx: &Reaction<'_>) -> FactMeta {
     }
 }
 
+/// Whether the bytes behind a reference are present at their declared digest,
+/// as object storage answers now.
+pub async fn bytes_verified(reference: BlobRef) -> Result<bool, Fault> {
+    Ok(reader()?.head(reference).await?.and_then(|head| head.verified()) == Some(true))
+}
+
 // ── attaching ───────────────────────────────────────────────────────────────
 
 /// The artifacts a message of `thread` names, loaded and locked, when every one
@@ -220,8 +226,7 @@ pub async fn ready(
         if !artifact.attachable_to(thread) {
             return Ok(Err(not_ready(*id)));
         }
-        let head = reader()?.head(BlobRef(artifact.blob_ref)).await?;
-        if head.and_then(|head| head.verified()) != Some(true) {
+        if !bytes_verified(BlobRef(artifact.blob_ref)).await? {
             return Ok(Err(not_ready(*id)));
         }
     }

@@ -6,10 +6,15 @@ use service_engine::blobs::Disposition;
 use service_engine::{BlobRef, JsonScalar, OrInternal, Query};
 use uuid::Uuid;
 
-use super::lifecycle::RequestUpload;
+use super::lifecycle::{self, RequestUpload};
 use super::view::ArtifactsView;
 use crate::access;
 use crate::principal::ThreadsPrincipal;
+
+/// How long a read access waits for the engine to promote verified bytes, and
+/// how often it asks.
+const PROMOTION_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+const PROMOTION_STEP: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// A time-bounded upload access, pinned to the declared size and digest: POST
 /// the bytes to `url` as a form carrying `fields`, the file last. Answered once,
@@ -27,7 +32,7 @@ pub struct ArtifactQuery;
 impl ArtifactQuery {
     /// A time-bounded read access to an attached artifact of a thread the
     /// caller is a member of, or `null` — exactly as for an artifact that does
-    /// not exist, or whose bytes are not verified yet.
+    /// not exist.
     async fn threads_artifact_download(
         &self,
         ctx: &Context<'_>,
@@ -43,10 +48,31 @@ impl ArtifactQuery {
         if artifact.thread_id != thread_id || artifact.message_id.is_none() {
             return Ok(None);
         }
-        Ok(query
-            .download::<ArtifactsView>(&artifact_id, BlobRef(artifact.blob_ref), disposition)
-            .await?
-            .map(|url| url.into_string()))
+        let reference = BlobRef(artifact.blob_ref);
+        // ENGINE GAP (br-service-engine v0.4.1): the engine presigns a verified
+        // upload only once its reaper promoted it, and offers no promotion on
+        // demand. An attached artifact's bytes were verified when its message
+        // attached it, so its read access waits for that promotion — within a
+        // beat, the reaper sweeping on every beat (`crate::boot`) — rather than
+        // answering as for an artifact that does not exist. Bounded: past it,
+        // `null`. The engine would need a download of a reference whose storage
+        // HEAD verifies, or a promotion on demand.
+        let deadline = tokio::time::Instant::now() + PROMOTION_WAIT;
+        loop {
+            if let Some(url) = query
+                .download::<ArtifactsView>(&artifact_id, reference, disposition)
+                .await?
+            {
+                return Ok(Some(url.into_string()));
+            }
+            let verified = lifecycle::bytes_verified(reference)
+                .await
+                .or_internal("read an artifact's bytes")?;
+            if !verified || tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(PROMOTION_STEP).await;
+        }
     }
 }
 
