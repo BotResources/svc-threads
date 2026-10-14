@@ -198,7 +198,11 @@ fn reaction_meta(cx: &Reaction<'_>) -> FactMeta {
 /// Whether the bytes behind a reference are present at their declared digest,
 /// as object storage answers now.
 pub async fn bytes_verified(reference: BlobRef) -> Result<bool, Fault> {
-    Ok(reader()?.head(reference).await?.and_then(|head| head.verified()) == Some(true))
+    Ok(reader()?
+        .head(reference)
+        .await?
+        .and_then(|head| head.verified())
+        == Some(true))
 }
 
 // ── attaching ───────────────────────────────────────────────────────────────
