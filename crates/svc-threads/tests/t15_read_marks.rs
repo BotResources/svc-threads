@@ -18,6 +18,7 @@
 mod common;
 
 use common::facts;
+use common::feed::{Live, upsert_of};
 use common::flows::{
     command, create_thread, message_view, say, thread_confirmed, thread_view, version,
 };
@@ -65,6 +66,10 @@ async fn t15_a_member_sets_their_own_read_mark_the_readers_own_state_with_no_fac
     gql::assert_allowed(&thread_view(&ctx, &a.passport, t).await, "setReadMark");
     gql::assert_allowed(&message_view(&ctx, &a.passport, t, m2).await, "markRead");
 
+    // Given A and B following T.
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
+    let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
+
     // When A sets their read mark on T at M2.
     let version_before = version(&ctx, &o.passport, t).await;
     let facts_before = facts::count(&ctx.pool).await;
@@ -85,6 +90,14 @@ async fn t15_a_member_sets_their_own_read_mark_the_readers_own_state_with_no_fac
         thread_view(&ctx, &b.passport, t).await["readMark"],
         Value::Null
     );
+    // And (3) A's live view carries A's own mark; B's is told nothing — the
+    // mark is the reader's own state.
+    a_feed
+        .until("A's mark reaches A's feed", |delta| {
+            upsert_of(delta, t).is_some_and(|view| view["readMark"] == m2.to_string())
+        })
+        .await;
+    b_feed.silence("A's mark is not B's").await;
     // And T's version, the facts and the event stream are untouched.
     tokio::time::sleep(QUIET_WINDOW).await;
     assert_eq!(version(&ctx, &o.passport, t).await, version_before);

@@ -106,9 +106,39 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
     assert_eq!(fetch(&url).await, (200, file.bytes.clone()));
     assert!(in_reset(&live.reset, t).is_some(), "{}", live.reset);
 
+    // When A, a member of T and of T2, reaches T's message and T's artifact
+    // through T2.
+    let t2 = create_thread(&ctx, Some(&a), &[]).await;
+    let unknown_tip = Uuid::now_v7();
+    let unknown_artifact = Uuid::now_v7();
+    let through_t2 = |answer: Value, id: Uuid| {
+        format!("{:?} {}", gql::code(&answer), answer["data"]).replace(&id.to_string(), "<id>")
+    };
+    // Then each is answered exactly as an id nobody created: no message of T
+    // and no artifact of T is reachable from another thread.
+    assert_eq!(
+        through_t2(
+            branch_answer(&ctx, &a.passport, t2, 10, None, Some(m1)).await,
+            m1
+        ),
+        through_t2(
+            branch_answer(&ctx, &a.passport, t2, 10, None, Some(unknown_tip)).await,
+            unknown_tip
+        ),
+        "T's message through T2"
+    );
+    assert_eq!(
+        through_t2(download_answer(&ctx, &a.passport, t2, x).await, x),
+        through_t2(
+            download_answer(&ctx, &a.passport, t2, unknown_artifact).await,
+            unknown_artifact
+        ),
+        "T's artifact through T2"
+    );
+    assert_eq!(download_url(&ctx, &a.passport, t2, x).await, None);
+
     // When U and S ask for T, its messages, its artifact, or follow it.
     let random = Uuid::now_v7();
-    let unknown_artifact = Uuid::now_v7();
     let as_unknown_u = reads(&ctx, &u.passport, random, unknown_artifact).await;
     for stranger in [&u, &s] {
         let what = &stranger.label;

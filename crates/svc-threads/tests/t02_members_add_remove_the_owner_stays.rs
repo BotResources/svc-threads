@@ -21,8 +21,8 @@ mod common;
 use common::facts;
 use common::feed::{Live, removes, upsert_of};
 use common::flows::{
-    command, create_thread, member_ids, say, sorted, thread_confirmed, thread_refused, thread_view,
-    version,
+    await_members_equal, command, create_thread, member_ids, say, settled_revision, sorted,
+    thread_confirmed, thread_refused, thread_view, version,
 };
 use common::{M_SET_READ_MARK, TestContext, gql};
 use contract_threads::{AddMembers, PublishedThreadMembers, ReasonCode, RemoveMembers};
@@ -69,6 +69,8 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
     let t = create_thread(&ctx, Some(&o), &[&a]).await;
     let mut b_list = Live::list(&ctx, &b.passport).await;
     let mut a_list = Live::list(&ctx, &a.passport).await;
+    let mut a_feed_sse = Live::thread(&ctx, &a.passport, t).await;
+    let mut a_feed_ws = Live::thread_ws(&ctx, &a.passport, t).await;
     let version_born = version(&ctx, &o.passport, t).await;
 
     // When the harness adds B and C.
@@ -76,9 +78,14 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
 
     // Then (4) confirmed, and the members entry lists O, A, B and C.
     thread_confirmed(&ctx, added, "adding B and C").await;
-    let (members, _) = entry(&ctx, t).await.expect("T's entry");
-    assert_eq!(members.owner_id, Some(o.id));
-    assert_eq!(sorted(&members.users), sorted(&[o.id, a.id, b.id, c.id]));
+    await_members_equal(
+        &ctx,
+        t,
+        Some(o.id),
+        &[o.id, a.id, b.id, c.id],
+        "the entry lists B and C",
+    )
+    .await;
 
     // And (2) B and C read T at once, listed among its members.
     for person in [&b, &c] {
@@ -105,7 +112,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
 
     // When the harness adds A again.
     let facts_before = facts::count(&ctx.pool).await;
-    let (_, revision_before) = entry(&ctx, t).await.expect("T's entry");
+    let revision_before = settled_revision(&ctx, t).await;
     let again = command(&ctx, &add(t, &[a.id], o.id)).await;
 
     // Then confirmed, and nothing changes: no fact, no version bump, no
@@ -113,7 +120,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
     thread_confirmed(&ctx, again, "adding A again").await;
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
     assert_eq!(version(&ctx, &o.passport, t).await, version_after_add);
-    assert_eq!(entry(&ctx, t).await.expect("T's entry").1, revision_before);
+    assert_eq!(settled_revision(&ctx, t).await, revision_before);
 
     // Given A sets their read mark on T, at a message of T.
     let m1 = say(&ctx, t, None, &o, "first words").await;
@@ -138,8 +145,14 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
 
     // Then (4) confirmed, and the entry drops A.
     thread_confirmed(&ctx, removed, "removing A").await;
-    let (members, _) = entry(&ctx, t).await.expect("T's entry");
-    assert_eq!(sorted(&members.users), sorted(&[o.id, b.id, c.id]));
+    await_members_equal(
+        &ctx,
+        t,
+        Some(o.id),
+        &[o.id, b.id, c.id],
+        "the entry drops A",
+    )
+    .await;
     // And A's read mark is gone with their membership.
     let marks: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM threads.read_mark WHERE thread_id = $1 AND user_id = $2",
@@ -157,18 +170,29 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
         .until("T leaves A's list", |delta| removes(delta, t))
         .await;
     a_list.silence("T leaves A's list once").await;
+    // And (3) A's open live views of T, over both transports, are revoked:
+    // T removed, or the stream ended — and nothing of T reaches A after.
+    for (feed, transport) in [(&mut a_feed_sse, "SSE"), (&mut a_feed_ws, "WS")] {
+        feed.until_revoked(&format!("A loses T over {transport}"), t)
+            .await;
+    }
+    say(&ctx, t, Some(m1), &o, "after A left").await;
+    for (feed, transport) in [(&mut a_feed_sse, "SSE"), (&mut a_feed_ws, "WS")] {
+        feed.silent_or_ended(&format!("a removed member's {transport} view"))
+            .await;
+    }
 
     // When the harness removes D, who is not a member.
     let facts_before = facts::count(&ctx.pool).await;
     let version_before = version(&ctx, &o.passport, t).await;
-    let (_, revision_before) = entry(&ctx, t).await.expect("T's entry");
+    let revision_before = settled_revision(&ctx, t).await;
     let absent = command(&ctx, &remove(t, &[d.id], o.id)).await;
 
     // Then confirmed, and nothing changes.
     thread_confirmed(&ctx, absent, "removing a non-member").await;
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
     assert_eq!(version(&ctx, &o.passport, t).await, version_before);
-    assert_eq!(entry(&ctx, t).await.expect("T's entry").1, revision_before);
+    assert_eq!(settled_revision(&ctx, t).await, revision_before);
 
     // When the harness removes [B, O].
     let owner_out = command(&ctx, &remove(t, &[b.id, o.id], b.id)).await;
@@ -182,9 +206,9 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
         "removing the owner",
     )
     .await;
-    let (members, revision) = entry(&ctx, t).await.expect("T's entry");
+    assert_eq!(settled_revision(&ctx, t).await, revision_before);
+    let (members, _) = entry(&ctx, t).await.expect("T's entry");
     assert_eq!(sorted(&members.users), sorted(&[o.id, b.id, c.id]));
-    assert_eq!(revision, revision_before);
     assert!(thread_view(&ctx, &b.passport, t).await.is_object());
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
 
@@ -199,6 +223,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
         "adding an unknown user",
     )
     .await;
+    assert_eq!(settled_revision(&ctx, t).await, revision_before);
     let (members, _) = entry(&ctx, t).await.expect("T's entry");
     assert!(!members.users.contains(&d.id), "D was not added");
     assert_eq!(thread_view(&ctx, &d.passport, t).await, Value::Null);
@@ -214,9 +239,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
     thread_confirmed(&ctx, second, "removing B from W").await;
 
     // Then the entry follows down to an empty users list, with no owner.
-    let (members, _) = entry(&ctx, w).await.expect("W's entry stays");
-    assert_eq!(members.owner_id, None);
-    assert!(members.users.is_empty(), "{members:?}");
+    await_members_equal(&ctx, w, None, &[], "W's entry empties").await;
 
     ctx.teardown().await;
 }

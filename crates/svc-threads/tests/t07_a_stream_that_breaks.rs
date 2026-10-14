@@ -10,8 +10,8 @@
 //! > is FAILED without that step. Opening M6 on a closed thread is refused
 //! > THREAD_NOT_OPEN and its chunks are never folded.
 //!
-//! The stream window is the specification's 10 minutes; the suite runs the
-//! binary with it configured short (`THREADS_STREAM_IDLE_MS`, see
+//! The stream window is the specification's 10 minutes; this scenario — and
+//! only this one — runs the binary with it configured short (`THREADS_STREAM_IDLE_MS`, see
 //! `common::constants`) — a configuration value, never a test seam.
 //!
 //! Channels: the live feed (3), the messages as a member reads them (2), the
@@ -26,16 +26,23 @@ use common::flows::{
     ai, await_message, command, completion, create_thread, message_confirmed, message_refused,
     message_view, open_stream, say, streaming_message, thread_confirmed,
 };
-use common::{QUIET_WINDOW, STREAM_IDLE_WINDOW, TestContext, stream};
-use contract_threads::{CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode};
+use common::{QUIET_WINDOW, SHORT_STREAM_IDLE, TestContext, Windows, stream};
+use contract_threads::{
+    CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode, StreamSeal, seal_hash,
+};
 use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or_dropped() {
-    // Given T with member A, A's question M1, and A following T.
-    let ctx = TestContext::setup().await;
+    // Given Threads running with a short stream window; T with member A, A's
+    // question M1, and A following T.
+    let ctx = TestContext::setup_with(Windows {
+        stream_idle: Some(SHORT_STREAM_IDLE),
+        ..Windows::default()
+    })
+    .await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
     let m1 = say(&ctx, t, None, &a, "Go on").await;
@@ -65,16 +72,35 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
         "a Failed fact records M3's end"
     );
 
-    // When M4 is opened, receives a block_start and two text deltas, then
-    // nothing for longer than the stream window.
+    // When M4 is opened and receives a block_start and two text deltas, each
+    // within the stream window of the previous one, though the three span
+    // more than a window.
     let m4 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
     let m4_chunks = vec![
         opening(0, text_start(0), Uuid::now_v7(), Some("m-1")),
         event(0, text_delta(0, "half ")),
         event(0, text_delta(0, "said")),
     ];
-    let (last_seq, hash) = stream::push(&nats, m4, 0, &m4_chunks).await;
-    tokio::time::sleep(STREAM_IDLE_WINDOW).await;
+    let gap = SHORT_STREAM_IDLE * 3 / 5;
+    for (seq, chunk) in m4_chunks.iter().enumerate() {
+        stream::push(&nats, m4, seq as u64, std::slice::from_ref(chunk)).await;
+        tokio::time::sleep(gap).await;
+    }
+    let (last_seq, hash) = (
+        (m4_chunks.len() - 1) as u64,
+        seal_hash(&m4_chunks).expect("the chunks hash"),
+    );
+
+    // Then M4 still streams: the window runs from the last chunk, not from
+    // the opening.
+    assert_eq!(
+        message_view(&ctx, &a.passport, t, m4).await["status"],
+        "STREAMING",
+        "a writer that keeps pushing within the window is not failed"
+    );
+
+    // When nothing more arrives for longer than the window.
+    tokio::time::sleep(SHORT_STREAM_IDLE).await;
 
     // Then M4 is FAILED, its unfinished step kept as the library finishes it.
     let view = await_message(
@@ -112,20 +138,19 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
 
     // When M5 is opened, receives only a block_start, and is failed.
     let m5 = open_stream(&ctx, t, Some(m1), ai("a2", "Critic")).await;
-    stream::push(
+    let (last_seq, hash) = stream::push(
         &nats,
         m5,
         0,
         &[opening(0, text_start(0), Uuid::now_v7(), None)],
     )
     .await;
-    tokio::time::sleep(QUIET_WINDOW).await;
     let fail = command(
         &ctx,
         &FailMessage {
             message_id: m5,
             thread_id: t,
-            seal: None,
+            seal: Some(StreamSeal { last_seq, hash }),
             acting_user_id: None,
         },
     )

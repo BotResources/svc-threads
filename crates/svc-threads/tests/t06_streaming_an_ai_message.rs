@@ -114,7 +114,7 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     let item1 = vec![results_chunk(1, vec![tool_result("c1", "search", "found")])];
     // Item 2: a text step carrying the ARTIFACT block, ending the turn.
     let item2 = vec![
-        opening(2, text_start(0), Uuid::now_v7(), Some("m-1")),
+        opening(2, text_start(0), Uuid::now_v7(), Some("m-2")),
         event(2, text_delta(0, "Done.")),
         event(2, block_end(0)),
         block_chunk(2, artifact_block(x)),
@@ -245,6 +245,7 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     // Item 2: the text, then the ARTIFACT block at the next index.
     assert_eq!(items[2]["kind"], "STEP");
     assert_eq!(items[2]["stopReason"], json!({ "type": "end_turn" }));
+    assert_eq!(items[2]["model"], "m-2", "each step carries its own model");
     assert_eq!(items[2]["blocks"][0]["content"], text_content("Done."));
     assert_eq!(items[2]["blocks"][1]["kind"], "ARTIFACT");
     assert_eq!(items[2]["blocks"][1]["index"], 1);
@@ -280,6 +281,19 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     );
     facts::assert_no_fact_carries(&ctx.pool, "Hello", "a streamed text").await;
 
+    // Given B following T on the second pod.
+    let mut b_on_pod2 = Live::sse_on(
+        &pod2.base_url,
+        &b.passport,
+        THREAD_FEED,
+        &thread_feed(t, 20),
+    )
+    .await;
+    assert_eq!(
+        in_reset(&b_on_pod2.reset, m2).expect("M2 on pod 2")["status"],
+        "COMPLETED"
+    );
+
     // When a chunk is published after the seal.
     let late = event(2, text_delta(0, " Or not."));
     stream::push(&ctx.nats.url(), m2, n + 1, &[late]).await;
@@ -287,6 +301,7 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     // Then it is ignored on every pod: M2 reads exactly as sealed on both, and
     // nothing is pushed.
     a_feed.silence("a chunk after the seal").await;
+    b_on_pod2.silence("a chunk after the seal, on pod 2").await;
     assert_eq!(message_view(&ctx, &a.passport, t, m2).await, sealed);
     let on_pod2 = pod2
         .run(

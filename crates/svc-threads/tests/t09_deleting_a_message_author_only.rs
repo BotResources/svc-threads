@@ -146,6 +146,14 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     // And a Deleted fact records it — no fact, before or after, carries the text.
     assert!(facts::types(&facts::of(&ctx.pool, "message", m1).await).contains(&"Deleted"));
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "after the deletion").await;
+    // And its content is gone from the store: no block of M1 is left.
+    let blocks: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM threads.message_block WHERE message_id = $1")
+            .bind(m1)
+            .fetch_one(&ctx.pool)
+            .await
+            .expect("count M1's blocks");
+    assert_eq!(blocks, 0, "a deleted message keeps no content anywhere");
     // And a runner's context no longer contains M1.
     let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
     assert!(

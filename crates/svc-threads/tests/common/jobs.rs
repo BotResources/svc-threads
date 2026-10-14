@@ -317,6 +317,27 @@ impl Jobs {
     }
 }
 
+/// Waits until Threads consumed the fact `event_id`: the engine's claim of
+/// the message, written in the transaction of its reaction — a barrier that
+/// changes nothing, so a single probe after it reads the reaction's outcome.
+pub async fn await_consumed(pool: &sqlx::PgPool, event_id: Uuid, what: &str) {
+    let consumed = wait_until(PUSH_TIMEOUT, || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM service_engine.message_claim WHERE message_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the engine's message claims")
+            > 0
+    })
+    .await;
+    assert!(
+        consumed,
+        "{what}: Threads never consumed Jobs' fact {event_id}"
+    );
+}
+
 /// The coordinates of Jobs' `failed` fact, for a redelivery.
 pub fn failed_coords() -> EventCoords {
     evt_job_failed_v1_coords().unwrap()

@@ -9,6 +9,7 @@
 
 use br_core_auth::Passport;
 use br_test_harness::{SseOutcome, SseSubscription, WsError, WsSubscription};
+use futures_util::FutureExt as _;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -46,10 +47,29 @@ enum Transport {
     Ws(Box<WsSubscription>),
 }
 
+/// What a read of the stream met.
+enum Frame {
+    Delta(Value),
+    Timeout,
+    /// The server ended the stream: closed it, completed it, or sent an error
+    /// frame.
+    Ended(String),
+}
+
+/// How a member lost a live view.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Revoked {
+    /// A `Remove` naming the object.
+    Removed,
+    /// The stream ended.
+    Ended(String),
+}
+
 /// One live view, on one transport, past its opening `Reset`.
 pub struct Live {
     root: &'static str,
     transport: Transport,
+    ended: bool,
     revision: Option<i64>,
     /// The snapshot the stream opened on.
     pub reset: Value,
@@ -63,7 +83,17 @@ impl Live {
         root: &'static str,
         document: &str,
     ) -> Self {
-        let sse = SseSubscription::open(&ctx.base_url, passport, document).await;
+        Self::sse_on(&ctx.base_url, passport, root, document).await
+    }
+
+    /// Opens `document` over SSE on the pod at `base_url`.
+    pub async fn sse_on(
+        base_url: &str,
+        passport: &Passport,
+        root: &'static str,
+        document: &str,
+    ) -> Self {
+        let sse = SseSubscription::open(base_url, passport, document).await;
         Self::opened(root, Transport::Sse(sse)).await
     }
 
@@ -85,6 +115,11 @@ impl Live {
         Self::sse(ctx, passport, THREAD_FEED, &thread_feed(thread, 20)).await
     }
 
+    /// `passport` follows `thread`, over WebSocket.
+    pub async fn thread_ws(ctx: &TestContext, passport: &Passport, thread: Uuid) -> Self {
+        Self::ws(ctx, passport, THREAD_FEED, &thread_feed(thread, 20)).await
+    }
+
     /// `passport` follows their list, over SSE.
     pub async fn list(ctx: &TestContext, passport: &Passport) -> Self {
         Self::sse(ctx, passport, THREADS_LIST, &threads_list(20)).await
@@ -94,6 +129,7 @@ impl Live {
         let mut live = Self {
             root,
             transport,
+            ended: false,
             revision: None,
             reset: Value::Null,
         };
@@ -112,22 +148,49 @@ impl Live {
         live
     }
 
+    async fn read(&mut self, timeout: std::time::Duration) -> Frame {
+        if self.ended {
+            return Frame::Ended("already ended".to_string());
+        }
+        let frame = match &mut self.transport {
+            // The harness's SSE handle panics on an error frame: caught here,
+            // it is the server ending the stream with an error.
+            Transport::Sse(sse) => {
+                match std::panic::AssertUnwindSafe(sse.next_outcome(timeout))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(SseOutcome::Event(data)) => Frame::Delta(data),
+                    Ok(SseOutcome::Timeout) => Frame::Timeout,
+                    Ok(other) => Frame::Ended(format!("{other:?}")),
+                    Err(panic) => Frame::Ended(
+                        panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .unwrap_or_else(|| "an error frame".to_string()),
+                    ),
+                }
+            }
+            Transport::Ws(ws) => match ws.next_data_outcome(timeout).await {
+                Ok(data) => Frame::Delta(data),
+                Err(WsError::Timeout) => Frame::Timeout,
+                Err(other) => Frame::Ended(other.to_string()),
+            },
+        };
+        if matches!(frame, Frame::Ended(_)) {
+            self.ended = true;
+        }
+        frame
+    }
+
     /// The next delta, if one arrives within `timeout`. A delta's revision
     /// follows the previous one's, contiguous.
     pub async fn next(&mut self, timeout: std::time::Duration) -> Option<Value> {
-        let frame = match &mut self.transport {
-            Transport::Sse(sse) => match sse.next_outcome(timeout).await {
-                SseOutcome::Event(data) => Some(data),
-                SseOutcome::Timeout => None,
-                SseOutcome::Closed => panic!("{}: the server closed the stream", self.root),
-                other => panic!("{}: {other:?}", self.root),
-            },
-            Transport::Ws(ws) => match ws.next_data_outcome(timeout).await {
-                Ok(data) => Some(data),
-                Err(WsError::Timeout) => None,
-                Err(other) => panic!("{}: {other}", self.root),
-            },
-        }?;
+        let frame = match self.read(timeout).await {
+            Frame::Delta(frame) => frame,
+            Frame::Timeout => return None,
+            Frame::Ended(why) => panic!("{}: the server ended the stream: {why}", self.root),
+        };
         let delta = frame[self.root].clone();
         assert!(
             !delta.is_null(),
@@ -165,6 +228,54 @@ impl Live {
                 ),
             }
         }
+    }
+
+    /// Reads until the member loses `id`: a `Remove` naming it, or the end of
+    /// the stream. Deltas about anything else are passed over.
+    pub async fn until_revoked(&mut self, what: &str, id: Uuid) -> Revoked {
+        let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match self.read(remaining).await {
+                Frame::Ended(why) => return Revoked::Ended(why),
+                Frame::Delta(frame) if removes(&frame[self.root], id) => return Revoked::Removed,
+                Frame::Delta(_) => {}
+                Frame::Timeout => panic!(
+                    "{what}: {} was neither removed nor ended within {PUSH_TIMEOUT:?}",
+                    self.root
+                ),
+            }
+        }
+    }
+
+    /// Nothing reaches the member any more: the stream stays silent over the
+    /// quiet window, or has ended.
+    pub async fn silent_or_ended(&mut self, what: &str) {
+        match self.read(QUIET_WINDOW).await {
+            Frame::Timeout | Frame::Ended(_) => {}
+            Frame::Delta(frame) => panic!("{what}: nothing may reach {}, got {frame}", self.root),
+        }
+    }
+
+    /// Reads deltas until those read so far satisfy `done`; answers them all.
+    pub async fn collect_until<F>(&mut self, what: &str, done: F) -> Vec<Value>
+    where
+        F: Fn(&[Value]) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
+        let mut seen = Vec::new();
+        while !done(&seen) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match self.next(remaining).await {
+                Some(delta) => seen.push(delta),
+                None => panic!(
+                    "{what}: never held on {}; seen: {}",
+                    self.root,
+                    serde_json::to_string(&seen).unwrap_or_default()
+                ),
+            }
+        }
+        seen
     }
 
     /// Nothing arrives over the quiet window.
