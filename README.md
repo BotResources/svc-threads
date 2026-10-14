@@ -16,10 +16,7 @@ member's read mark — and serves them, live, to their members.
 - Threads runs no AI logic; to name a new conversation it asks a runner through
   Jobs.
 
-**Status: 0.1.0 scaffold.** The service boots, migrates, declares its scope,
-binds every piece of infrastructure it uses and serves its read path; the write
-gestures and the runner reads answer `NOT_IMPLEMENTED` until the implementation
-lands. See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.1.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -39,6 +36,14 @@ lands. See [CHANGELOG.md](CHANGELOG.md).
   `S3_ACCESS_KEY`, `S3_SECRET_KEY` (`S3_REGION`, `S3_PUBLIC_ENDPOINT`
   optional) — Threads refuses to serve without object storage;
 - `schema`: prints the SDL, touches no infrastructure.
+
+Threads' own settings, read at `serve`, each with its default:
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `THREADS_TITLE_RUNNER_TYPE` | `thread_title` | the runner type of the title Job Threads asks Jobs to run |
+| `THREADS_STREAM_IDLE_MS` | `600000` (10 min) | how long a writer may push nothing before its `STREAMING` message is failed |
+| `THREADS_UPLOAD_WINDOW_MS` | `900000` (15 min) | how long an upload access stays valid, and a `PENDING` artifact waits for its message |
 
 Declared infrastructure, bound and never created (a missing piece keeps the pod
 not ready): PostgreSQL in session mode (one owner role with `BYPASSRLS`, one app

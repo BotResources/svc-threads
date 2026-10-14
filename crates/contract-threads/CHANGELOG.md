@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
-## Unreleased
+## 0.1.0
 
 ### Added
 
@@ -35,5 +35,6 @@ exists.
   - `TitleJobConfig`, the configuration of the title Job and the names of the
     runner operations;
   - value objects: `ThreadTitle` (at most 200 characters), `SealDigest`;
+  - the reason code `RESOURCE_KEY_INVALID` (proposed: a blank resource key);
     statuses and kinds with a total wire mapping;
   - `br-llm-messages` v0.3.0 re-exported as `contract_threads::llm`.

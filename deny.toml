@@ -112,4 +112,6 @@ allow-git = [
     "https://github.com/BotResources/br-service-engine",
     "https://github.com/BotResources/br-llm-messages-rs",
     "https://github.com/BotResources/br-e2e-harness",
+    # contract-jobs: the published language of the title Job.
+    "https://github.com/BotResources/svc-jobs",
 ]

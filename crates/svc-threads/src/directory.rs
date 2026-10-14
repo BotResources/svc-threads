@@ -20,9 +20,8 @@
 //! sessions are re-evaluated (and ended, once they are no longer active).
 //!
 //! What a retraction does beyond the row — deleting the threads the user owns —
-//! is not a projection's to do: engine v0.4.1 lets a mirror projection stage no
-//! command, scheduled reaction or pipeline deletion. The implementation pass
-//! wires it on the pipeline.
+//! is not a projection's to do: a mirror projection can stage no pipeline work.
+//! The departed-owner sweep carries it ([`crate::slices::thread::departure`]).
 
 use br_core_directory::{PublishedUser, USERS_KEY_PREFIX, user_id_from_kv_key};
 use chrono::{DateTime, Utc};
