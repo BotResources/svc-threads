@@ -12,7 +12,7 @@
 //!
 //! 1. **mutation ack / refusal** and 2. **query + affordances** — [`TestContext::run`]
 //!    and [`gql`];
-//! 3. **subscriptions** — `br_test_harness::{SseSubscription, WsSubscription}`
+//! 3. **subscriptions** — [`feed`], over `br_test_harness::{SseSubscription, WsSubscription}`
 //!    on [`TestContext::base_url`]: SSE (the gateway's leg) and
 //!    `graphql-transport-ws` (the direct leg), both declared by the engine's ops
 //!    contract; every stream opens on a `Reset`;
@@ -20,8 +20,14 @@
 //!    their one answer each ([`commands`]), the message stream a writer pushes
 //!    ([`stream`]), Identity's roster and scope handshake ([`identity`]), the
 //!    `threads.members.{thread_id}` entries Threads publishes
-//!    ([`TestContext::published_members`]), and the fact log `threads.fact`
-//!    (read with `SELECT` on the app role).
+//!    ([`TestContext::published_members`]), Jobs' side of the title Job
+//!    ([`jobs`]), the object store ([`artifacts`]) and the fact log
+//!    `threads.fact` ([`facts`], read with `SELECT` on the app role).
+//!
+//! [`content`] builds the conversation a scenario stores, through the
+//! contract's and the library's own types; [`flows`] are the gestures every
+//! scenario repeats (a thread created and confirmed, a message stored and
+//! confirmed), each asserting its one answer.
 //!
 //! The deployment is the unit, not the process: a context can stop its pod and
 //! boot it again on the same database and bus ([`TestContext::stop`] /
@@ -34,12 +40,18 @@
 
 #![allow(dead_code)] // each scenario file uses an overlapping, not identical, subset.
 
+pub mod artifacts;
 pub mod catalog;
 pub mod commands;
 pub mod constants;
+pub mod content;
+pub mod facts;
+pub mod feed;
+pub mod flows;
 pub mod gql;
 pub mod identity;
 pub mod infra;
+pub mod jobs;
 pub mod port;
 pub mod stream;
 
@@ -114,6 +126,9 @@ pub struct TestContext {
     pub scopes: identity::ScopeHandshake,
     /// Every answer Threads publishes, captured from before the first command.
     pub answers: commands::Answers,
+    /// Jobs' side of the title Job: every command Threads sends Jobs, captured
+    /// from before the boot, and the facts the scenario answers with.
+    pub jobs: jobs::Jobs,
     /// The app role's pool: `SELECT` only.
     pub pool: PgPool,
     pub minio: infra::Minio,
@@ -168,6 +183,7 @@ impl TestContext {
         // start, so nothing the boot publishes escapes them.
         let scopes = identity::ScopeHandshake::bind(&nats).await;
         let answers = commands::Answers::bind(&nats).await;
+        let jobs = jobs::Jobs::bind(&nats).await;
 
         let minio = infra::Minio::start().await;
 
@@ -200,6 +216,7 @@ impl TestContext {
             nats,
             scopes,
             answers,
+            jobs,
             pool,
             minio,
             db,
@@ -228,6 +245,12 @@ impl TestContext {
             (ENV_S3_ACCESS_KEY, self.minio.access_key().to_string()),
             (ENV_S3_SECRET_KEY, self.minio.secret_key().to_string()),
             (ENV_S3_REGION, infra::S3_REGION.to_string()),
+            (
+                ENV_STREAM_IDLE_MS,
+                STREAM_IDLE_WINDOW.as_millis().to_string(),
+            ),
+            (ENV_UPLOAD_WINDOW_MS, UPLOAD_WINDOW.as_millis().to_string()),
+            (ENV_TITLE_RUNNER_TYPE, TITLE_RUNNER_TYPE.to_string()),
         ]
     }
 
@@ -335,6 +358,7 @@ impl TestContext {
         self.pool.close().await;
         self.scopes.stop().await;
         self.answers.stop().await;
+        self.jobs.stop().await;
         self.minio.shutdown().await;
         self.nats.shutdown().await;
         catalog::serialized(self.db.cleanup()).await;
@@ -355,6 +379,11 @@ impl TestContext {
             ));
         }
         logs
+    }
+
+    /// The first pod's readiness endpoint, for the conformance battery.
+    pub fn readyz_url(&self) -> String {
+        format!("{}{READYZ_PATH}", self.base_url)
     }
 
     /// The readiness verdict as the kubelet's probe reads it: status and body,
@@ -402,6 +431,106 @@ impl TestContext {
         }
     }
 
+    /// Identity publishes a new active user whose Passport carries super-user
+    /// status — which gives nothing in Threads.
+    pub async fn enrol_super_user(&self, label: &str) -> Person {
+        let person = self.enrol(label).await;
+        Person {
+            passport: person_passport(person.id, true),
+            ..person
+        }
+    }
+
+    /// Identity republishes `person` under `new_label`'s display name; waits
+    /// until Threads' copy holds it.
+    pub async fn rename(&self, person: &Person, new_label: &str) {
+        identity::publish_user(
+            &self.nats,
+            person.id,
+            &identity::roster_entry(new_label, None),
+        )
+        .await;
+        self.await_known_user(person.id, new_label).await;
+    }
+
+    /// Identity deactivates `person` (their entry carries `disabled_at`); waits
+    /// until Threads' copy holds it.
+    pub async fn deactivate(&self, person: &Person) {
+        identity::publish_user(
+            &self.nats,
+            person.id,
+            &identity::roster_entry(&person.label, Some(chrono::Utc::now())),
+        )
+        .await;
+        eventually(
+            "the roster copy holds the deactivation",
+            PUSH_TIMEOUT,
+            || async {
+                let disabled: Option<bool> = sqlx::query_scalar(
+                    "SELECT disabled_at IS NOT NULL FROM threads.known_users WHERE user_id = $1",
+                )
+                .bind(person.id)
+                .fetch_optional(&self.pool)
+                .await
+                .expect("read the roster copy");
+                disabled == Some(true)
+            },
+        )
+        .await;
+    }
+
+    /// Identity republishes `person` active, under their own name.
+    pub async fn reactivate(&self, person: &Person) {
+        identity::publish_user(
+            &self.nats,
+            person.id,
+            &identity::roster_entry(&person.label, None),
+        )
+        .await;
+        eventually(
+            "the roster copy holds the reactivation",
+            PUSH_TIMEOUT,
+            || async {
+                let active: Option<bool> = sqlx::query_scalar(
+                    "SELECT disabled_at IS NULL AND in_roster FROM threads.known_users \
+                 WHERE user_id = $1",
+                )
+                .bind(person.id)
+                .fetch_optional(&self.pool)
+                .await
+                .expect("read the roster copy");
+                active == Some(true)
+            },
+        )
+        .await;
+    }
+
+    /// Identity retracts `person` from the roster; waits until Threads' copy
+    /// keeps them, out of the roster.
+    pub async fn retract(&self, person: &Person) {
+        identity::retract_user(&self.nats, person.id).await;
+        self.await_out_of_roster(person.id).await;
+    }
+
+    /// Waits until Threads' copy holds `user` out of the roster, name kept.
+    pub async fn await_out_of_roster(&self, user: Uuid) {
+        eventually(
+            "the roster copy keeps the user, out of the roster",
+            PUSH_TIMEOUT,
+            || async {
+                let in_roster: Option<bool> = sqlx::query_scalar(
+                    "SELECT in_roster FROM threads.known_users WHERE user_id = $1",
+                )
+                .bind(user)
+                .fetch_optional(&self.pool)
+                .await
+                .expect("read the roster copy");
+                in_roster == Some(false)
+            },
+        )
+        .await;
+    }
+
     /// Waits until Threads' roster copy holds `user` in the roster under the
     /// name Identity published for `label`.
     pub async fn await_known_user(&self, user: Uuid, label: &str) {
@@ -439,6 +568,22 @@ impl TestContext {
             .pl_reader::<PublishedThreadMembers>()
             .await
             .get(&key)
+            .await
+            .expect("read the published language")
+    }
+
+    /// The `threads.members.{thread_id}` entry and its revision, if published:
+    /// an unchanged revision proves a no-op rewrote nothing.
+    pub async fn members_entry(
+        &self,
+        thread: Uuid,
+    ) -> Option<(PublishedThreadMembers, br_util_nats_fabric::Revision)> {
+        let key = KvKey::new(contract_threads::members::members_key(thread))
+            .expect("a members key is a valid KV key");
+        self.nats
+            .pl_reader::<PublishedThreadMembers>()
+            .await
+            .get_with_revision(&key)
             .await
             .expect("read the published language")
     }
