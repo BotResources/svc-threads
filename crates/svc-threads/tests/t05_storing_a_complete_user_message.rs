@@ -125,15 +125,8 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
 
     // When the bus redelivers M1's store, under its own envelope id.
     common::flows::redeliver(&ctx, store_command, &store_m1).await;
-    // Then it is answered again alike, and M1 is stored once.
-    common::eventually(
-        "the redelivery is answered",
-        common::PUSH_TIMEOUT,
-        || async { ctx.answers.for_command(store_command).len() >= 2 },
-    )
-    .await;
-    let answers = ctx.answers.for_command(store_command);
-    assert_eq!(answers[0], answers[1]);
+    // Then no second distinct answer is published, and M1 is stored once.
+    common::flows::replayed_alike(&ctx, store_command, "the redelivered store").await;
     assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1]);
     assert_eq!(
         facts::of(&ctx.pool, "message", m1).await.len(),

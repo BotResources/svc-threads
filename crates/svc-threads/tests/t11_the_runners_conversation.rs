@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use common::artifacts::{File, upload};
 use common::content::{
     ai_text, artifact_block, citation_block, redacted_thinking, step, text_step, thinking,
-    user_text, warning_block,
+    tool_call, tool_result, tool_results, user_text, warning_block,
 };
 use common::flows::{
     ai, answer, command, context, context_answer, conversation_of, create, creation,
@@ -81,22 +81,34 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     .await;
     // M3, B's question to the Critic;
     let m3 = say(&ctx, t, Some(m2), &b, "And you, Critic?").await;
-    // M4, a2's turn carrying an ARTIFACT block;
+    // M4, a2's turn: a thinking and a tool call, the tool's result, then its
+    // answer carrying an ARTIFACT block and other Threads blocks;
     let m4 = answer(
         &ctx,
         t,
         Some(m3),
         critic.clone(),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![
-                ai_text("Critique"),
-                artifact_block(x),
-                warning_block("PARTIAL_ANSWER", "a source was unreachable"),
-                citation_block("quoted passage", &["doc-9"]),
-            ],
-        )],
+        vec![
+            step(
+                StopReason::AwaitingToolResults,
+                None,
+                vec![
+                    thinking("weighing the analysis", "Y3JpdGlj"),
+                    tool_call("c9", "search", json!({ "q": "q3 figures" })),
+                ],
+            ),
+            tool_results(vec![tool_result("c9", "search", "figures found")]),
+            step(
+                StopReason::EndTurn,
+                None,
+                vec![
+                    ai_text("Critique"),
+                    artifact_block(x),
+                    warning_block("PARTIAL_ANSWER", "a source was unreachable"),
+                    citation_block("quoted passage", &["doc-9"]),
+                ],
+            ),
+        ],
     )
     .await;
     // M5, A's message, deleted;
@@ -220,10 +232,12 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         assert_eq!(author, who.to_library().unwrap());
     }
 
-    // And no Threads block reaches the runner: M4 holds its text only.
+    // And no Threads block reaches the runner: M4's answering step holds its
+    // text only, after its tool call and result.
     let critique = turn(&entries[3]);
-    let contract_threads::llm::TurnItem::Step(critique_step) = &critique.items()[0] else {
-        panic!("M4 opens on a step");
+    assert_eq!(critique.items().len(), 3, "{critique:?}");
+    let contract_threads::llm::TurnItem::Step(critique_step) = &critique.items()[2] else {
+        panic!("M4 ends on a step");
     };
     assert_eq!(
         critique_step.content(),
@@ -271,7 +285,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     // And members still see M4's Threads blocks, in the order the writer gave
     // them.
     let m4_view = common::flows::message_view(&ctx, &a.passport, t, m4).await;
-    let kinds: Vec<&str> = m4_view["items"][0]["blocks"]
+    let kinds: Vec<&str> = m4_view["items"][2]["blocks"]
         .as_array()
         .expect("M4's blocks")
         .iter()
@@ -279,7 +293,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         .collect();
     assert_eq!(kinds, vec!["TEXT", "ARTIFACT", "WARNING", "CITATION"]);
     assert_eq!(
-        m4_view["items"][0]["blocks"][2]["content"],
+        m4_view["items"][2]["blocks"][2]["content"],
         json!({ "code": "PARTIAL_ANSWER", "text": "a source was unreachable" })
     );
 
@@ -294,7 +308,17 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         render(&lightened, &perspective).expect("the lightened conversation renders"),
         render(&whole, &perspective).expect("the whole conversation renders")
     );
+    // And lightening removed something real: a2's thinking, tool call and
+    // tool result are gone for a1, its text kept.
     assert_ne!(lightened, whole, "a2's turn is lightened for a1");
+    let lightened_raw = serde_json::to_string(&lightened).expect("a conversation serializes");
+    for gone in ["weighing the analysis", "q3 figures", "figures found"] {
+        assert!(
+            !lightened_raw.contains(gone),
+            "{gone} is lightened away: {lightened_raw}"
+        );
+    }
+    assert!(lightened_raw.contains("Critique"));
 
     // When a user, a super user, or a service account without threads:runner
     // ask for the context.
