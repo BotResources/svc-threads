@@ -11,9 +11,9 @@
 //! last time — kept in `threads.stream_watch`, so that a forged or repeated
 //! message cannot cut a stream short — and fails the message once the stream
 //! has not moved for the whole window, or as soon as it sees the stream's
-//! refusal. Until then the view already shows a refused stream as failed
-//! ([`super::view`]). The engine would need a last-chunk time on the
-//! accumulated state and a post-fold hook that can run pipeline work.
+//! refusal — within one period, two seconds at most. The engine would need a
+//! last-chunk time on the accumulated state and a post-fold hook that can run
+//! pipeline work.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::future::BoxFuture;

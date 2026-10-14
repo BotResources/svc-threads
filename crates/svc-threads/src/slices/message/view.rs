@@ -10,10 +10,10 @@
 //!
 //! A `STREAMING` message shows the content its stream folded so far, read from
 //! the engine's accumulated lane: the view is the engine's low-level projector,
-//! the one that receives the chunk reader (`view::Projector` does not). A
-//! stream the library refused shows as `FAILED`, with the content its failure
-//! keeps ([`super::draft::close`]), from the moment the refused chunk folds —
-//! the stream watch stores that failure on its next look.
+//! the one that receives the chunk reader (`view::Projector` does not). Its
+//! status is always its row's: a stream the library refused shows what folded
+//! before the refused chunk until the stream watch stores the failure, so that
+//! what a member sees and what the facts and answers say never disagree.
 //!
 //! ENGINE GAP (br-service-engine v0.4.1): the chunk reader reads one stream per
 //! call. A frame reads the streams of the `STREAMING` messages it renders
@@ -41,7 +41,7 @@ use service_engine::{JsonScalar, KeyCeiling, Page};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::draft::{self, CloseKind, MessageDraft};
+use super::draft::MessageDraft;
 use super::state::{ItemKind, Message, MessageAuthor, MessageState, StoredBlock, StoredItem};
 use super::store::{self, MessageStore};
 use super::stream::MessageContent;
@@ -225,15 +225,9 @@ impl MessagesView {
         stream: Option<&MessageDraft>,
         principal: &ThreadsPrincipal,
     ) -> MessageView {
-        let (status, items) = match (message.status, stream) {
-            (MessageStatus::Streaming, Some(stream)) if stream.refusal().is_some() => {
-                let closed = draft::close(stream, CloseKind::Fail);
-                (closed.status, closed.items)
-            }
-            (MessageStatus::Streaming, Some(stream)) => {
-                (MessageStatus::Streaming, stream.preview())
-            }
-            (status, _) => (status, message.items.clone()),
+        let items = match (message.status, stream) {
+            (MessageStatus::Streaming, Some(stream)) => stream.preview(),
+            _ => message.items.clone(),
         };
         MessageView {
             id: message.id,
@@ -241,7 +235,7 @@ impl MessagesView {
             parent_message_id: message.parent_message_id,
             author: author_view(&message.author),
             job_id: message.job_id,
-            status: status.into(),
+            status: message.status.into(),
             deleted: message.deleted,
             created_at: message.created_at,
             version: message.version,
@@ -476,25 +470,36 @@ mod tests {
     }
 
     #[test]
-    fn a_message_whose_stream_was_refused_shows_failed_at_once() {
+    fn a_streaming_message_shows_its_stream_so_far_under_its_rows_status() {
         let member = person(false, active());
         let mut message = message_in(&[member.user().unwrap()]);
         message.status = MessageStatus::Streaming;
         let mut stream = MessageDraft::default();
-        draft::fold(
+        super::super::draft::fold(
             &mut stream,
             0,
             serde_json::json!({
                 "item_index": 0,
                 "kind": "STEP_EVENT",
-                "event": { "type": "text_delta", "index": 0, "text": "orphan" }
+                "event": { "type": "block_start", "index": 0, "kind": "text" },
+                "block_id": Uuid::now_v7()
             }),
         );
-        assert!(stream.refusal().is_some());
+        super::super::draft::fold(
+            &mut stream,
+            1,
+            serde_json::json!({
+                "item_index": 0,
+                "kind": "STEP_EVENT",
+                "event": { "type": "text_delta", "index": 0, "text": "so far" }
+            }),
+        );
         let view = MessagesView::render(&message, Some(&stream), &member);
-        assert_eq!(view.status, MessageStatusView::Failed);
-        assert!(view.items.is_empty());
-        let open = MessagesView::render(&message, Some(&MessageDraft::default()), &member);
-        assert_eq!(open.status, MessageStatusView::Streaming);
+        assert_eq!(view.status, MessageStatusView::Streaming);
+        assert_eq!(view.items[0].status, MessageStatusView::Streaming);
+        assert_eq!(
+            view.items[0].blocks[0].content.0,
+            serde_json::json!({ "type": "text", "text": "so far" })
+        );
     }
 }

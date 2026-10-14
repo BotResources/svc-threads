@@ -26,11 +26,6 @@ const S3_REGION: &str = "S3_REGION";
 const S3_PUBLIC_ENDPOINT: &str = "S3_PUBLIC_ENDPOINT";
 const DEFAULT_S3_REGION: &str = "us-east-1";
 
-/// How often the engine's reaper looks at pending uploads. A member's read
-/// access to an artifact waits for the reaper to verify its bytes, so Threads
-/// keeps it short.
-const BLOB_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-
 pub async fn run() -> Result<(), EngineError> {
     let threads = crate::config::ThreadsConfig::from_env()?;
     let blob = object_storage_from_env()?.map(|blob| blob.with_upload_ttl(threads.upload_window));
@@ -55,14 +50,22 @@ pub async fn run() -> Result<(), EngineError> {
 
 /// The engine configuration Threads runs on: the engine's own from the
 /// environment, with the service's identity and its object storage.
+///
+/// ENGINE GAP (br-service-engine v0.4.1): the engine presigns no read access to
+/// a verified upload before its reaper verified the bytes, and offers no way to
+/// promote one Threads already verified (when a message attaches it). The
+/// reaper therefore sweeps on every beat: a member's read access to an artifact
+/// is available within one beat of its upload. A sweep only HEADs the uploads
+/// still pending.
 pub fn engine_config(base: EngineConfig, blob: Option<BlobConfig>) -> EngineConfig {
+    let beat = base.beat;
     let config = base
         .with_service(crate::SERVICE)
         .with_service_version(env!("CARGO_PKG_VERSION"));
     match blob {
         Some(blob) => config
             .with_blob_storage(blob)
-            .with_blob_reaper_interval(BLOB_REAPER_INTERVAL),
+            .with_blob_reaper_interval(beat),
         None => config,
     }
 }
