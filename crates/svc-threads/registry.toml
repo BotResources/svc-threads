@@ -1,0 +1,10 @@
+# Registry coordinates for svc-threads — the committed identity of this crate in
+# the Services registry.
+#
+# service-id  the Service (`threads`). Stable for the life of the service;
+#             changing it means this crate now realizes a DIFFERENT service.
+#
+# The PatchVersion is deliberately NOT named here: it is addressed by
+# (service-id, major, minor, patch), the last three parsed from this crate's
+# Cargo.toml version.
+service-id = "019f8137-ec1f-7866-aebe-6b379eb7301d"

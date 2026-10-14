@@ -1,1 +1,4 @@
 target/
+.env
+# Fetched by `helm dependency build` (Chart.lock pins it).
+charts/br-svc-threads/charts/

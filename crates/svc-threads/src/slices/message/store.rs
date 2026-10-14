@@ -1,0 +1,317 @@
+//! `threads.message` and the rows that are part of a message's state —
+//! `message_item`, `message_block` — through the engine's `Persistence` seam,
+//! soft EDA.
+//!
+//! A batch read is four statements whatever its size: the messages with their
+//! user author's current name, their items, their blocks, and the members of
+//! their threads. The write path (`save`, `create`, each with the facts it
+//! records in `threads.fact`) is the implementation pass's.
+
+use std::collections::{BTreeSet, HashMap};
+
+use contract_threads::{BlockKind, MessageStatus};
+use futures_util::future::BoxFuture;
+use service_engine::error::EngineError;
+use service_engine::persistence::{
+    Aggregate, CohortIndex, Persistence, PersistenceStyle, RowBatch,
+};
+use service_engine::{Cohort, KeyCeiling};
+use sqlx::postgres::PgRow;
+use sqlx::{PgConnection, PgPool, Row};
+use uuid::Uuid;
+
+use super::state::{ItemKind, MessageAuthor, MessageState, StoredBlock, StoredItem};
+use crate::directory::KNOWN_USERS_TABLE;
+use crate::fault::{self, corrupt};
+use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
+
+pub const TABLE: &str = "threads.message";
+
+pub struct MessageStore;
+
+impl Persistence for MessageStore {
+    type Aggregate = MessageState;
+    type Key = Uuid;
+    // The message's facts are the implementation pass's, with its transitions.
+    type Event = ();
+
+    const STYLE: PersistenceStyle = PersistenceStyle::SoftEda;
+
+    fn lock<'a>(
+        conn: &'a mut PgConnection,
+        key: &'a Uuid,
+    ) -> BoxFuture<'a, Result<(), EngineError>> {
+        Self::row_lock(conn, TABLE, key)
+    }
+
+    fn read_many<'a>(
+        conn: &'a mut PgConnection,
+        keys: &'a [Uuid],
+    ) -> RowBatch<'a, Uuid, MessageState> {
+        Box::pin(async move { read_many(conn, keys).await })
+    }
+
+    fn save<'a>(
+        _conn: &'a mut PgConnection,
+        _message: &'a MessageState,
+        _events: &'a [()],
+    ) -> BoxFuture<'a, Result<(), EngineError>> {
+        Box::pin(async { Err(fault::write_path_pending("message")) })
+    }
+
+    fn create<'a>(
+        _conn: &'a mut PgConnection,
+        _message: &'a MessageState,
+        _events: &'a [()],
+    ) -> BoxFuture<'a, Result<(), EngineError>> {
+        Box::pin(async { Err(fault::write_path_pending("message")) })
+    }
+}
+
+impl Aggregate for MessageState {
+    type Store = MessageStore;
+
+    fn key(&self) -> Uuid {
+        self.id
+    }
+}
+
+/// The messages of the threads of the members named, one read bounded by the
+/// engine's ceiling.
+impl CohortIndex for MessageStore {
+    fn keys_in_cohorts<'a>(
+        conn: &'a mut PgConnection,
+        cohorts: &'a [Cohort],
+        ceiling: KeyCeiling,
+    ) -> BoxFuture<'a, Result<Vec<Uuid>, EngineError>> {
+        Box::pin(async move {
+            let members = Cohort::uuids(cohorts, MEMBER_DIM);
+            let keys = sqlx::query_scalar(
+                "SELECT m.id FROM threads.message m \
+                 WHERE EXISTS (SELECT 1 FROM threads.thread_member t \
+                               WHERE t.thread_id = m.thread_id AND t.user_id = ANY($1)) \
+                 ORDER BY m.id LIMIT $2",
+            )
+            .bind(&members)
+            .bind(ceiling.limit())
+            .fetch_all(conn)
+            .await?;
+            Ok(keys)
+        })
+    }
+}
+
+/// One page of a branch of `thread`, the newest first, read for `member`
+/// (nothing when they are not a member of it): the branch ending at `tip`, or
+/// the active branch — the one ending at the thread's most recent message —
+/// when no tip is named; the page holds the messages older than `cursor` when
+/// one is given. One statement.
+pub async fn branch_page(
+    pg: &PgPool,
+    member: Uuid,
+    thread: Uuid,
+    tip: Option<Uuid>,
+    cursor: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<Uuid>, EngineError> {
+    Ok(sqlx::query_scalar(
+        "WITH RECURSIVE tip AS ( \
+             SELECT m.id FROM threads.message m \
+             WHERE m.thread_id = $2 \
+               AND EXISTS (SELECT 1 FROM threads.thread_member t \
+                           WHERE t.thread_id = $2 AND t.user_id = $1) \
+               AND ($3::uuid IS NULL OR m.id = $3) \
+             ORDER BY m.created_at DESC, m.id DESC LIMIT 1 \
+         ), branch AS ( \
+             SELECT m.id, m.parent_message_id, 0 AS depth \
+             FROM threads.message m JOIN tip ON m.id = tip.id \
+             UNION ALL \
+             SELECT p.id, p.parent_message_id, b.depth + 1 \
+             FROM threads.message p JOIN branch b ON p.id = b.parent_message_id \
+         ) \
+         SELECT id FROM branch \
+         WHERE $4::uuid IS NULL OR depth > (SELECT c.depth FROM branch c WHERE c.id = $4) \
+         ORDER BY depth LIMIT $5",
+    )
+    .bind(member)
+    .bind(thread)
+    .bind(tip)
+    .bind(cursor)
+    .bind(limit)
+    .fetch_all(pg)
+    .await?)
+}
+
+async fn read_many(
+    conn: &mut PgConnection,
+    keys: &[Uuid],
+) -> Result<Vec<(Uuid, MessageState)>, EngineError> {
+    let rows = sqlx::query(&format!(
+        "SELECT m.id, m.thread_id, m.parent_message_id, m.author_user_id, m.author_ai_id, \
+                m.author_ai_name, m.job_id, m.status, m.deleted, m.created_at, m.version, \
+                k.display_name, COALESCE(k.in_roster, false) AS in_roster \
+         FROM {TABLE} m LEFT JOIN {KNOWN_USERS_TABLE} k ON k.user_id = m.author_user_id \
+         WHERE m.id = ANY($1)"
+    ))
+    .bind(keys)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut messages = rows
+        .iter()
+        .map(message_of_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = messages.iter().map(|message| message.id).collect();
+    let threads: Vec<Uuid> = messages
+        .iter()
+        .map(|message| message.thread_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut items = items_of(conn, &ids).await?;
+    let mut blocks = blocks_of(conn, &ids).await?;
+    let members = members_of(conn, &threads).await?;
+    for message in &mut messages {
+        let mut own_blocks = blocks.remove(&message.id).unwrap_or_default();
+        let mut own_items = items.remove(&message.id).unwrap_or_default();
+        for item in &mut own_items {
+            item.blocks = own_blocks.remove(&Some(item.index)).unwrap_or_default();
+        }
+        message.items = own_items;
+        message.blocks = own_blocks.remove(&None).unwrap_or_default();
+        message.members = members.get(&message.thread_id).cloned().unwrap_or_default();
+    }
+    Ok(messages
+        .into_iter()
+        .map(|message| (message.id, message))
+        .collect())
+}
+
+/// A row read back is validated, never trusted.
+fn message_of_row(row: &PgRow) -> Result<MessageState, EngineError> {
+    let status: String = row.try_get("status")?;
+    let user: Option<Uuid> = row.try_get("author_user_id")?;
+    let ai_id: Option<String> = row.try_get("author_ai_id")?;
+    let ai_name: Option<String> = row.try_get("author_ai_name")?;
+    let author = match (user, ai_id, ai_name) {
+        (Some(user_id), None, None) => MessageAuthor::User {
+            user_id,
+            display_name: row.try_get("display_name")?,
+            in_roster: row.try_get("in_roster")?,
+        },
+        (None, Some(id), Some(name)) => MessageAuthor::Ai { id, name },
+        _ => {
+            return Err(corrupt(UnknownStoredValue {
+                column: "message.author",
+                value: "not exactly one author".to_owned(),
+            }));
+        }
+    };
+    Ok(MessageState {
+        id: row.try_get("id")?,
+        thread_id: row.try_get("thread_id")?,
+        parent_message_id: row.try_get("parent_message_id")?,
+        author,
+        job_id: row.try_get("job_id")?,
+        status: MessageStatus::parse(&status).map_err(corrupt)?,
+        deleted: row.try_get("deleted")?,
+        created_at: row.try_get("created_at")?,
+        version: row.try_get("version")?,
+        blocks: Vec::new(),
+        items: Vec::new(),
+        members: BTreeSet::new(),
+    })
+}
+
+async fn items_of(
+    conn: &mut PgConnection,
+    messages: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<StoredItem>>, EngineError> {
+    let rows = sqlx::query(
+        "SELECT message_id, index, kind, status, stop_reason, usage, model \
+         FROM threads.message_item WHERE message_id = ANY($1) ORDER BY message_id, index",
+    )
+    .bind(messages)
+    .fetch_all(conn)
+    .await?;
+    let mut by_message: HashMap<Uuid, Vec<StoredItem>> = HashMap::new();
+    for row in &rows {
+        let kind: String = row.try_get("kind")?;
+        let status: String = row.try_get("status")?;
+        by_message
+            .entry(row.try_get("message_id")?)
+            .or_default()
+            .push(StoredItem {
+                index: row.try_get("index")?,
+                kind: ItemKind::from_db(&kind).map_err(corrupt)?,
+                status: MessageStatus::parse(&status).map_err(corrupt)?,
+                stop_reason: row.try_get("stop_reason")?,
+                usage: row.try_get("usage")?,
+                model: row.try_get("model")?,
+                blocks: Vec::new(),
+            });
+    }
+    Ok(by_message)
+}
+
+/// Each message's blocks, by the item they belong to (`None` for a user
+/// message's own blocks), in order.
+async fn blocks_of(
+    conn: &mut PgConnection,
+    messages: &[Uuid],
+) -> Result<HashMap<Uuid, HashMap<Option<i32>, Vec<StoredBlock>>>, EngineError> {
+    let rows = sqlx::query(
+        "SELECT id, message_id, item_index, index, kind, content \
+         FROM threads.message_block WHERE message_id = ANY($1) \
+         ORDER BY message_id, item_index NULLS FIRST, index",
+    )
+    .bind(messages)
+    .fetch_all(conn)
+    .await?;
+    let mut by_message: HashMap<Uuid, HashMap<Option<i32>, Vec<StoredBlock>>> = HashMap::new();
+    for row in &rows {
+        let kind: String = row.try_get("kind")?;
+        by_message
+            .entry(row.try_get("message_id")?)
+            .or_default()
+            .entry(row.try_get("item_index")?)
+            .or_default()
+            .push(StoredBlock {
+                id: row.try_get("id")?,
+                index: row.try_get("index")?,
+                kind: BlockKind::parse(&kind).map_err(corrupt)?,
+                content: row.try_get("content")?,
+            });
+    }
+    Ok(by_message)
+}
+
+async fn members_of(
+    conn: &mut PgConnection,
+    threads: &[Uuid],
+) -> Result<HashMap<Uuid, BTreeSet<Uuid>>, EngineError> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT thread_id, user_id FROM threads.thread_member WHERE thread_id = ANY($1)",
+    )
+    .bind(threads)
+    .fetch_all(conn)
+    .await?;
+    let mut by_thread: HashMap<Uuid, BTreeSet<Uuid>> = HashMap::new();
+    for (thread, user) in rows {
+        by_thread.entry(thread).or_default().insert(user);
+    }
+    Ok(by_thread)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stored_block_kind_is_read_through_the_published_literal() {
+        assert_eq!(BlockKind::parse("TOOL_RESULT"), Ok(BlockKind::ToolResult));
+        assert!(BlockKind::parse("tool_result").is_err());
+    }
+}
