@@ -68,13 +68,10 @@ async fn create_thread(
     call: &Call,
     command: &CreateThread,
 ) -> Result<Result<(), Refusal>, Fault> {
-    // The parent first, then the new thread: the one lock order of threads
-    // that a creation can take is by key, and a child's key is never its
-    // parent's.
     let exists = cx.load::<ThreadState>(&command.thread_id).await?.is_some();
     let parent = match command.parent_thread_id {
         None => ParentLookup::NotNamed,
-        Some(parent) => match ThreadStoreRead::members(cx, parent).await? {
+        Some(parent) => match parent_members(cx, parent).await? {
             Some(members) => ParentLookup::Found(members),
             None => ParentLookup::Missing,
         },
@@ -105,17 +102,16 @@ async fn create_thread(
     Ok(Ok(()))
 }
 
-/// Reads of other threads a command needs, without locking them.
-struct ThreadStoreRead;
-
-impl ThreadStoreRead {
-    /// The members of `thread`, if it exists.
-    async fn members(cx: &mut Reaction<'_>, thread: Uuid) -> Result<Option<BTreeSet<Uuid>>, Fault> {
-        use service_engine::PersistenceExt;
-        Ok(super::store::ThreadStore::load(cx.connection(), &thread)
-            .await?
-            .map(|parent| parent.member_ids()))
-    }
+/// The members of a parent thread at a child's creation, if it exists: read,
+/// not locked — a membership that moves meanwhile is a later change.
+async fn parent_members(
+    cx: &mut Reaction<'_>,
+    thread: Uuid,
+) -> Result<Option<BTreeSet<Uuid>>, Fault> {
+    use service_engine::PersistenceExt;
+    Ok(super::store::ThreadStore::load(cx.connection(), &thread)
+        .await?
+        .map(|parent| parent.member_ids()))
 }
 
 /// Runs a command whose transition acts on one existing thread: load and lock
