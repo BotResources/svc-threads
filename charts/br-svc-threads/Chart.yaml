@@ -1,0 +1,25 @@
+apiVersion: v2
+name: br-svc-threads
+description: Threads — the shared conversation store (threads, members, messages, artifacts, read marks), a br-service-engine service. A thin chart over the engine's library chart, which renders the topology (ops contract v1); this chart supplies values only.
+type: application
+# Set by scripts/publish.sh to the service version at publish time
+# (`helm package --version --app-version`), in lockstep with the image.
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/BotResources/svc-threads
+sources:
+  - https://github.com/BotResources/svc-threads
+maintainers:
+  - name: BotResources
+    url: https://github.com/BotResources
+keywords:
+  - threads
+  - conversations
+  - graphql
+  - nats
+  - postgres
+dependencies:
+  - name: br-service-engine-chart
+    # The pair the engine released with v0.4.1 (engine README, Compatibility).
+    version: "2.0.0"
+    repository: "oci://ghcr.io/botresources/charts"

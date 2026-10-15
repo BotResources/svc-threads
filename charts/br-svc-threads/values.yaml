@@ -1,0 +1,71 @@
+# Values of the svc-threads thin chart. The engine's library chart
+# (br-service-engine-chart) renders everything from them; its README's
+# "Ops contract v1" section documents every key. A deployment layers its own
+# environment's values on top; the keys left empty below have no sensible
+# default and must be set there (the render fails, naming the key, when one is
+# missing).
+
+# The service key: the engine's service, its manifest key and stream suffix.
+serviceKey: threads
+
+image:
+  repository: ghcr.io/botresources/br-svc-threads
+  # Defaults to the chart's appVersion (templates/engine.yaml).
+  tag: ""
+
+# Required, no default: the port is each environment's to set (ops contract).
+port: null
+
+# Threads is multi-pod: sessions attach on the pod that serves them, impacts
+# fan out to every pod, leased loops run on one at a time. The rollout is
+# Recreate (ops contract v1): two versions never share the store.
+replicaCount: 1
+topologySpreadEnabled: false
+
+postgres:
+  # The runtime role (`DATABASE_URL`), subject to row-level security.
+  appRole: threads_app
+  # Secrets holding the full DSNs: `DATABASE_URL` (app role) for serve and
+  # `DATABASE_URL_OWNER` (BYPASSRLS owner) for the migrate init container.
+  appSecret:
+    name: ""
+    key: DATABASE_URL
+  ownerSecret:
+    name: ""
+    key: DATABASE_URL_OWNER
+  trustedNetworkHosts: []
+
+nats:
+  # The bus. INTEGRATION_CMD, INTEGRATION_EVT, STREAMING_threads and the
+  # PUBLISHED_LANGUAGE bucket are declared out of band; a missing one keeps the
+  # pod not ready.
+  url: ""
+
+engine:
+  # The Postgres LISTEN/NOTIFY channel, one per service database.
+  channel: threads
+
+# Artifacts live in object storage: Threads refuses to serve without it.
+objectStore:
+  enabled: true
+  endpoint: ""
+  bucket: ""
+  region: us-east-1
+  secret:
+    name: ""
+    accessKeyKey: S3_ACCESS_KEY
+    secretKeyKey: S3_SECRET_KEY
+
+env: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+networkPolicy:
+  enabled: false
+  ingress: []

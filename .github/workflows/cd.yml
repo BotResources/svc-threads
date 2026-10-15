@@ -30,6 +30,8 @@ jobs:
     outputs:
       publish_service: ${{ steps.detect.outputs.publish_service }}
       service_version: ${{ steps.detect.outputs.service_version }}
+      tag_contract: ${{ steps.detect.outputs.tag_contract }}
+      contract_version: ${{ steps.detect.outputs.contract_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,6 +47,8 @@ jobs:
             {
               echo "publish_service=false"
               echo "service_version="
+              echo "tag_contract=false"
+              echo "contract_version="
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -62,7 +66,9 @@ jobs:
             git ls-remote --tags origin "refs/tags/$1" | grep -q .
           }
 
-          service_version="$(crate_version Cargo.toml)"
+          # The workspace root is virtual — the service version lives on the
+          # service crate's own manifest.
+          service_version="$(crate_version crates/svc-threads/Cargo.toml)"
           publish_service=false
           case "${GITHUB_REF}" in
             refs/tags/svc-threads/v*)
@@ -90,9 +96,29 @@ jobs:
               ;;
           esac
 
+          # contract-threads — tag-only release, main pushes only. The crate has
+          # no artifact: its release IS the tag (consumers pull it as a git
+          # dependency), created when its version bumps with a matching plain
+          # `## x.y.z` heading in its own CHANGELOG.
+          contract_version="$(crate_version crates/contract-threads/Cargo.toml)"
+          tag_contract=false
+          if [ "${GITHUB_REF}" = "refs/heads/main" ] \
+            && is_release "$contract_version" \
+            && ! tag_exists "contract-threads/v${contract_version}"; then
+            if grep -qE "^## ${contract_version}( |$)" crates/contract-threads/CHANGELOG.md; then
+              tag_contract=true
+            else
+              echo "::warning::contract-threads ${contract_version} has no CHANGELOG heading — not tagging"
+            fi
+          else
+            echo "contract-threads ${contract_version}: already tagged or not applicable"
+          fi
+
           {
             echo "publish_service=${publish_service}"
             echo "service_version=${service_version}"
+            echo "tag_contract=${tag_contract}"
+            echo "contract_version=${contract_version}"
           } >> "$GITHUB_OUTPUT"
 
   publish:
@@ -122,6 +148,10 @@ jobs:
           tool: cargo-zigbuild
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
 
       - uses: docker/setup-buildx-action@v3
 
@@ -164,3 +194,30 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
             --title "$tag" \
             --notes "See the \`## ${VERSION}\` section of CHANGELOG.md."
+
+  tag-contract:
+    name: Tag contract-threads
+    needs: detect-bump
+    if: needs.detect-bump.outputs.tag_contract == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create tag + GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.detect-bump.outputs.contract_version }}
+        run: |
+          tag="contract-threads/v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            echo "Tag $tag already exists"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --title "$tag" \
+            --notes "See the \`## ${VERSION}\` section of crates/contract-threads/CHANGELOG.md."

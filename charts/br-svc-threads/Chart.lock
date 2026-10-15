@@ -1,0 +1,6 @@
+dependencies:
+- name: br-service-engine-chart
+  repository: oci://ghcr.io/botresources/charts
+  version: 2.0.0
+digest: sha256:1b750638f800bb6c05ccad3a9744a10f35231cdcdb2bf0cf8508429f3c7fc4fe
+generated: "2026-10-14T19:12:10.983647+02:00"

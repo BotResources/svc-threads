@@ -1,0 +1,20 @@
+# CI-only values: every key values.yaml leaves to the deployment, set to a
+# placeholder, so that `helm lint` and `helm template` render the whole chart.
+port: 8080
+
+postgres:
+  appSecret:
+    name: threads-postgres
+  ownerSecret:
+    name: threads-postgres
+  trustedNetworkHosts:
+    - threads-db-rw.threads.svc
+
+nats:
+  url: nats://nats.nats.svc:4222
+
+objectStore:
+  endpoint: http://object-store.example:9000
+  bucket: threads
+  secret:
+    name: threads-object-store

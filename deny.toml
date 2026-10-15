@@ -1,0 +1,117 @@
+# cargo-deny config.
+#
+# Run locally: cargo deny check
+# Enforced in CI by .github/workflows/ci.yml job `cargo-deny check`.
+#
+# Two entries below are not boilerplate and will bite if they are treated as
+# such: the licence allow-list has to name this repository's own licence, and
+# `allow-git` has to name every git source the manifest pins. Both fail closed —
+# a new git dependency or an unlisted licence turns the job red, and that
+# failure is the feature: each is a deliberate call, not a drive-by.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
+]
+all-features = false
+
+[advisories]
+db-path = "$CARGO_HOME/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+version = 2
+yanked = "deny"
+# Resolve advisories by bumping, not by ignoring them. An entry added here MUST
+# say which crate pulls the vulnerable code in, why that path is unreachable in
+# this service's threat model, the upstream status with the date it was checked,
+# and what retires the ignore.
+ignore = [
+    # RUSTSEC-2023-0071 — rsa (Marvin Attack: timing sidechannel in RSA key
+    # operations).
+    #
+    # Why: rsa enters Cargo.lock through sqlx-macros-core → sqlx-mysql, an
+    # optional sqlx dependency. The workspace pin enables the postgres backend
+    # only, so cargo never resolves sqlx-mysql or rsa into the build graph: rsa
+    # is not compiled and its code path never executes. The sibling services
+    # carry the identical ignore for the identical reason.
+    #
+    # Upstream status (checked 2026-10-14): no fixed rsa version. Retire this
+    # ignore when rsa ships a fix, or when sqlx-mysql no longer appears in
+    # Cargo.lock.
+    #
+    # Tools: cargo audit reads Cargo.lock, so it reports the advisory and needs
+    # this ignore. cargo deny reads the resolved graph, so it does not see rsa
+    # and warns `advisory-not-detected` for this entry; that warning is
+    # expected while rsa stays lockfile-only.
+    { id = "RUSTSEC-2023-0071" },
+]
+
+[licenses]
+version = 2
+# Allow-list rather than deny-list: a licence nobody has considered should stop
+# CI, not slip in unnoticed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    # Required by the `ring` clarify below — its LICENSE bundles MIT + ISC +
+    # OpenSSL boilerplate, and rustls drags it in everywhere.
+    "OpenSSL",
+    # webpki-roots ships the bundled Mozilla trust store under CDLA.
+    "CDLA-Permissive-2.0",
+    # MPL-2.0 — weak, file-level copyleft, pulled in via async-graphql;
+    # consumed unmodified.
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ring's LICENSE is a concatenation cargo-deny cannot score above the
+# confidence threshold on its own; the expression states what the file is.
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The crates of this workspace depend on each other by path, which cargo-deny
+# reads as a wildcard. They are not a supply-chain risk — they resolve to a
+# sibling directory of this same manifest — so path wildcards are allowed while
+# `wildcards = "deny"` keeps holding for everything external.
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+    # rustls everywhere. Pulling OpenSSL in drags a C toolchain into an image
+    # that has no reason to carry one.
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Every git source the workspace manifest pins, and only those. HTTPS, matching
+# the manifest: two URL schemes for one repository are two cargo sources, and
+# cargo unifies neither.
+allow-git = [
+    "https://github.com/BotResources/br-rust-common",
+    "https://github.com/BotResources/br-service-engine",
+    "https://github.com/BotResources/br-llm-messages-rs",
+    "https://github.com/BotResources/br-e2e-harness",
+    # contract-jobs: the published language of the title Job.
+    "https://github.com/BotResources/svc-jobs",
+]
