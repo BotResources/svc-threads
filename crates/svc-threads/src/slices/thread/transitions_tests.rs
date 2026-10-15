@@ -104,6 +104,10 @@ fn a_creation_is_refused_in_the_order_of_its_rules() {
     let too_long = refusal(&long, false, &ParentLookup::NotNamed);
     assert_eq!(too_long.code, ReasonCode::TitleTooLong);
     assert_eq!(too_long.params["chars"], 201);
+    long.title = Some(String::new());
+    let empty = refusal(&long, false, &ParentLookup::NotNamed);
+    assert_eq!(empty.code, ReasonCode::TitleEmpty);
+    assert_eq!(empty.params["min_chars"], 1);
     long.title = Some("é".repeat(200));
     assert!(
         create(
@@ -278,7 +282,7 @@ fn resource_ids_are_a_set_per_key_and_an_emptied_key_disappears() {
 }
 
 #[test]
-fn a_title_is_at_most_200_characters_and_the_same_title_changes_nothing() {
+fn a_title_is_1_to_200_characters_and_the_same_title_changes_nothing() {
     let mut thread = thread_with(&[Uuid::now_v7()]);
     assert_eq!(
         refused(
@@ -288,6 +292,13 @@ fn a_title_is_at_most_200_characters_and_the_same_title_changes_nothing() {
         ),
         ReasonCode::TitleTooLong
     );
+    for source in [TitleSource::Command, TitleSource::TitleJob] {
+        assert_eq!(
+            refused(thread.set_title("", source, &meta()).unwrap()),
+            ReasonCode::TitleEmpty
+        );
+    }
+    assert!(thread.pending.is_empty(), "a refused title records nothing");
     assert_eq!(
         thread
             .set_title("Q3 review", TitleSource::Command, &meta())

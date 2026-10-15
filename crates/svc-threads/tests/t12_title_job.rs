@@ -19,7 +19,10 @@
 //!
 //! Also pinned, from the specification (§ Title Job) though the gesture is
 //! silent: "A title set by command while the title Job runs wins: Threads
-//! cancels the Job."
+//! cancels the Job." And, from § Thread (`title`: "optional text of 1 to 200
+//! characters; an empty title is refused `TITLE_EMPTY`, a longer one
+//! `TITLE_TOO_LONG`"), both bounds on the runner's operation and on
+//! `thread.set_title`, a refused title cancelling nothing.
 //!
 //! `JOB_NOT_ACTIVE` is the draft registry test's code; the specification
 //! describes the refusal without naming one.
@@ -39,8 +42,8 @@ use common::flows::{
 };
 use common::jobs::{await_consumed, failed_coords, urls_in};
 use common::{
-    JOB_NOT_ACTIVE, M_FAIL_TITLE_JOB, M_SET_TITLE, RUNNER_SCOPE_REQUIRED, TITLE_RUNNER_TYPE,
-    TITLE_TOO_LONG, TestContext, gql,
+    JOB_NOT_ACTIVE, M_FAIL_TITLE_JOB, M_SET_TITLE, RUNNER_SCOPE_REQUIRED, TITLE_EMPTY,
+    TITLE_RUNNER_TYPE, TITLE_TOO_LONG, TestContext, gql,
 };
 use contract_threads::{ReasonCode, SetTitle, TitleJobConfig};
 use serde_json::{Value, json};
@@ -310,6 +313,11 @@ async fn t12_only_the_threads_active_title_job_through_a_runner_may_set_its_titl
     // Then refused TITLE_TOO_LONG.
     gql::assert_refused(&too_long, TITLE_TOO_LONG);
 
+    // When the runner sets an empty title.
+    let empty = set_title(&ctx, &runner.passport, t4, j4, "").await;
+    // Then refused TITLE_EMPTY.
+    gql::assert_refused(&empty, TITLE_EMPTY);
+
     // And nothing of all that changed anything, nor reached Jobs.
     ctx.jobs
         .expect_nothing_beyond(commands_before, "refused title operations")
@@ -409,6 +417,20 @@ async fn t12_a_title_set_by_command_while_the_title_job_runs_wins_and_cancels_th
         "a 201-character title",
     )
     .await;
+    assert!(ctx.jobs.cancels_for(j6).is_empty());
+
+    // When the commanding service sets an empty title.
+    let empty = command(
+        &ctx,
+        &SetTitle {
+            thread_id: t6,
+            title: String::new(),
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    // Then refused TITLE_EMPTY; J6 runs on, nothing cancelled.
+    thread_refused(&ctx, empty, ReasonCode::TitleEmpty, "an empty title").await;
     assert!(ctx.jobs.cancels_for(j6).is_empty());
 
     // When the commanding service sets T6's title on A's gesture.

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use contract_threads::{
-    ClosingStatus, CreateThread, ReasonCode, ThreadStatus, ThreadTitle, TitleTooLong,
+    ClosingStatus, CreateThread, ReasonCode, ThreadStatus, ThreadTitle, ThreadTitleError,
 };
 use serde::Serialize;
 use service_engine::error::EngineError;
@@ -101,10 +101,16 @@ pub enum ParentLookup {
     Found(BTreeSet<Uuid>),
 }
 
-fn title_too_long(error: TitleTooLong) -> Refusal {
-    Refusal::new(ReasonCode::TitleTooLong)
-        .with("max_chars", ThreadTitle::MAX_CHARS)
-        .with("chars", error.chars)
+/// The one refusal of a title out of its domain, whichever gesture brought it:
+/// a creation, `thread.set_title` or the title Job's runner.
+fn title_refused(error: ThreadTitleError) -> Refusal {
+    let refusal = Refusal::new(error.reason_code());
+    match error {
+        ThreadTitleError::Empty => refusal.with("min_chars", ThreadTitle::MIN_CHARS),
+        ThreadTitleError::TooLong(too_long) => refusal
+            .with("max_chars", ThreadTitle::MAX_CHARS)
+            .with("chars", too_long.chars),
+    }
 }
 
 fn record<P: Serialize>(
@@ -135,7 +141,7 @@ pub fn create(
     }
     let title = match command.title.clone().map(ThreadTitle::parse).transpose() {
         Ok(title) => title,
-        Err(error) => return Ok(Err(title_too_long(error))),
+        Err(error) => return Ok(Err(title_refused(error))),
     };
     let origin = match (command.parent_thread_id, command.origin_block_id) {
         (Some(thread_id), Some(block_id)) => Some(ThreadOrigin {
@@ -414,8 +420,8 @@ impl ThreadState {
         Ok(Ok(Applied::Changed))
     }
 
-    /// Sets the title (`thread.set_title`, or the title Job's runner): at most
-    /// 200 characters; the same title changes nothing.
+    /// Sets the title (`thread.set_title`, or the title Job's runner): 1 to 200
+    /// characters; the same title changes nothing.
     pub fn set_title(
         &mut self,
         raw: &str,
@@ -424,7 +430,7 @@ impl ThreadState {
     ) -> Result<Result<Applied, Refusal>, EngineError> {
         let title = match ThreadTitle::parse(raw) {
             Ok(title) => title,
-            Err(error) => return Ok(Err(title_too_long(error))),
+            Err(error) => return Ok(Err(title_refused(error))),
         };
         if self.title.as_ref() == Some(&title) {
             return Ok(Ok(Applied::Unchanged));

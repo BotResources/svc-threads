@@ -36,7 +36,7 @@ macro_rules! thread_command {
 /// `thread.create` — a thread under a caller-minted UUIDv7.
 ///
 /// Refused `KEY_REUSED` (the id is held), `USER_UNKNOWN` (the owner or a member
-/// is not a known user still in the roster), `TITLE_TOO_LONG`,
+/// is not a known user still in the roster), `TITLE_EMPTY`, `TITLE_TOO_LONG`,
 /// `THREAD_NOT_FOUND` (the parent), `OWNER_NOT_PARENT_MEMBER` and the proposed
 /// `ORIGIN_BLOCK_REQUIRED` (a parent without its origin block).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +119,8 @@ pub struct RemoveResourceIds {
 thread_command!(RemoveResourceIds, "remove_resource_ids");
 
 /// `thread.set_title` — a title set by command while the title Job runs wins:
-/// Threads cancels the Job. Refused `THREAD_NOT_FOUND`, `TITLE_TOO_LONG`.
+/// Threads cancels the Job. Refused `THREAD_NOT_FOUND`, `TITLE_EMPTY`,
+/// `TITLE_TOO_LONG`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetTitle {
     pub thread_id: Uuid,

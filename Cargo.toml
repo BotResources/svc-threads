@@ -17,7 +17,7 @@ repository = "https://github.com/BotResources/svc-threads"
 publish = false
 
 [workspace.dependencies]
-contract-threads = { path = "crates/contract-threads", version = "0.1.0" }
+contract-threads = { path = "crates/contract-threads", version = "0.2.0" }
 
 # The conversation model Threads stores messages in (schema `br-llm-messages/2`).
 br-llm-messages = { git = "https://github.com/BotResources/br-llm-messages-rs", package = "br-llm-messages", tag = "br-llm-messages/v0.3.0", version = "0.3.0" }

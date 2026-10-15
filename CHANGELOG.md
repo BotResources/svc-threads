@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.2.0
+
+### Changed
+
+- **Command admission belongs to the NATS fabric.** Threads admits every
+  decodable command whatever its envelope's actor kind: the actor is the
+  facts' attribution (`actor_id`, `actor_kind`), never an authorization, and
+  the payload's `acting_user_id` stays the user whose gesture led to the
+  command. A command a commanding service stages from a GraphQL mutation —
+  which `br-service-engine` envelopes under the human caller — is now answered
+  like any other; in 0.1 it was dead-lettered unanswered. An envelope without
+  metadata (no actor at all) is still dead-lettered.
+- **A title holds 1 to 200 characters.** An empty title is refused
+  `TITLE_EMPTY` (params `min_chars`) on `thread.create`, `thread.set_title` and
+  the title Job runner's `threadsSetTitle`, where 0.1 stored it. Built on
+  `contract-threads` 0.2.0.
+
+### Fixed
+
+- Registry breach `01a13f5b-bdfd-77a8-8f04-e67bdba00f09` (an empty title was
+  accepted).
+
+### Migration
+
+- `9800000002_empty_title_is_no_title`: a thread stored with an empty title by
+  0.1 becomes untitled (data only, no schema change), so that every stored
+  title is a valid one when read back.
+
 ## 0.1.0
 
 ### Added

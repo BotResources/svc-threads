@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.2.0
+
+### Added
+
+- `ReasonCode::TitleEmpty` (`TITLE_EMPTY`): a title of no character.
+- `ThreadTitleError` (`Empty`, `TooLong(TitleTooLong)`), displayed as its
+  reason code, with `reason_code()`; `ThreadTitle::MIN_CHARS` (1).
+
+### Changed
+
+- **Breaking:** `ThreadTitle::parse` refuses an empty title and returns
+  `Result<ThreadTitle, ThreadTitleError>` instead of
+  `Result<ThreadTitle, TitleTooLong>`. `TitleTooLong` is unchanged and rides in
+  `ThreadTitleError::TooLong`; a caller matching it moves to that variant (or to
+  `reason_code()`). A caller matching `ReasonCode` exhaustively gains the
+  `TitleEmpty` arm.
+- The `thread.create` and `thread.set_title` documentation names `TITLE_EMPTY`
+  among their refusals.
+
 ## 0.1.0
 
 ### Added

@@ -90,8 +90,9 @@ pub struct RunnerMutation;
 
 #[Object]
 impl RunnerMutation {
-    /// Sets the title of a thread for its active title Job (at most 200
-    /// characters, `TITLE_TOO_LONG`); Threads then declares the Job finished.
+    /// Sets the title of a thread for its active title Job (1 to 200
+    /// characters, `TITLE_EMPTY`, `TITLE_TOO_LONG`); Threads then declares the
+    /// Job finished.
     /// A Job that is not the thread's active title Job is refused
     /// `JOB_NOT_ACTIVE`.
     async fn threads_set_title(
