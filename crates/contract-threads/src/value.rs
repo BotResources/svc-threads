@@ -5,10 +5,33 @@
 
 use std::fmt;
 
-/// A thread's title: at most [`ThreadTitle::MAX_CHARS`] characters
-/// (`TITLE_TOO_LONG`).
+use crate::ReasonCode;
+
+/// A thread's title: from [`ThreadTitle::MIN_CHARS`] to
+/// [`ThreadTitle::MAX_CHARS`] characters (`TITLE_EMPTY`, `TITLE_TOO_LONG`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ThreadTitle(String);
+
+/// Why a raw title is not a [`ThreadTitle`]; it displays as its reason code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ThreadTitleError {
+    /// A title of no character at all.
+    #[error("TITLE_EMPTY")]
+    Empty,
+    /// A title longer than [`ThreadTitle::MAX_CHARS`] characters.
+    #[error("TITLE_TOO_LONG")]
+    TooLong(#[from] TitleTooLong),
+}
+
+impl ThreadTitleError {
+    /// The reason code a refusal of this title carries.
+    pub const fn reason_code(self) -> ReasonCode {
+        match self {
+            Self::Empty => ReasonCode::TitleEmpty,
+            Self::TooLong(_) => ReasonCode::TitleTooLong,
+        }
+    }
+}
 
 /// A title longer than [`ThreadTitle::MAX_CHARS`] characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -21,15 +44,21 @@ pub struct TitleTooLong {
 }
 
 impl ThreadTitle {
-    /// Counted in Unicode scalar values, as the specification counts
+    /// Both bounds count Unicode scalar values, as the specification counts
     /// characters.
+    pub const MIN_CHARS: usize = 1;
+    /// See [`ThreadTitle::MIN_CHARS`].
     pub const MAX_CHARS: usize = 200;
 
-    pub fn parse(raw: impl Into<String>) -> Result<Self, TitleTooLong> {
+    /// The raw value as given: whitespace counts as characters and is kept.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, ThreadTitleError> {
         let raw = raw.into();
         let chars = raw.chars().count();
+        if chars < Self::MIN_CHARS {
+            return Err(ThreadTitleError::Empty);
+        }
         if chars > Self::MAX_CHARS {
-            return Err(TitleTooLong { chars });
+            return Err(TitleTooLong { chars }.into());
         }
         Ok(Self(raw))
     }
@@ -98,8 +127,25 @@ mod tests {
         );
         assert_eq!(
             ThreadTitle::parse("é".repeat(201)),
-            Err(TitleTooLong { chars: 201 })
+            Err(ThreadTitleError::TooLong(TitleTooLong { chars: 201 }))
         );
+        assert_eq!(
+            ThreadTitle::parse("é".repeat(201))
+                .unwrap_err()
+                .reason_code(),
+            ReasonCode::TitleTooLong
+        );
+    }
+
+    #[test]
+    fn an_empty_title_is_refused_title_empty_and_one_character_kept() {
+        assert_eq!(ThreadTitle::parse(""), Err(ThreadTitleError::Empty));
+        assert_eq!(
+            ThreadTitleError::Empty.reason_code(),
+            ReasonCode::TitleEmpty
+        );
+        assert_eq!(ThreadTitle::parse("é").unwrap().as_str(), "é");
+        assert_eq!(ThreadTitle::parse(" ").unwrap().as_str(), " ");
     }
 
     #[test]

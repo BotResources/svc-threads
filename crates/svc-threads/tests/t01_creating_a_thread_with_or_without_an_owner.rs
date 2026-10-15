@@ -1,18 +1,26 @@
 //! **T01 — Creating a thread, with or without an owner.**
 //!
 //! > Playing a commanding service, the harness publishes thread.create with a
-//! > client-minted UUIDv7, owner O and members A and B: thread.confirmed names
-//! > the command id; the thread is OPEN at version 1 with members O, A and B,
-//! > and threads.members.{id} holds owner_id O and users [O, A, B]; the Created
-//! > and MembersAdded facts carry the acting user. A second thread is created
-//! > with members A and B and no owner: confirmed, its KV entry carries no
-//! > owner_id. Replaying the first command (same envelope id) re-publishes the
-//! > same confirmation and changes nothing. A new command reusing the thread id
-//! > is refused KEY_REUSED. A creation naming a user absent from the roster, or
-//! > a user the roster marks out, as owner or as member is refused USER_UNKNOWN
-//! > and creates nothing, no KV entry included. A title of 201 characters is
-//! > refused; one of 200 is kept. A creation carrying resources {kms: [k1, k2]}
-//! > shows them on the thread.
+//! > client-minted UUIDv7, owner O and members A and B, on O's gesture:
+//! > thread.confirmed names the command id, once; the thread is OPEN at version
+//! > 1 with members O, A and B under their roster names, and
+//! > threads.members.{id} holds owner_id O and users [O, A, B]; A's live list
+//! > receives it; the Created and MembersAdded facts carry the acting user O and
+//! > the commanding service as actor, and no fact carries a name. A second
+//! > thread is created with members A and B and no owner: confirmed, its KV
+//! > entry carries no owner_id at all. The bus redelivers the first command
+//! > under its own envelope id: no second effect — no fact, no version, no
+//! > rewrite of the KV entry — and no second distinct answer. A new command
+//! > reusing the thread id is refused KEY_REUSED. A thread id that is not a
+//! > UUIDv7 is refused ID_NOT_UUIDV7. A creation whose envelope names a person
+//! > as actor, as a commanding service's mutation publishes it, is confirmed
+//! > like any other: the person is the Created fact's attribution, and the
+//! > acting user in the payload stays the gesture's user. A creation naming a
+//! > user absent from the roster, or a user the roster marks out, as owner or
+//! > as member is refused USER_UNKNOWN and creates nothing: no thread, no KV
+//! > entry, no fact. A title of 201 characters is refused TITLE_TOO_LONG, an
+//! > empty one TITLE_EMPTY; one of 200 is kept whole. A creation carrying
+//! > resources {kms: [k1, k2]} shows them on the thread.
 //!
 //! Channels: the one answer per command (4), the members entry (4), the fact
 //! log, the thread as each member reads it (2), and A's live list (3).
@@ -23,12 +31,12 @@ use std::collections::BTreeMap;
 
 use br_core_integration::{Actor, UserId};
 use br_util_nats_fabric::KvKey;
-use common::commands::{Answer, commanding_service, send};
+use common::commands::commanding_service;
 use common::facts;
 use common::feed::{Live, upsert_of, views};
 use common::flows::{
-    answered_once, await_members, command, create, creation, member_ids, resources_of, sorted,
-    thread_confirmed, thread_refused, thread_view, version,
+    answered_once, await_members, command, command_as, create, creation, member_ids, resources_of,
+    sorted, thread_confirmed, thread_refused, thread_view, version,
 };
 use common::{TestContext, identity};
 use contract_threads::{ReasonCode, ThreadCommandConfirmed};
@@ -168,31 +176,68 @@ async fn t01_a_thread_is_created_with_or_without_an_owner_each_command_answered_
     );
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
 
-    // When a person — not a service account — sends a creation on the bus.
-    let by_hand = creation(Some(a.id), &[]);
-    let by_hand_thread = by_hand.thread_id;
-    let by_hand_command = send(&ctx.nats, Actor::Human(UserId::from(a.id)), &by_hand).await;
+    // When a creation names a thread id that is not a UUIDv7.
+    let mut not_v7 = creation(Some(a.id), &[]);
+    not_v7.thread_id = Uuid::new_v4();
+    let not_v7_command = command(&ctx, &not_v7).await;
 
-    // Then it is never confirmed and creates nothing: commands are accepted
-    // from service accounts only.
-    tokio::time::sleep(common::QUIET_WINDOW).await;
-    assert!(
-        ctx.answers
-            .for_command(by_hand_command)
-            .iter()
-            .all(|answer| !matches!(answer, Answer::ThreadConfirmed(_))),
-        "a person's command is never confirmed"
-    );
+    // Then it is refused ID_NOT_UUIDV7 and creates nothing.
+    let refused = thread_refused(
+        &ctx,
+        not_v7_command,
+        ReasonCode::IdNotUuidV7,
+        "a thread id that is not a UUIDv7",
+    )
+    .await;
+    assert_eq!(refused.params["field"], "thread_id", "{refused:?}");
     assert_eq!(
-        thread_view(&ctx, &a.passport, by_hand_thread).await,
+        thread_view(&ctx, &a.passport, not_v7.thread_id).await,
         Value::Null
     );
-    assert!(ctx.published_members(by_hand_thread).await.is_none());
-    assert!(
-        facts::of(&ctx.pool, "thread", by_hand_thread)
-            .await
-            .is_empty()
+    assert!(ctx.published_members(not_v7.thread_id).await.is_none());
+    assert_eq!(facts::count(&ctx.pool).await, facts_before);
+
+    // When a commanding service's mutation publishes a creation, its envelope
+    // naming the person who called it — A — as actor, on A's gesture.
+    let by_person = creation(Some(a.id), &[b.id]);
+    let by_person_thread = by_person.thread_id;
+    let by_person_command = command_as(&ctx, Actor::Human(UserId::from(a.id)), &by_person).await;
+
+    // Then it is confirmed like any other: admission is the fabric's, the
+    // envelope's actor is attribution only.
+    thread_confirmed(
+        &ctx,
+        by_person_command,
+        "a creation under a person's envelope",
+    )
+    .await;
+    answered_once(
+        &ctx,
+        by_person_command,
+        "a creation under a person's envelope",
+    )
+    .await;
+    let members = await_members(&ctx, by_person_thread, "its members entry").await;
+    assert_eq!(members.owner_id, Some(a.id));
+    assert_eq!(sorted(&members.users), sorted(&[a.id, b.id]));
+    assert_eq!(
+        thread_view(&ctx, &b.passport, by_person_thread).await["status"],
+        "OPEN"
     );
+
+    // And its facts are attributed to the person, the payload's acting user
+    // staying the gesture's user.
+    let by_person_facts = facts::of(&ctx.pool, "thread", by_person_thread).await;
+    for event_type in ["Created", "MembersAdded"] {
+        let fact = facts::the(&by_person_facts, event_type);
+        assert_eq!(fact.actor_kind, "human", "{fact:?}");
+        assert_eq!(
+            fact.actor_id, a.id,
+            "the person is the attribution: {fact:?}"
+        );
+        assert_eq!(fact.acting_user_id, Some(a.id), "{fact:?}");
+    }
+    let facts_before = facts::count(&ctx.pool).await;
 
     // When creations name a user absent from the roster, or one the roster
     // marks out — as owner, or as member.
@@ -247,6 +292,29 @@ async fn t01_a_thread_is_created_with_or_without_an_owner_each_command_answered_
         thread_view(&ctx, &o.passport, too_long_thread).await,
         Value::Null
     );
+
+    // When a creation carries an empty title.
+    let mut empty = creation(Some(o.id), &[]);
+    empty.title = Some(String::new());
+    let empty_thread = empty.thread_id;
+    let empty_command = command(&ctx, &empty).await;
+
+    // Then it is refused TITLE_EMPTY and creates nothing: no thread, no members
+    // entry, no fact.
+    let refused = thread_refused(
+        &ctx,
+        empty_command,
+        ReasonCode::TitleEmpty,
+        "an empty title",
+    )
+    .await;
+    assert_eq!(refused.params["min_chars"], 1, "{refused:?}");
+    assert_eq!(
+        thread_view(&ctx, &o.passport, empty_thread).await,
+        Value::Null
+    );
+    assert!(ctx.published_members(empty_thread).await.is_none());
+    assert_eq!(facts::count(&ctx.pool).await, facts_before);
 
     // When one carries a title of 200 characters and resources {kms: [k1, k2]}.
     let mut titled = creation(Some(o.id), &[a.id]);

@@ -11,10 +11,10 @@ use service_engine::pipeline::MutationFault;
 pub enum Fault {
     #[error("{}", .0.code())]
     Refused(Reason),
-    /// A command whose envelope names no service account: Threads answers the
-    /// commanding services only, and dead-letters anything else.
-    #[error("a command reached Threads from something other than a service account")]
-    NotACommandingService,
+    /// A command whose envelope carries no metadata, hence no actor to
+    /// attribute its facts to: not a contract command, dead-lettered.
+    #[error("COMMAND_UNATTRIBUTED")]
+    Unattributed,
     #[error("the store or the engine failed")]
     Engine(#[source] EngineError),
 }
@@ -23,7 +23,7 @@ impl MutationFault for Fault {
     fn reason(&self) -> Option<Reason> {
         match self {
             Self::Refused(reason) => Some(*reason),
-            Self::NotACommandingService | Self::Engine(_) => None,
+            Self::Unattributed | Self::Engine(_) => None,
         }
     }
 }
@@ -31,7 +31,7 @@ impl MutationFault for Fault {
 impl ReactionError for Fault {
     fn disposition(&self) -> Disposition {
         match self {
-            Self::Refused(_) | Self::NotACommandingService => Disposition::Terminal,
+            Self::Refused(_) | Self::Unattributed => Disposition::Terminal,
             Self::Engine(EngineError::Db(db)) if sqlx_is_terminal(db) => Disposition::Terminal,
             Self::Engine(_) => Disposition::Retry,
         }
@@ -80,9 +80,6 @@ mod tests {
         let fault = Fault::Engine(EngineError::Config("absent".into()));
         assert_eq!(fault.reason(), None);
         assert_eq!(fault.disposition(), Disposition::Retry);
-        assert_eq!(
-            Fault::NotACommandingService.disposition(),
-            Disposition::Terminal
-        );
+        assert_eq!(Fault::Unattributed.disposition(), Disposition::Terminal);
     }
 }

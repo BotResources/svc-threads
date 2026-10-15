@@ -71,6 +71,7 @@ pub const ACTIVE_USER_REQUIRED: &str = "ACTIVE_USER_REQUIRED";
 pub const THREAD_NOT_FOUND: &str = "THREAD_NOT_FOUND";
 pub const MESSAGE_NOT_FOUND: &str = "MESSAGE_NOT_FOUND";
 pub const KEY_REUSED: &str = "KEY_REUSED";
+pub const TITLE_EMPTY: &str = "TITLE_EMPTY";
 pub const TITLE_TOO_LONG: &str = "TITLE_TOO_LONG";
 /// Not named by the registry (it describes the refusal): the scaffold's, to
 /// ratify.

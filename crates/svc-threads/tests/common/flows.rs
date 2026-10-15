@@ -33,6 +33,19 @@ pub async fn command<C: ThreadsCommand + Serialize>(ctx: &TestContext, command: 
     command_id
 }
 
+/// Sends `command` under an envelope naming `actor` — a person, as a commanding
+/// service's GraphQL mutation stages it under its caller; answers its id,
+/// entered in the ledger like [`command`]'s.
+pub async fn command_as<C: ThreadsCommand + Serialize>(
+    ctx: &TestContext,
+    actor: br_core_integration::Actor,
+    command: &C,
+) -> Uuid {
+    let command_id = send(&ctx.nats, actor, command).await;
+    ctx.sent.lock().expect("the ledger").push(command_id);
+    command_id
+}
+
 /// The bus delivers `command` again under its own id.
 pub async fn redeliver<C: ThreadsCommand + Serialize>(
     ctx: &TestContext,

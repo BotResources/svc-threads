@@ -66,5 +66,5 @@ pub use thread::{
     RemoveResourceIds, SetTitle,
 };
 pub use title_job::TitleJobConfig;
-pub use value::{SealDigest, SealDigestError, ThreadTitle, TitleTooLong};
+pub use value::{SealDigest, SealDigestError, ThreadTitle, ThreadTitleError, TitleTooLong};
 pub use wire::UnknownLiteral;

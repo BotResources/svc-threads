@@ -28,6 +28,8 @@ wire_enum! {
         ThreadNotOpen => "THREAD_NOT_OPEN",
         /// No thread holds the id the command names.
         ThreadNotFound => "THREAD_NOT_FOUND",
+        /// A title of no character.
+        TitleEmpty => "TITLE_EMPTY",
         /// A title longer than 200 characters.
         TitleTooLong => "TITLE_TOO_LONG",
         /// No message of the thread holds the id the command names.
@@ -75,6 +77,7 @@ mod tests {
             "OWNER_NOT_PARENT_MEMBER",
             "THREAD_NOT_OPEN",
             "THREAD_NOT_FOUND",
+            "TITLE_EMPTY",
             "TITLE_TOO_LONG",
             "MESSAGE_NOT_FOUND",
             "MESSAGE_INVALID",

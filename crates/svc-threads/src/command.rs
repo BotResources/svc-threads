@@ -1,8 +1,13 @@
 //! The mechanics every command reaction shares: the contract's command decoded
-//! from its envelope, the commanding service as the only accepted sender, the
-//! fact metadata a command carries, and its one answer — `confirmed` or
-//! `refused` with a reason code and structured params — staged in the
-//! transaction of the change (or of nothing, for a refusal).
+//! from its envelope, the fact metadata a command carries, and its one answer —
+//! `confirmed` or `refused` with a reason code and structured params — staged in
+//! the transaction of the change (or of nothing, for a refusal).
+//!
+//! Admission belongs to the NATS fabric: only the services allowed to publish
+//! on Threads' command subjects send them. The envelope's actor is attribution,
+//! never authorization — a commanding service's GraphQL mutation stages its
+//! command under the person who called it — so Threads admits every decodable
+//! command whatever the actor's kind, and records that actor on its facts.
 //!
 //! A reaction that refuses writes nothing before it decides: every handler
 //! loads, decides, and only then writes, so the refusal commits the answer
@@ -93,14 +98,13 @@ pub struct Call {
 }
 
 impl Call {
-    /// Commands are accepted from service accounts only: the commanding service
-    /// took the decision. A command from anything else is not Threads' to
-    /// answer; it is dead-lettered.
+    /// The envelope's actor — a service account or a person — becomes the
+    /// facts' attribution; the payload's acting user stays the user whose
+    /// gesture led to the command. An envelope without metadata names nobody
+    /// to attribute the change to: it is not a contract command, and is
+    /// dead-lettered.
     pub fn of<C: ThreadsCommand>(cx: &Reaction<'_>, command: &C) -> Result<Self, Fault> {
-        let actor = match cx.actor() {
-            Some(actor) if actor.is_service() => *actor,
-            _ => return Err(Fault::NotACommandingService),
-        };
+        let actor = *cx.actor().ok_or(Fault::Unattributed)?;
         Ok(Self {
             command_id: cx.message_id(),
             command_type: C::command_type(),

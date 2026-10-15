@@ -16,7 +16,7 @@ member's read mark — and serves them, live, to their members.
 - Threads runs no AI logic; to name a new conversation it asks a runner through
   Jobs.
 
-**Status: 0.1.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.2.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
