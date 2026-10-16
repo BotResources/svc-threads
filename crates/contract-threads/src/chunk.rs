@@ -27,13 +27,12 @@
 //! the [`seal_hash`] of every chunk it pushed.
 
 use br_llm_messages::StreamEvent;
-use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::content::Block;
+use crate::content::{Block, LibraryValueError};
 
 /// The stream the engine binds for Threads (`STREAMING_{service}`), declared out
 /// of band like every stream.
@@ -92,10 +91,11 @@ impl LibraryEvent {
     /// The library loads stream events from JSON but never serializes them, so
     /// the contract writes that JSON itself: one arm per event, every field
     /// under the name the library reads it by (`to_event` of the result gives
-    /// `event` back — the contract's tests hold it for every event). An event a
-    /// later library adds is refused (`unsupported_stream_event`) until the
-    /// contract names it.
-    pub fn of(event: &StreamEvent) -> Result<Self, serde_json::Error> {
+    /// `event` back, and the JSON is the one `br-llm-messages` 0.3 wrote — the
+    /// contract's tests hold both for every event). An event a later library
+    /// adds is refused ([`LibraryValueError::UnsupportedStreamEvent`]) until
+    /// the contract names it.
+    pub fn of(event: &StreamEvent) -> Result<Self, LibraryValueError> {
         let json = match event {
             StreamEvent::BlockStart { index, kind } => {
                 json!({ "type": "block_start", "index": index, "kind": kind })
@@ -134,7 +134,7 @@ impl LibraryEvent {
                 }
                 None => json!({ "type": "finish", "stop_reason": stop_reason }),
             },
-            _ => return Err(serde_json::Error::custom("unsupported_stream_event")),
+            _ => return Err(LibraryValueError::UnsupportedStreamEvent),
         };
         Ok(Self(json))
     }
@@ -148,9 +148,16 @@ impl LibraryEvent {
         &self.0
     }
 
-    /// Read as the library's stream event, by the library's rules.
+    /// Read as the library's stream event, by the library's rules, without
+    /// copying the JSON.
     pub fn to_event(&self) -> Result<StreamEvent, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
+        StreamEvent::deserialize(&self.0)
+    }
+
+    /// Read as the library's stream event, by the library's rules, consuming
+    /// the JSON.
+    pub fn into_event(self) -> Result<StreamEvent, serde_json::Error> {
+        serde_json::from_value(self.0)
     }
 }
 
@@ -284,83 +291,139 @@ mod tests {
         );
     }
 
+    /// Every stream event, with the JSON `br-llm-messages` 0.3 serialized it
+    /// to — the wire of a 0.2 chunk, generated from that version's own
+    /// `Serialize` — which the contract writes as the same JSON value and the
+    /// library loads back to the same event.
     #[test]
-    fn every_stream_event_is_written_as_the_json_the_library_loads_it_from() {
-        let events = [
-            StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamBlockKind::Text,
-            },
-            StreamEvent::BlockStart {
-                index: 1,
-                kind: StreamBlockKind::Thinking,
-            },
-            StreamEvent::BlockStart {
-                index: 2,
-                kind: StreamBlockKind::RedactedThinking,
-            },
-            StreamEvent::BlockStart {
-                index: 3,
-                kind: StreamBlockKind::Structured,
-            },
-            StreamEvent::TextDelta {
-                index: 0,
-                text: " hello ".into(),
-            },
-            StreamEvent::ThinkingDelta {
-                index: 1,
-                text: "\tlet me think".into(),
-            },
-            StreamEvent::SignatureDelta {
-                index: 1,
-                signature: "c2ln".into(),
-            },
-            StreamEvent::RedactedThinkingData {
-                index: 2,
-                data: "b3BhcXVl".into(),
-            },
-            StreamEvent::StructuredDelta {
-                index: 3,
-                json_fragment: "{\"a\":".into(),
-            },
-            StreamEvent::ToolCallStart {
-                index: 4,
-                id: ToolCallId::new("call_1").unwrap(),
-                name: ToolName::new("search").unwrap(),
-            },
-            StreamEvent::ToolCallArgumentsDelta {
-                index: 4,
-                json_fragment: "{\"q\":1}".into(),
-            },
-            StreamEvent::BlockEnd { index: 4 },
-            StreamEvent::Finish {
-                stop_reason: StopReason::AwaitingToolResults,
-                usage: Some(Usage {
-                    input_tokens: 3,
-                    output_tokens: 5,
-                    ..Usage::default()
-                }),
-            },
-            StreamEvent::Finish {
-                stop_reason: StopReason::Other {
-                    reason: "length".into(),
+    fn every_stream_event_is_written_as_the_json_of_a_0_2_chunk() {
+        let id = || ToolCallId::new("call_1").unwrap();
+        let golden: Vec<(StreamEvent, &str)> = vec![
+            (
+                StreamEvent::BlockStart {
+                    index: 0,
+                    kind: StreamBlockKind::Text,
                 },
-                usage: None,
-            },
+                r#"{"type":"block_start","index":0,"kind":"text"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 1,
+                    kind: StreamBlockKind::Thinking,
+                },
+                r#"{"type":"block_start","index":1,"kind":"thinking"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 2,
+                    kind: StreamBlockKind::RedactedThinking,
+                },
+                r#"{"type":"block_start","index":2,"kind":"redacted_thinking"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 3,
+                    kind: StreamBlockKind::Structured,
+                },
+                r#"{"type":"block_start","index":3,"kind":"structured"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 4,
+                    kind: StreamBlockKind::ToolCall,
+                },
+                r#"{"type":"block_start","index":4,"kind":"tool_call"}"#,
+            ),
+            (
+                StreamEvent::TextDelta {
+                    index: 0,
+                    text: " hello ".into(),
+                },
+                r#"{"type":"text_delta","index":0,"text":" hello "}"#,
+            ),
+            (
+                StreamEvent::ThinkingDelta {
+                    index: 1,
+                    text: "\tlet me think".into(),
+                },
+                r#"{"type":"thinking_delta","index":1,"text":"\tlet me think"}"#,
+            ),
+            (
+                StreamEvent::SignatureDelta {
+                    index: 1,
+                    signature: "c2ln".into(),
+                },
+                r#"{"type":"signature_delta","index":1,"signature":"c2ln"}"#,
+            ),
+            (
+                StreamEvent::RedactedThinkingData {
+                    index: 2,
+                    data: "b3BhcXVl".into(),
+                },
+                r#"{"type":"redacted_thinking_data","index":2,"data":"b3BhcXVl"}"#,
+            ),
+            (
+                StreamEvent::StructuredDelta {
+                    index: 3,
+                    json_fragment: "{\"a\":".into(),
+                },
+                r#"{"type":"structured_delta","index":3,"json_fragment":"{\"a\":"}"#,
+            ),
+            (
+                StreamEvent::ToolCallStart {
+                    index: 4,
+                    id: id(),
+                    name: ToolName::new("search").unwrap(),
+                },
+                r#"{"type":"tool_call_start","index":4,"id":"call_1","name":"search"}"#,
+            ),
+            (
+                StreamEvent::ToolCallArgumentsDelta {
+                    index: 4,
+                    json_fragment: "{\"q\":1}".into(),
+                },
+                r#"{"type":"tool_call_arguments_delta","index":4,"json_fragment":"{\"q\":1}"}"#,
+            ),
+            (
+                StreamEvent::BlockEnd { index: 4 },
+                r#"{"type":"block_end","index":4}"#,
+            ),
+            (
+                StreamEvent::Finish {
+                    stop_reason: StopReason::AwaitingToolResults,
+                    usage: Some(Usage {
+                        input_tokens: 3,
+                        output_tokens: 5,
+                        cache_read_tokens: Some(7),
+                        cache_write_tokens: None,
+                        thinking_tokens: Some(11),
+                    }),
+                },
+                r#"{"type":"finish","stop_reason":{"type":"awaiting_tool_results"},"usage":{"input_tokens":3,"output_tokens":5,"cache_read_tokens":7,"thinking_tokens":11}}"#,
+            ),
+            (
+                StreamEvent::Finish {
+                    stop_reason: StopReason::Other {
+                        reason: "length".into(),
+                    },
+                    usage: None,
+                },
+                r#"{"type":"finish","stop_reason":{"type":"other","reason":"length"}}"#,
+            ),
         ];
-        for event in events {
+        for (event, wire) in golden {
             let written = LibraryEvent::of(&event).unwrap();
-            assert_eq!(written.to_event().unwrap(), event, "{written:?}");
+            // The same JSON value: key order is no part of the wire (a chunk
+            // is stored as `jsonb`, and `seal_hash` orders keys).
+            assert_eq!(
+                written.as_json(),
+                &serde_json::from_str::<serde_json::Value>(wire).unwrap(),
+                "{event:?}"
+            );
+            assert_eq!(written.to_event().unwrap(), event, "{wire}");
+            let read: LibraryEvent = serde_json::from_str(wire).unwrap();
+            assert_eq!(read.into_event().unwrap(), event, "{wire}");
         }
-        assert_eq!(
-            library(StreamEvent::ToolCallStart {
-                index: 4,
-                id: ToolCallId::new("call_1").unwrap(),
-                name: ToolName::new("search").unwrap(),
-            })
-            .as_json(),
-            &json!({ "type": "tool_call_start", "index": 4, "id": "call_1", "name": "search" })
-        );
     }
 
     #[test]

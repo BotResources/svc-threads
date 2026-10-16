@@ -24,72 +24,35 @@ use contract_threads::llm::{
     StopReason, Text, ToolCallId, ToolName, ToolResult, ToolResults, Turn, TurnId, TurnState,
     Usage, UserBlock, UserInput, UserSource,
 };
-use contract_threads::{Block, BlockBody, BlockKind, Item, MessageStatus, ReasonCode};
+use contract_threads::{
+    Block, BlockBody, BlockKind, Item, MessageInvalidError, MessageStatus, ReasonCode,
+};
 use uuid::Uuid;
 
 use super::state::{ItemKind, StoredBlock, StoredItem};
 use crate::command::Refusal;
 
-/// The code of a library refusal Threads does not know: the library may grow
-/// its refusals in a later version (`MessageError` is non-exhaustive).
-pub const UNKNOWN_LIBRARY_ERROR: &str = "library_refusal";
-
-/// The stable code of a refusal of the library's rules: what a
-/// `MESSAGE_INVALID` names in its `error` param. A refusal a later library
-/// adds maps to [`UNKNOWN_LIBRARY_ERROR`] until it is named here: on every
-/// library upgrade, its changelog's new `MessageError` variants get a code.
+/// The code of a refusal of the library's rules: what a `MESSAGE_INVALID`
+/// names in its `error` param, the vocabulary `contract-threads` publishes.
 pub fn library_error_code(error: &MessageError) -> &'static str {
-    match error {
-        MessageError::Blank { .. } => "blank",
-        MessageError::InvalidToolName => "invalid_tool_name",
-        MessageError::InvalidBase64 => "invalid_base64",
-        MessageError::EmptyStep => "empty_step",
-        MessageError::ToolCallNotAtTail => "tool_call_not_at_tail",
-        MessageError::AwaitingToolResultsWithoutCalls => "awaiting_tool_results_without_calls",
-        MessageError::ToolCallsWithoutAwaiting => "tool_calls_without_awaiting",
-        MessageError::DuplicateToolCallId { .. } => "duplicate_tool_call_id",
-        MessageError::DuplicateToolCallIdInTurn { .. } => "duplicate_tool_call_id_in_turn",
-        MessageError::DuplicateToolCallIdInConversation { .. } => {
-            "duplicate_tool_call_id_in_conversation"
-        }
-        MessageError::EmptyUserContent => "empty_user_content",
-        MessageError::DuplicateToolResultId { .. } => "duplicate_tool_result_id",
-        MessageError::ToolResultNotPending { .. } => "tool_result_not_pending",
-        MessageError::ToolNameMismatch { .. } => "tool_name_mismatch",
-        MessageError::EmptyToolResults => "empty_tool_results",
-        MessageError::TurnNotAwaitingResults { .. } => "turn_not_awaiting_results",
-        MessageError::TurnNotAwaitingStep { .. } => "turn_not_awaiting_step",
-        MessageError::TurnMustStartWithStep => "turn_must_start_with_step",
-        MessageError::DuplicateEntryId { .. } => "duplicate_entry_id",
-        MessageError::TurnNotFound { .. } => "turn_not_found",
-        MessageError::SchemaMismatch { .. } => "schema_mismatch",
-        MessageError::TurnAwaitingResults => "turn_awaiting_results",
-        MessageError::RenderStartsWithAssistant => "render_starts_with_assistant",
-        MessageError::EmptyRender => "empty_render",
-        MessageError::NoOpenBlock { .. } => "no_open_block",
-        MessageError::BlockStillOpen { .. } => "block_still_open",
-        MessageError::UnexpectedBlockIndex { .. } => "unexpected_block_index",
-        MessageError::BlockKindMismatch { .. } => "block_kind_mismatch",
-        MessageError::ToolCallNeedsStart => "tool_call_needs_start",
-        MessageError::EventAfterFinish => "event_after_finish",
-        MessageError::MissingFinish => "missing_finish",
-        MessageError::InvalidJson { .. } => "invalid_json",
-        MessageError::WireListEmpty => "wire_list_empty",
-        MessageError::WireListNotStartingWithUser { .. } => "wire_list_not_starting_with_user",
-        MessageError::WireToolCallUnanswered { .. } => "wire_tool_call_unanswered",
-        MessageError::WireToolCallAnsweredTwice { .. } => "wire_tool_call_answered_twice",
-        MessageError::WireToolResultUnmatched { .. } => "wire_tool_result_unmatched",
-        MessageError::WireToolCallIdRepeated { .. } => "wire_tool_call_id_repeated",
-        _ => UNKNOWN_LIBRARY_ERROR,
-    }
+    MessageInvalidError::of_library(error).as_str()
 }
 
-/// The library's refusal of a value named by library JSON that does not load
-/// (a block, a tool result, a stream event): each value the JSON names is
-/// built with the library's own constructor, so that the refusal — an invalid
-/// tool name, a blank text, an empty signature — is the library's.
-/// `None` when every value builds: the JSON is then not the library's shape.
-pub fn value_refusal(json: &serde_json::Value) -> Option<MessageError> {
+/// What library JSON is expected to be where Threads reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    UserBlock,
+    AssistantBlock,
+    ToolResult,
+    StreamEvent,
+}
+
+/// The library's refusal of a value named by library JSON of `shape` that
+/// does not load: each value the JSON names is built with the library's own
+/// constructor, so that the refusal — an invalid tool name, a blank text, an
+/// empty signature — is the library's. `None` when every value builds: the
+/// JSON is then not the library's shape.
+pub fn value_refusal(json: &serde_json::Value, shape: Shape) -> Option<MessageError> {
     type Build = fn(String) -> Result<(), MessageError>;
     let built = |field: &str, build: Build| {
         json.get(field)
@@ -99,46 +62,69 @@ pub fn value_refusal(json: &serde_json::Value) -> Option<MessageError> {
     let text: Build = |value| Text::new(value).map(drop);
     let call_id: Build = |value| ToolCallId::new(value).map(drop);
     let tool_name: Build = |value| ToolName::new(value).map(drop);
-    let checks: Vec<Option<Result<(), MessageError>>> =
-        match json.get("type").and_then(serde_json::Value::as_str) {
-            Some("text") => vec![built("text", text)],
-            Some("thinking") => vec![built("signature", |value| Signature::new(value).map(drop))],
-            Some("redacted_thinking") => {
-                vec![built("data", |value| {
-                    RedactedThinking::new(value).map(drop)
-                })]
-            }
-            Some("tool_call" | "tool_call_start") => {
-                vec![built("id", call_id), built("name", tool_name)]
-            }
-            // A tool result is the one library value without a `type`; its
-            // content blocks are judged as blocks.
-            None => {
-                let content = json
-                    .get("content")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|block| value_refusal(block).map(Err));
-                [
-                    built("tool_call_id", call_id),
-                    built("tool_name", tool_name),
-                ]
+    let signature: Build = |value| Signature::new(value).map(drop);
+    let redacted: Build = |value| RedactedThinking::new(value).map(drop);
+    let kind = json.get("type").and_then(serde_json::Value::as_str);
+    let checks: Vec<Option<Result<(), MessageError>>> = match (shape, kind) {
+        (Shape::UserBlock | Shape::AssistantBlock, Some("text")) => vec![built("text", text)],
+        (Shape::AssistantBlock, Some("thinking")) => vec![built("signature", signature)],
+        (Shape::AssistantBlock, Some("redacted_thinking")) => vec![built("data", redacted)],
+        (Shape::AssistantBlock, Some("tool_call"))
+        | (Shape::StreamEvent, Some("tool_call_start")) => {
+            vec![built("id", call_id), built("name", tool_name)]
+        }
+        // A tool result's content blocks are text blocks.
+        (Shape::ToolResult, _) => {
+            let content = json
+                .get("content")
+                .and_then(serde_json::Value::as_array)
                 .into_iter()
-                .chain(content)
-                .collect()
-            }
-            Some(_) => Vec::new(),
-        };
+                .flatten()
+                .map(|block| value_refusal(block, Shape::UserBlock).map(Err));
+            [
+                built("tool_call_id", call_id),
+                built("tool_name", tool_name),
+            ]
+            .into_iter()
+            .chain(content)
+            .collect()
+        }
+        _ => Vec::new(),
+    };
     checks.into_iter().flatten().find_map(Result::err)
 }
 
-/// Why library JSON does not load, as a `MESSAGE_INVALID` names it: the
-/// library's code for a value it refuses, `block_content_invalid` otherwise.
-pub fn unreadable_code(json: &serde_json::Value) -> &'static str {
-    value_refusal(json)
-        .map(|error| library_error_code(&error))
-        .unwrap_or(reason::BLOCK_CONTENT_INVALID)
+/// Why content was refused: one of Threads' own rules, or the library's.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContentFault {
+    Threads(MessageInvalidError),
+    Library(MessageError),
+}
+
+impl ContentFault {
+    /// Library JSON of `shape` that does not load: the library's refusal of a
+    /// value it names, `block_content_invalid` otherwise.
+    pub fn unreadable(json: &serde_json::Value, shape: Shape) -> Self {
+        match value_refusal(json, shape) {
+            Some(error) => Self::Library(error),
+            None => Self::Threads(MessageInvalidError::BlockContentInvalid),
+        }
+    }
+
+    pub fn code(&self) -> MessageInvalidError {
+        match self {
+            Self::Threads(code) => *code,
+            Self::Library(error) => MessageInvalidError::of_library(error),
+        }
+    }
+
+    /// The `MESSAGE_INVALID` refusal it is.
+    pub fn refusal(&self) -> Refusal {
+        match self {
+            Self::Threads(code) => invalid(*code),
+            Self::Library(error) => invalid_by_library(error),
+        }
+    }
 }
 
 /// The tool call ids already used on a branch through a message: by the
@@ -165,28 +151,10 @@ pub fn check_calls_unused(items: &[StoredItem], used: &UsedCallIds) -> Result<()
     }
 }
 
-/// Threads' own reasons to refuse content the library would not judge.
-pub mod reason {
-    /// A block of a kind its place does not admit (a tool result in a user
-    /// input, a thinking in a tool results item, …).
-    pub const BLOCK_KIND_NOT_ALLOWED: &str = "block_kind_not_allowed";
-    /// A library block whose content is not the library's JSON for its kind.
-    pub const BLOCK_CONTENT_INVALID: &str = "block_content_invalid";
-    /// An `ARTIFACT` block in a user message: only runners and AIs produce
-    /// artifacts.
-    pub const ARTIFACT_IN_USER_MESSAGE: &str = "artifact_in_user_message";
-    /// An AI turn left awaiting tool results: no perspective could render it.
-    pub const TURN_AWAITING_TOOL_RESULTS: &str = "turn_awaiting_tool_results";
-    /// An AI author whose id or name is blank.
-    pub const AUTHOR_INVALID: &str = "author_invalid";
-    /// The parent is not a message of the thread.
-    pub const PARENT_NOT_IN_THREAD: &str = "parent_not_in_thread";
-}
-
-/// A `MESSAGE_INVALID` refusal for a library error, naming the id it is about
-/// when it names one.
+/// A `MESSAGE_INVALID` refusal for a library error, with the detail the
+/// error names: the id it is about, the field it refuses.
 pub fn invalid_by_library(error: &MessageError) -> Refusal {
-    let refusal = Refusal::new(ReasonCode::MessageInvalid).with("error", library_error_code(error));
+    let refusal = invalid(MessageInvalidError::of_library(error));
     match error {
         MessageError::DuplicateToolCallId { id }
         | MessageError::DuplicateToolCallIdInTurn { id }
@@ -194,24 +162,29 @@ pub fn invalid_by_library(error: &MessageError) -> Refusal {
         | MessageError::DuplicateToolResultId { id }
         | MessageError::ToolNameMismatch { id, .. } => refusal.with("tool_call_id", id.as_str()),
         MessageError::DuplicateEntryId { id } => refusal.with("entry_id", id),
+        MessageError::Blank { field } | MessageError::InvalidJson { field, .. } => {
+            refusal.with("field", field)
+        }
         _ => refusal,
     }
 }
 
-/// A `MESSAGE_INVALID` refusal for one of Threads' own reasons.
-pub fn invalid(reason: &'static str) -> Refusal {
-    Refusal::new(ReasonCode::MessageInvalid).with("error", reason)
+/// A `MESSAGE_INVALID` refusal under `code`.
+pub fn invalid(code: MessageInvalidError) -> Refusal {
+    Refusal::new(ReasonCode::MessageInvalid).with("error", code.as_str())
 }
 
 /// The library block of a contract block, by the library's rules, as the
 /// library re-serializes it. Its kind must be the one its content says.
 pub fn assistant_block(block: &Block) -> Result<(AssistantBlock, serde_json::Value), Refusal> {
     let Some(raw) = block.body.library() else {
-        return Err(invalid(reason::BLOCK_KIND_NOT_ALLOWED).with("block_id", block.id));
+        return Err(invalid(MessageInvalidError::BlockKindNotAllowed).with("block_id", block.id));
     };
-    let parsed = raw
-        .to_assistant()
-        .map_err(|_| invalid(unreadable_code(raw.as_json())).with("block_id", block.id))?;
+    let parsed = raw.to_assistant().map_err(|_| {
+        ContentFault::unreadable(raw.as_json(), Shape::AssistantBlock)
+            .refusal()
+            .with("block_id", block.id)
+    })?;
     let expected = match &parsed {
         AssistantBlock::Text { .. } => Some(BlockKind::Text),
         AssistantBlock::Thinking(_) => Some(BlockKind::Thinking),
@@ -221,47 +194,51 @@ pub fn assistant_block(block: &Block) -> Result<(AssistantBlock, serde_json::Val
         // A block a later library adds has no Threads kind.
         _ => None,
     };
+    let content_invalid =
+        || invalid(MessageInvalidError::BlockContentInvalid).with("block_id", block.id);
     if expected != Some(block.kind()) {
-        return Err(invalid(reason::BLOCK_CONTENT_INVALID).with("block_id", block.id));
+        return Err(content_invalid());
     }
-    let json = serde_json::to_value(&parsed)
-        .map_err(|_| invalid(reason::BLOCK_CONTENT_INVALID).with("block_id", block.id))?;
+    let json = serde_json::to_value(&parsed).map_err(|_| content_invalid())?;
     Ok((parsed, json))
 }
 
 /// The library tool result of a `TOOL_RESULT` block.
 pub fn tool_result_block(block: &Block) -> Result<(ToolResult, serde_json::Value), Refusal> {
-    tool_result_of(block).map_err(|code| invalid(code).with("block_id", block.id))
+    tool_result_of(block).map_err(|fault| fault.refusal().with("block_id", block.id))
 }
 
-/// The library tool result of a `TOOL_RESULT` block, or the code of why it is
-/// not one.
-pub fn tool_result_of(block: &Block) -> Result<(ToolResult, serde_json::Value), &'static str> {
+/// The library tool result of a `TOOL_RESULT` block, or why it is not one.
+pub fn tool_result_of(block: &Block) -> Result<(ToolResult, serde_json::Value), ContentFault> {
     let Some(raw) = block
         .body
         .library()
         .filter(|_| block.kind() == BlockKind::ToolResult)
     else {
-        return Err(reason::BLOCK_KIND_NOT_ALLOWED);
+        return Err(ContentFault::Threads(
+            MessageInvalidError::BlockKindNotAllowed,
+        ));
     };
     let parsed = raw
         .to_tool_result()
-        .map_err(|_| unreadable_code(raw.as_json()))?;
-    let json = serde_json::to_value(&parsed).map_err(|_| reason::BLOCK_CONTENT_INVALID)?;
+        .map_err(|_| ContentFault::unreadable(raw.as_json(), Shape::ToolResult))?;
+    let json = serde_json::to_value(&parsed)
+        .map_err(|_| ContentFault::Threads(MessageInvalidError::BlockContentInvalid))?;
     Ok((parsed, json))
 }
 
 /// The stored form of a Threads block.
 pub fn threads_block(block: &Block, index: usize) -> Result<StoredBlock, Refusal> {
+    let refuse = |code: MessageInvalidError| invalid(code).with("block_id", block.id);
     let content = match &block.body {
         BlockBody::Artifact(content) => serde_json::to_value(content),
         BlockBody::ThreadReference(content) => serde_json::to_value(content),
         BlockBody::JobReference(content) => serde_json::to_value(content),
         BlockBody::Citation(content) => serde_json::to_value(content),
         BlockBody::Error(content) | BlockBody::Warning(content) => serde_json::to_value(content),
-        _ => return Err(invalid(reason::BLOCK_KIND_NOT_ALLOWED).with("block_id", block.id)),
+        _ => return Err(refuse(MessageInvalidError::BlockKindNotAllowed)),
     }
-    .map_err(|_| invalid(reason::BLOCK_CONTENT_INVALID).with("block_id", block.id))?;
+    .map_err(|_| refuse(MessageInvalidError::BlockContentInvalid))?;
     Ok(StoredBlock {
         id: block.id,
         index: index as i32,
@@ -318,26 +295,31 @@ pub fn user_blocks(message: Uuid, blocks: &[Block]) -> Result<Vec<StoredBlock>, 
             BlockKind::Text => {
                 let raw = block.body.library().expect("TEXT is a library kind");
                 let parsed = raw.to_user().map_err(|_| {
-                    invalid(unreadable_code(raw.as_json())).with("block_id", block.id)
+                    ContentFault::unreadable(raw.as_json(), Shape::UserBlock)
+                        .refusal()
+                        .with("block_id", block.id)
                 })?;
                 if !matches!(parsed, UserBlock::Text { .. }) {
-                    return Err(invalid(reason::BLOCK_CONTENT_INVALID).with("block_id", block.id));
+                    return Err(invalid(MessageInvalidError::BlockContentInvalid)
+                        .with("block_id", block.id));
                 }
                 stored.push(StoredBlock {
                     id: block.id,
                     index: index as i32,
                     kind: BlockKind::Text,
                     content: serde_json::to_value(&parsed).map_err(|_| {
-                        invalid(reason::BLOCK_CONTENT_INVALID).with("block_id", block.id)
+                        invalid(MessageInvalidError::BlockContentInvalid).with("block_id", block.id)
                     })?,
                 });
                 library.push(parsed);
             }
             BlockKind::Artifact => {
-                return Err(invalid(reason::ARTIFACT_IN_USER_MESSAGE).with("block_id", block.id));
+                return Err(
+                    invalid(MessageInvalidError::ArtifactInUserMessage).with("block_id", block.id)
+                );
             }
             kind if kind.is_library() => {
-                return Err(invalid(reason::BLOCK_KIND_NOT_ALLOWED)
+                return Err(invalid(MessageInvalidError::BlockKindNotAllowed)
                     .with("block_id", block.id)
                     .with("kind", kind.as_str()));
             }
@@ -505,7 +487,7 @@ pub fn ai_items(message_id: Uuid, items: &[Item]) -> Result<Vec<StoredItem>, Ref
     }
     let turn = turn_of(message_id, None, &stored).map_err(|e| invalid_by_library(&e))?;
     if matches!(turn.state(), TurnState::AwaitingToolResults { .. }) {
-        return Err(invalid(reason::TURN_AWAITING_TOOL_RESULTS));
+        return Err(invalid(MessageInvalidError::TurnAwaitingToolResults));
     }
     Ok(stored)
 }

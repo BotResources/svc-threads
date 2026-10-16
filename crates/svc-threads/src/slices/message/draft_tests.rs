@@ -3,7 +3,8 @@ use contract_threads::llm::{
     ToolResult, ToolResultBlock,
 };
 use contract_threads::{
-    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, LibraryEvent, MessageStatus,
+    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, LibraryEvent, MessageInvalidError,
+    MessageStatus,
 };
 
 use super::*;
@@ -527,7 +528,7 @@ fn a_completion_of_an_unfinished_stream_fails_it_instead() {
     assert_eq!(awaiting.status, MessageStatus::Failed);
     assert_eq!(
         awaiting.failure,
-        Some(content::reason::TURN_AWAITING_TOOL_RESULTS)
+        Some(MessageInvalidError::TurnAwaitingToolResults.as_str())
     );
     assert_eq!(awaiting.items.len(), 2, "its open call is answered");
 }
@@ -783,4 +784,94 @@ fn the_stricter_rules_of_the_library_refuse_a_chunk_with_its_codes() {
         no_result.draft.refusal().map(|r| r.code),
         Some("empty_tool_results")
     );
+}
+
+#[test]
+fn a_cancel_is_sealed_as_received_whatever_the_branch_uses() {
+    let mut writer = Writer::default();
+    writer
+        .tool_call(0, 0, "c-used", "{}")
+        .finish(0, StopReason::AwaitingToolResults)
+        .results(1, &["c-used"])
+        .text_block(2, 0, &["answered"])
+        .finish(2, StopReason::EndTurn);
+    let cancelled = close(&writer.draft, CloseKind::Cancel, &used(&["c-used"]));
+    assert_eq!(cancelled.status, MessageStatus::Cancelled);
+    assert_eq!(
+        cancelled.items.len(),
+        3,
+        "a cancelled message is no conversation's"
+    );
+    assert_eq!((cancelled.failure, cancelled.cut), (None, None));
+}
+
+#[test]
+fn a_failure_names_the_cut_its_close_made() {
+    let mut answered = Writer::default();
+    answered
+        .text_block(0, 0, &["first"])
+        .finish(0, StopReason::EndTurn);
+    let mut calling = Writer::default();
+    calling
+        .tool_call(0, 0, "c-used", "{}")
+        .finish(0, StopReason::AwaitingToolResults);
+    let failed = close(&calling.draft, CloseKind::Fail, &used(&["c-used"]));
+    assert_eq!(failed.status, MessageStatus::Failed);
+    assert_eq!(failed.failure, None, "the stream gave no reason of its own");
+    assert_eq!(failed.cut, Some("duplicate_tool_call_id_in_conversation"));
+    assert!(failed.items.is_empty());
+
+    let mut opened = Writer::default();
+    opened.event(
+        0,
+        StreamEvent::BlockStart {
+            index: 0,
+            kind: StreamKind::Text,
+        },
+    );
+    let failed = close_alone(&opened.draft, CloseKind::Fail);
+    assert_eq!(failed.cut, Some(UNFINISHABLE_STEP));
+
+    let whole = close_alone(&answered.draft, CloseKind::Fail);
+    assert_eq!(whole.cut, None, "nothing was cut");
+}
+
+#[test]
+fn a_completion_whose_content_is_dropped_whole_fails() {
+    let mut writer = Writer::default();
+    writer
+        .text_block(0, 0, &["done"])
+        .finish(0, StopReason::EndTurn);
+    let completed = close_alone(&writer.draft, CloseKind::Complete);
+    assert_eq!(completed.status, MessageStatus::Completed);
+    let dropped = completed.without_content();
+    assert_eq!(dropped.status, MessageStatus::Failed);
+    assert_eq!(dropped.failure, Some(chunk_error::BLOCK_ID_REUSED));
+    assert!(dropped.items.is_empty());
+
+    let failed = close_alone(&writer.draft, CloseKind::Fail).without_content();
+    assert_eq!(failed.status, MessageStatus::Failed);
+    assert_eq!(failed.cut, Some(chunk_error::BLOCK_ID_REUSED));
+    let cancelled = close_alone(&writer.draft, CloseKind::Cancel).without_content();
+    assert_eq!(cancelled.status, MessageStatus::Cancelled);
+}
+
+#[test]
+fn a_finished_step_must_line_up_with_what_streamed() {
+    let mut step = DraftStep::default();
+    step.library.push(LibraryBlock::Text { text: " ".into() });
+    step.library.push(LibraryBlock::Text {
+        text: "kept".into(),
+    });
+    let text = |text: &str| AssistantBlock::Text {
+        text: Text::new(text).unwrap(),
+    };
+    let finished = |blocks| Step::new(blocks, StopReason::EndTurn, None, None).unwrap();
+    assert!(step.aligned(&finished(vec![text("kept")])));
+    assert!(!step.aligned(&finished(vec![text("kept"), text("more")])));
+    let thinking = AssistantBlock::Thinking(contract_threads::llm::Thinking {
+        text: "x".into(),
+        signature: None,
+    });
+    assert!(!step.aligned(&finished(vec![thinking])));
 }

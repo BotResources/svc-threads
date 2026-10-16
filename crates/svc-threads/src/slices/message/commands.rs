@@ -10,8 +10,8 @@
 
 use contract_threads::llm::Author;
 use contract_threads::{
-    AiDelivery, CancelMessage, CompleteMessage, DeleteMessage, FailMessage, MessageStatus,
-    NewMessage as Incoming, ReasonCode, StoreMessage, StreamSeal,
+    AiDelivery, CancelMessage, CompleteMessage, DeleteMessage, FailMessage, MessageInvalidError,
+    MessageStatus, NewMessage as Incoming, ReasonCode, StoreMessage, StreamSeal,
 };
 use futures_util::future::BoxFuture;
 use service_engine::SealHash;
@@ -20,7 +20,7 @@ use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Reaction;
 use uuid::Uuid;
 
-use super::content::{self, named_artifacts, reason};
+use super::content::{self, named_artifacts};
 use super::draft::{CloseKind, MessageDraft};
 use super::state::{Message, MessageAuthor, MessageState};
 use super::stream::MessageContent;
@@ -124,8 +124,10 @@ async fn store_message(
                 ));
             }
             Some(of) if of != thread.id => {
-                return Ok(Err(content::invalid(reason::PARENT_NOT_IN_THREAD)
-                    .with("parent_message_id", parent)));
+                return Ok(Err(content::invalid(
+                    MessageInvalidError::ParentNotInThread,
+                )
+                .with("parent_message_id", parent)));
             }
             Some(_) => {}
         }
@@ -147,7 +149,7 @@ async fn store_message(
         }
         Incoming::Ai(ai) => {
             if Author::new(ai.author.id.clone(), ai.author.name.clone()).is_err() {
-                return Ok(Err(content::invalid(reason::AUTHOR_INVALID)));
+                return Ok(Err(content::invalid(MessageInvalidError::AuthorInvalid)));
             }
             let author = MessageAuthor::Ai {
                 id: ai.author.id.clone(),
@@ -365,14 +367,14 @@ async fn close_message(
     }
     // A completion can still be refused once its stream is judged: judged on
     // what the stream holds now, before the seal writes anything.
-    let prechecked = if kind == CloseKind::Complete {
+    let mut prior = closing::Prior::default();
+    if kind == CloseKind::Complete {
         let preview = cx.accumulated::<MessageContent>(&state.id).await?.state;
-        refuse_on!(closing::precheck_completion(cx, &state, &preview).await?)
-    } else {
-        Vec::new()
-    };
+        prior.artifacts =
+            refuse_on!(closing::precheck_completion(cx, &state, &preview, &mut prior.calls).await?);
+    }
     let sealed = refuse_on!(seal(cx, state.id, seal_declared).await?);
-    closing::store_closed(cx, state, &sealed, kind, prechecked, None, &call.meta)
+    closing::store_closed(cx, state, &sealed, kind, prior, None, &call.meta)
         .await
         .map(Ok)
 }

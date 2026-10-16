@@ -284,6 +284,7 @@ mod tests {
             status: MessageStatus::Cancelled,
             items: Vec::new(),
             failure: None,
+            cut: None,
         };
         assert_eq!(
             message.close(closed.clone(), None, &meta()).unwrap(),

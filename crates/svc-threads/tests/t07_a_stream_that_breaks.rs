@@ -14,7 +14,9 @@
 //! provider accepts, judged as the chunk folds (M7); a tool call id used once
 //! in the conversation, judged when the stream closes against the messages of
 //! its branch, before it (M8) and after it — a message stored under it while
-//! it streamed (M9). Each failure names the library's code in its `Failed`
+//! it streamed (M9) — on a completion or a failure (M10), never on a cancel,
+//! sealed as received (M11), and a cancelled message holds no call of a
+//! conversation (M12). Each failure names the library's code in its `Failed`
 //! fact's reason.
 //!
 //! The stream window is the specification's 10 minutes; this scenario — and
@@ -33,13 +35,15 @@ use common::content::{
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    ai, ai_message, await_message, command, completion, create_thread, message_confirmed,
-    message_refused, message_view, open_stream, say, store, streaming_message, thread_confirmed,
+    ai, ai_message, await_message, command, completion, context, conversation_of, create_thread,
+    message_confirmed, message_refused, message_view, open_stream, say, store, streaming_message,
+    thread_confirmed,
 };
 use common::{QUIET_WINDOW, SHORT_STREAM_IDLE, TestContext, Windows, stream};
 use contract_threads::llm::StopReason;
 use contract_threads::{
-    CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode, StreamSeal, seal_hash,
+    CancelMessage, CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode, StreamSeal,
+    seal_hash,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -251,7 +255,8 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     .await;
     let (last_seq, hash) = stream::push(&nats, m9, 0, &streamed_call("c-later")).await;
     let completed = command(&ctx, &completion(t, m9, last_seq, &hash)).await;
-    // Then M9 is FAILED the same way, and the answer stored under it stays.
+    // Then M9 is FAILED the same way, nothing of its stream kept, and the
+    // answer stored under it stays.
     message_confirmed(&ctx, completed, MessageStatus::Failed, "completing M9").await;
     let m9_facts = facts::of(&ctx.pool, "message", m9).await;
     assert_eq!(
@@ -259,8 +264,100 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
         "duplicate_tool_call_id_in_conversation"
     );
     assert_eq!(
+        message_view(&ctx, &a.passport, t, m9).await["items"],
+        json!([])
+    );
+    assert_eq!(
         message_view(&ctx, &a.passport, t, later).await["status"],
         "COMPLETED"
+    );
+    // And the conversation of the branch m1 → M9 → later loads: M9, failed
+    // before a step, is left out; c-later is called once.
+    let runner = ctx.service_account(true);
+    let entry_ids = |context: serde_json::Value| -> Vec<String> {
+        conversation_of(&context)
+            .entries()
+            .iter()
+            .map(|entry| entry.id().to_string())
+            .collect()
+    };
+    assert_eq!(
+        entry_ids(context(&ctx, &runner.passport, t, None).await),
+        vec![m1.to_string(), later.to_string()]
+    );
+
+    // When M10, answering the answer that called c-used, streams a step
+    // calling c-used again and is failed by its writer.
+    let m10 = open_stream(&ctx, t, Some(used), ai("a2", "Critic")).await;
+    let (last_seq, hash) = stream::push(&nats, m10, 0, &streamed_call("c-used")).await;
+    let failed = command(
+        &ctx,
+        &FailMessage {
+            message_id: m10,
+            thread_id: t,
+            seal: Some(StreamSeal { last_seq, hash }),
+            acting_user_id: None,
+        },
+    )
+    .await;
+    // Then M10 is FAILED without the step reusing the id, its Failed fact
+    // naming that cut: the stream itself gave no reason.
+    message_confirmed(&ctx, failed, MessageStatus::Failed, "failing M10").await;
+    assert_eq!(
+        message_view(&ctx, &a.passport, t, m10).await["items"],
+        json!([])
+    );
+    let m10_facts = facts::of(&ctx.pool, "message", m10).await;
+    assert_eq!(
+        facts::the(&m10_facts, "Failed").payload["reason"],
+        "duplicate_tool_call_id_in_conversation"
+    );
+
+    // When M11, answering the answer that called c-used, streams the same
+    // step calling c-used and is cancelled.
+    let m11 = open_stream(&ctx, t, Some(used), ai("a2", "Critic")).await;
+    let (last_seq, hash) = stream::push(&nats, m11, 0, &streamed_call("c-used")).await;
+    let cancelled = command(
+        &ctx,
+        &CancelMessage {
+            message_id: m11,
+            thread_id: t,
+            seal: Some(StreamSeal { last_seq, hash }),
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    // Then M11 is CANCELLED and sealed as received: no conversation holds it.
+    message_confirmed(&ctx, cancelled, MessageStatus::Cancelled, "cancelling M11").await;
+    let view = message_view(&ctx, &a.passport, t, m11).await;
+    assert_eq!(view["items"].as_array().map(Vec::len), Some(3), "{view}");
+
+    // When a whole AI turn answering M11 calls c-x, M11 itself having called
+    // c-x before it was cancelled.
+    let m12 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let (last_seq, hash) = stream::push(&nats, m12, 0, &streamed_call("c-x")).await;
+    let cancelled = command(
+        &ctx,
+        &CancelMessage {
+            message_id: m12,
+            thread_id: t,
+            seal: Some(StreamSeal { last_seq, hash }),
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    message_confirmed(&ctx, cancelled, MessageStatus::Cancelled, "cancelling M12").await;
+    let after_cancel = store(
+        &ctx,
+        ai_message(t, Some(m12), ai("a2", "Critic"), whole_call("c-x")),
+        MessageStatus::Completed,
+    )
+    .await;
+    // Then it is stored — the cancelled M12 is no conversation's — and the
+    // branch m1 → M12 → it loads for a runner, without M12.
+    assert_eq!(
+        entry_ids(context(&ctx, &runner.passport, t, None).await),
+        vec![m1.to_string(), after_cancel.to_string()]
     );
 
     // When T is closed and M6 is opened on it, its chunks pushed all the same.

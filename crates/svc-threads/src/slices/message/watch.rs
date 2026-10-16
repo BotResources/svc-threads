@@ -222,7 +222,7 @@ pub fn due<'r>(
                     state,
                     &sealed,
                     CloseKind::Fail,
-                    Vec::new(),
+                    closing::Prior::default(),
                     Some(STREAM_IDLE),
                     &meta,
                 )

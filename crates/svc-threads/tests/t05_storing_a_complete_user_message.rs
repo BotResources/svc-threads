@@ -9,17 +9,17 @@
 //! > library refuses (an empty text, a TOOL_RESULT in a user input) is refused
 //! > MESSAGE_INVALID and nothing is stored. A user author who is not a member
 //! > is refused. A parent from another thread is refused MESSAGE_INVALID.
+//! > Reusing M1's id is refused KEY_REUSED. The thread is closed COMPLETED:
+//! > storing on it is refused THREAD_NOT_OPEN, as is any later close. Renaming
+//! > A in Identity shows the new name on M1 everywhere, while no fact carries a
+//! > name. An impersonated author's store carries the impersonator: it is in
+//! > the Created fact, never on the message.
 //!
 //! The library's rules include those of `br-llm-messages` 0.5 an AI turn given
 //! whole meets: a tool name every provider accepts, and a tool call id used
 //! once in the conversation — on the branch of the message, before or after
 //! it, a fork being another conversation. Each refusal names the library's
 //! code in its `error` param.
-//! > Reusing M1's id is refused KEY_REUSED. The thread is closed COMPLETED:
-//! > storing on it is refused THREAD_NOT_OPEN, as is any later close. Renaming
-//! > A in Identity shows the new name on M1 everywhere, while no fact carries a
-//! > name. An impersonated author's store carries the impersonator: it is in
-//! > the Created fact, never on the message.
 //!
 //! Channels: the answers (4), M1 as each member reads it with its affordance
 //! (2), B's live feed of T (3), the fact log, a runner's context (the name
@@ -145,22 +145,26 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
 
     // When the agents service stores messages the library refuses: an empty
     // text, a TOOL_RESULT in a user input.
-    for (blocks, what) in [
+    for (blocks, what, error) in [
         (
             vec![raw_text(json!({ "type": "text", "text": "" }))],
             "an empty text",
+            "blank",
         ),
         (
             vec![tool_result("c1", "search", "found")],
             "a TOOL_RESULT in a user input",
+            "block_kind_not_allowed",
         ),
     ] {
         let refused = user_message(t, Some(m1), a.id, blocks);
         let refused_id = refused.message_id;
         let refused_command = command(&ctx, &refused).await;
 
-        // Then each is refused MESSAGE_INVALID and nothing is stored.
-        message_refused(&ctx, refused_command, ReasonCode::MessageInvalid, what).await;
+        // Then each is refused MESSAGE_INVALID, naming why, and nothing is
+        // stored.
+        let answer = message_refused(&ctx, refused_command, ReasonCode::MessageInvalid, what).await;
+        assert_eq!(answer.params["error"], error, "{what}: {answer:?}");
         assert!(
             facts::of(&ctx.pool, "message", refused_id).await.is_empty(),
             "{what}"

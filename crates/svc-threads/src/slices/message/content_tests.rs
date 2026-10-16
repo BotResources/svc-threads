@@ -1,7 +1,9 @@
 use contract_threads::llm::{
     AssistantBlock, StopReason, Text, Thinking, ToolCall, ToolCallId, ToolName, UserBlock,
 };
-use contract_threads::{ArtifactRef, Citation, LibraryBlock, StepItem, ToolResultsItem};
+use contract_threads::{
+    ArtifactRef, Citation, LibraryBlock, MessageInvalidError, StepItem, ToolResultsItem,
+};
 use serde_json::json;
 
 use super::*;
@@ -92,16 +94,25 @@ fn a_user_input_the_library_refuses_is_message_invalid() {
         BlockBody::Text(LibraryBlock::from_json(json!({ "text": 42 }))),
     );
     let refused = user_blocks(Uuid::now_v7(), &[shapeless]).unwrap_err();
-    assert_eq!(error_of(&refused), reason::BLOCK_CONTENT_INVALID);
+    assert_eq!(
+        error_of(&refused),
+        MessageInvalidError::BlockContentInvalid.as_str()
+    );
 
     let refused = user_blocks(Uuid::now_v7(), &[result("c1")]).unwrap_err();
-    assert_eq!(error_of(&refused), reason::BLOCK_KIND_NOT_ALLOWED);
+    assert_eq!(
+        error_of(&refused),
+        MessageInvalidError::BlockKindNotAllowed.as_str()
+    );
 
     let artifact = block(BlockBody::Artifact(ArtifactRef {
         artifact_id: Uuid::now_v7(),
     }));
     let refused = user_blocks(Uuid::now_v7(), &[user_text("see"), artifact]).unwrap_err();
-    assert_eq!(error_of(&refused), reason::ARTIFACT_IN_USER_MESSAGE);
+    assert_eq!(
+        error_of(&refused),
+        MessageInvalidError::ArtifactInUserMessage.as_str()
+    );
 
     let only_threads = block(BlockBody::Citation(Citation {
         text: "q".into(),
@@ -127,7 +138,10 @@ fn a_kind_must_match_the_librarys_content() {
         )),
     );
     let refused = ai_items(Uuid::now_v7(), &[step(StopReason::EndTurn, vec![lying])]).unwrap_err();
-    assert_eq!(error_of(&refused), reason::BLOCK_CONTENT_INVALID);
+    assert_eq!(
+        error_of(&refused),
+        MessageInvalidError::BlockContentInvalid.as_str()
+    );
 }
 
 #[test]
@@ -191,7 +205,7 @@ fn an_ai_turn_the_library_refuses_is_message_invalid() {
             StopReason::AwaitingToolResults,
             vec![call("c1")]
         )]),
-        reason::TURN_AWAITING_TOOL_RESULTS
+        MessageInvalidError::TurnAwaitingToolResults.as_str()
     );
     assert_eq!(
         at(vec![step(StopReason::EndTurn, Vec::new())]),
@@ -431,7 +445,14 @@ fn a_tool_call_id_is_used_once_on_every_branch_through_a_message() {
 
 #[test]
 fn a_value_the_library_refuses_is_named_by_its_own_constructor() {
-    let refusal = |json: serde_json::Value| value_refusal(&json).map(|e| library_error_code(&e));
+    let refusal = |json: serde_json::Value| {
+        let shape = match json.get("type").and_then(serde_json::Value::as_str) {
+            Some("tool_call_start") => Shape::StreamEvent,
+            Some(_) => Shape::AssistantBlock,
+            None => Shape::ToolResult,
+        };
+        value_refusal(&json, shape).map(|e| library_error_code(&e))
+    };
     assert_eq!(
         refusal(json!({ "type": "tool_call_start", "index": 0, "id": "c1", "name": "a b" })),
         Some("invalid_tool_name")
@@ -453,4 +474,37 @@ fn a_value_the_library_refuses_is_named_by_its_own_constructor() {
     );
     assert_eq!(refusal(json!({ "type": "text", "text": "fine" })), None);
     assert_eq!(refusal(json!({ "type": "audio" })), None);
+
+    // The shape decides which values are read: a tool call's fields mean
+    // nothing in a user input, a block's nothing in a stream event.
+    let dotted = json!({ "type": "tool_call", "id": "c1", "name": "a b", "arguments": {} });
+    assert_eq!(
+        value_refusal(&dotted, Shape::AssistantBlock).map(|e| library_error_code(&e)),
+        Some("invalid_tool_name")
+    );
+    assert_eq!(value_refusal(&dotted, Shape::UserBlock), None);
+    assert_eq!(value_refusal(&dotted, Shape::StreamEvent), None);
+}
+
+#[test]
+fn a_refusal_carries_the_detail_the_library_names() {
+    let blank = Block::new(
+        Uuid::now_v7(),
+        BlockBody::Text(LibraryBlock::from_json(
+            json!({ "type": "text", "text": " " }),
+        )),
+    );
+    let refused = user_blocks(Uuid::now_v7(), std::slice::from_ref(&blank)).unwrap_err();
+    assert_eq!(error_of(&refused), "blank");
+    assert_eq!(refused.params["field"], "text");
+    assert_eq!(refused.params["block_id"], json!(blank.id));
+
+    let refused = invalid_by_library(&MessageError::InvalidJson {
+        field: "tool_arguments",
+        message: "eof".into(),
+    });
+    assert_eq!(refused.params["error"], "invalid_json");
+    assert_eq!(refused.params["field"], "tool_arguments");
+    let refused = invalid_by_library(&MessageError::DuplicateEntryId { id: "m1".into() });
+    assert_eq!(refused.params["entry_id"], "m1");
 }

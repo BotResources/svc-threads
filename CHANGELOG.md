@@ -11,6 +11,19 @@ heading exists.
 
 ## 0.3.0
 
+### Breaking (consumers)
+
+- **A runner reading `threadsContext` — the title runner included — loads a
+  `br-llm-messages/3` conversation**: it needs `br-llm-messages` 0.5 or later
+  (through `contract-threads` 0.3.0); 0.3 and 0.4 refuse the schema. Every
+  entry now bears an id, its message's.
+- **A writer's content meets the library's stricter rules**: a tool name
+  matches `^[A-Za-z_][A-Za-z0-9_-]{0,63}$`; a tool call id is unique in its
+  turn and on every branch of the thread through the message (a fork may
+  reuse it); a tool result names its call's tool; a tool results item holds a
+  result. Content that broke them in 0.2 is refused `MESSAGE_INVALID` (a whole
+  message) or fails its stream.
+
 ### Changed
 
 - **The conversation model is `br-llm-messages` v0.5.0, schema
@@ -34,32 +47,63 @@ heading exists.
   through a message. A whole AI turn reusing a tool call id of a message before
   it on its branch is refused `MESSAGE_INVALID`
   (`duplicate_tool_call_id_in_conversation`, with `tool_call_id`); a fork is
-  another branch and may reuse it. A stream is judged when it closes, against
-  the messages before it and after it — one stored under it while it streamed
-  included: it fails from the step that reuses an id, its `Failed` fact naming
-  the code. Every message command locks the thread first, so of two messages
-  on one branch the second written sees the first.
+  another branch and may reuse it, and a cancelled message is no
+  conversation's. A stream is judged when it closes, against the messages
+  before it and after it — one stored under it while it streamed included:
+  completed or failed, it keeps its items up to the step that reuses an id; a
+  cancel is sealed as received. Every message command locks the thread first,
+  so of two messages on one branch the second written sees the first.
+- **A failure names the cut its close made.** A message failed by its writer
+  or by the stream watch whose content was cut short of what its stream held —
+  a step reusing a tool call id of its branch, a step the library cannot
+  finish (`unfinishable_step`), content dropped whole (`block_id_reused`) — has
+  its `Failed` fact name that cut when the stream gave no reason of its own; a
+  silent writer's stays `stream_idle`.
 - **A value the library refuses names the library's code.** A library block,
   tool result or stream event whose JSON the library cannot load is refused
   with the code of the value it refuses (`invalid_tool_name`, `blank`, …),
-  found with the library's own constructors; `block_content_invalid`
-  (`chunk_unreadable` for a stream event) remains for JSON that is not the
-  library's shape. A blank user text is now refused `blank` (0.2:
-  `block_content_invalid`).
+  found with the library's own constructors for the shape expected there;
+  `block_content_invalid` (`chunk_unreadable` for a stream event) remains for
+  JSON that is not the library's shape. A blank user text is now refused
+  `blank` (0.2: `block_content_invalid`). The refusal's `params` carry the
+  detail the library names: `field` (`blank`, `invalid_json`), `tool_call_id`,
+  `entry_id`.
+- **The `error` codes of `MESSAGE_INVALID` are published**:
+  `contract_threads::MessageInvalidError`, every one of the library's 38
+  refusals and Threads' own. A library refusal of a later version is
+  `library_refusal` until it is named.
 - **A streamed step is stored as the library finished it.** The library drops
   a step's blank text blocks when it finishes it; Threads no longer stores
   them, so the stored blocks are the step's. A step still streaming shows them.
-- A library refusal of a later library version maps to `library_refusal` until
-  Threads names it; a stream event of a later version is refused
-  `event_not_supported`.
+  A finished step whose blocks would not line up with what streamed fails the
+  stream (`step_misaligned`) instead of being stored.
+- A stream event this library does not know does not load: its chunk is
+  refused `chunk_unreadable`. `event_not_supported` is kept for an event a
+  later library loads that Threads does not fold yet.
 - GraphQL: `ThreadContext.conversation`'s description names
   `br-llm-messages/3`; no type or field changes.
 
+### Fixed
+
+- A completion whose content was dropped whole between its precheck and its
+  seal (a block id another message holds) was stored `COMPLETED` without
+  items, and the thread's context then failed to load: it is now `FAILED`
+  (`block_id_reused`).
+
+### Performance
+
+- Migration `9800000003_message_block_by_message`: an index on
+  `message_block (message_id)`. A message's blocks were read, removed and
+  cascaded by scanning every block; the close of a stream calling tools reads
+  its branch's calls through it, once per close, and not at all when the
+  stream calls no tool.
+
 ### Migration
 
-- None. No Threads deployment holds data written by 0.1 or 0.2, so no stored
-  conversation predates the stricter rules or the `br-llm-messages/3` schema;
-  a stored message that broke them would no longer load in a runner's
+- `9800000003_message_block_by_message` (schema: one index). No data
+  migration: no Threads deployment holds data written by 0.1 or 0.2, so no
+  stored conversation predates the stricter rules or the `br-llm-messages/3`
+  schema; a stored message that broke them would no longer load in a runner's
   conversation.
 
 ## 0.2.0

@@ -12,6 +12,8 @@
 //! - [`content`]: the blocks and items of a message, in the conversation model
 //!   of `br-llm-messages` (schema [`llm::SCHEMA_VERSION`]) plus Threads' own
 //!   blocks;
+//! - [`invalid`]: the vocabulary of a `MESSAGE_INVALID` refusal's `error`
+//!   param;
 //! - [`chunk`]: the content of a `STREAMING` message as its writer pushes it on
 //!   the engine's accumulated lane (`stream.threads.{message_id}`), and the seal
 //!   digest that completes it;
@@ -29,6 +31,7 @@ pub mod chunk;
 pub mod content;
 pub mod coords;
 pub mod event;
+pub mod invalid;
 pub mod members;
 pub mod message;
 pub mod reason;
@@ -47,14 +50,15 @@ pub use chunk::{
     chunk_subject, seal_hash,
 };
 pub use content::{
-    ArtifactRef, Block, BlockBody, Citation, Item, JobRef, LibraryBlock, Notice, StepItem,
-    ThreadRef, ToolResultsItem,
+    ArtifactRef, Block, BlockBody, Citation, Item, JobRef, LibraryBlock, LibraryValueError, Notice,
+    StepItem, ThreadRef, ToolResultsItem,
 };
 pub use coords::{SERVICE, ThreadsCommand};
 pub use event::{
     MessageCommandConfirmed, MessageCommandRefused, ThreadCommandConfirmed, ThreadCommandRefused,
     ThreadsEvent,
 };
+pub use invalid::MessageInvalidError;
 pub use members::{MEMBERS_MANIFEST_KEY, MEMBERS_PREFIX, MEMBERS_VERSION, PublishedThreadMembers};
 pub use message::{
     AiAuthor, AiDelivery, AiMessage, CancelMessage, CompleteMessage, DeleteMessage, FailMessage,

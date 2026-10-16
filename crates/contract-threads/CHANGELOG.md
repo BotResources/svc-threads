@@ -14,8 +14,17 @@ exists.
 ### Added
 
 - `LibraryEvent`: one stream event of the library carried as the library's
-  JSON, as `LibraryBlock` carries a block — `of(&StreamEvent)` writes it,
-  `from_json` takes it raw, `to_event()` reads it by the library's rules.
+  JSON, as `LibraryBlock` carries a block — `of(&StreamEvent)` writes it (the
+  same JSON value `br-llm-messages` 0.3 serialized, pinned per event),
+  `from_json` takes it raw, `to_event()` reads it by the library's rules
+  without copying, `into_event()` consuming it.
+- `MessageInvalidError` (`invalid`): the vocabulary of a `MESSAGE_INVALID`
+  refusal's `error` param, `#[non_exhaustive]`, with its wire literals
+  (`as_str`, `parse`, serde) — the code of each of the library's 38 refusals
+  (`of_library`, `library_refusal` for one of a later version) and of
+  Threads' own rules.
+- `LibraryValueError`: why the contract cannot write a library value
+  (`UnsupportedAssistantBlock`, `UnsupportedStreamEvent`, `Encode`).
 
 ### Changed
 
@@ -33,8 +42,11 @@ exists.
   the same digest. A chunk whose event the library refuses (an invalid tool
   name, say) now decodes, for Threads to fail its message with the library's
   reason.
-- `BlockBody::assistant` refuses an `AssistantBlock` a later library adds
-  (`unsupported_assistant_block`) until the contract names its kind.
+- **Breaking:** `BlockBody::assistant` returns a `LibraryValueError`, and
+  refuses an `AssistantBlock` a later library adds
+  (`UnsupportedAssistantBlock`) until the contract names its kind.
+- `LibraryBlock::to_user`, `to_assistant` and `to_tool_result` read the JSON
+  without copying it.
 - The documentation of the content and the chunk format names
   `br-llm-messages/3`.
 
