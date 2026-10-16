@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.3.0
+
+### Added
+
+- `LibraryEvent`: one stream event of the library carried as the library's
+  JSON, as `LibraryBlock` carries a block — `of(&StreamEvent)` writes it (the
+  same JSON value `br-llm-messages` 0.3 serialized, pinned per event),
+  `from_json` takes it raw, `to_event()` reads it by the library's rules
+  without copying, `into_event()` consuming it.
+- `MessageInvalidError` (`invalid`): the vocabulary of a `MESSAGE_INVALID`
+  refusal's `error` param, `#[non_exhaustive]`, with its wire literals
+  (`as_str`, `parse`, serde) — the code of each of the library's 38 refusals
+  (`of_library`, `library_refusal` for one of a later version) and of
+  Threads' own rules.
+- `LibraryValueError`: why the contract cannot write a library value
+  (`UnsupportedAssistantBlock`, `UnsupportedStreamEvent`, `Encode`).
+
+### Changed
+
+- **Breaking:** `contract_threads::llm` re-exports `br-llm-messages` v0.5.0
+  (was v0.3.0); the stored schema is `br-llm-messages/3`. Its breaking changes
+  reach every consumer naming the library through the contract: types are
+  reached from the crate root only; `MessageError`, `StreamEvent`, `BlockKind`
+  and `AssistantBlock` are `#[non_exhaustive]`; `UserInput::new` takes an
+  `InputId` first; tool names, tool call ids and tool results follow stricter
+  rules; `StreamEvent` is no longer `Serialize`. See the library's changelog
+  for 0.4.0 and 0.5.0.
+- **Breaking:** `ChunkPart::StepEvent::event` is a `LibraryEvent` instead of a
+  `StreamEvent`, the library no longer serializing stream events. The wire is
+  unchanged: the event is the same JSON under `event`, and `seal_hash` gives
+  the same digest. A chunk whose event the library refuses (an invalid tool
+  name, say) now decodes, for Threads to fail its message with the library's
+  reason.
+- **Breaking:** `BlockBody::assistant` returns a `LibraryValueError`, and
+  refuses an `AssistantBlock` a later library adds
+  (`UnsupportedAssistantBlock`) until the contract names its kind.
+- `LibraryBlock::to_user`, `to_assistant` and `to_tool_result` read the JSON
+  without copying it.
+- The documentation of the content and the chunk format names
+  `br-llm-messages/3`.
+
 ## 0.2.0
 
 ### Added

@@ -2,7 +2,7 @@
 //! holding `threads:runner`, for any thread.
 //!
 //! - `context`: a thread's context — its active branch as a conversation of the
-//!   `br-llm-messages/2` model, whole or lightened for the AI the runner answers
+//!   `br-llm-messages/3` model, whole or lightened for the AI the runner answers
 //!   for, every message carrying its author; plus its members and resources;
 //! - `graphql`: the roots, the title Job's operations included (their decision
 //!   and their effects are the title Job's, in the thread capability).

@@ -13,31 +13,40 @@
 //! delta only appends to the open block — then applies the event. The mirror is
 //! what the view shows of a step still streaming.
 //!
-//! LIBRARY GAP (br-llm-messages v0.3.0): `StepDraft` is not `Clone` (an
+//! LIBRARY GAP (br-llm-messages v0.5.0): `StepDraft` is not `Clone` (an
 //! accumulator state must be), exposes no partial blocks, and cannot close an
 //! unfinished draft. The rebuild above covers the first two; [`close`] closes an
 //! unfinished step itself, with the library's own events (the open block ended,
 //! a `finish` whose stop reason is `awaiting_tool_results` when the step holds
 //! tool calls, `other("interrupted")` otherwise), and keeps it only when the
-//! library then finishes it.
+//! library then finishes it. A finished step holds no blank text block — the
+//! library drops them — so neither does the stored one.
 //!
 //! The first chunk the library or the chunk format refuses is recorded and
 //! nothing after it folds: the message fails there ([`MessageDraft::refusal`]).
+//! The rule that spans a conversation — a tool call id used once in it — needs
+//! the other messages of the branch, which a fold does not read: it is judged
+//! when the stream closes ([`close`]).
 
 use contract_threads::llm::{
     BlockKind as LibraryKind, MessageError, ModelId, Step, StepDraft, StopReason, StreamEvent,
     Text, ToolCallId, ToolName, ToolResult, ToolResultBlock, ToolResults, Turn, TurnId, TurnState,
     Usage,
 };
-use contract_threads::{Block, BlockKind, Chunk, ChunkPart, MessageStatus};
+use contract_threads::{Block, BlockKind, Chunk, ChunkPart, MessageInvalidError, MessageStatus};
 use uuid::Uuid;
 
-use super::content::{self, library_error_code, threads_block, tool_result_block};
+use super::content::{
+    self, ContentFault, Shape, UsedCallIds, library_error_code, threads_block, tool_result_of,
+};
 use super::state::{ItemKind, StoredBlock, StoredItem};
 
 /// The text of the error result that answers a tool call its message's close
 /// left without a result.
 pub const INTERRUPTED: &str = "interrupted";
+
+/// Why a close cut a step still streaming: the library cannot finish it.
+pub const UNFINISHABLE_STEP: &str = "unfinishable_step";
 
 /// The first chunk of a stream Threads refused: where, and why — a library
 /// error code ([`library_error_code`]) or one of the chunk format's.
@@ -60,6 +69,13 @@ pub mod chunk_error {
     pub const MODEL_NOT_FIRST: &str = "model_not_first";
     pub const NOT_A_THREADS_BLOCK: &str = "not_a_threads_block";
     pub const NOT_A_TOOL_RESULTS_BLOCK: &str = "not_a_tool_results_block";
+    /// A stream event of a later library that the library loads, but Threads
+    /// does not fold yet. (An event this library does not know does not load:
+    /// it is `chunk_unreadable`.)
+    pub const EVENT_NOT_SUPPORTED: &str = "event_not_supported";
+    /// A finished step whose blocks do not line up with what the stream gave:
+    /// the library dropped a block other than a blank text.
+    pub const STEP_MISALIGNED: &str = "step_misaligned";
 }
 
 /// One library block of a step as streamed so far: what the library accepted.
@@ -234,8 +250,9 @@ impl DraftStep {
         Ok(draft)
     }
 
-    /// Mirrors an event the library accepted.
-    fn record(&mut self, event: StreamEvent, block_id: Option<Uuid>) {
+    /// Mirrors an event the library accepted; an event of a later library is
+    /// refused before anything is mirrored.
+    fn record(&mut self, event: StreamEvent, block_id: Option<Uuid>) -> Result<(), &'static str> {
         let push_open = |step: &mut Self, block: LibraryBlock| {
             let index = step.library.len();
             step.library.push(block);
@@ -261,7 +278,8 @@ impl DraftStep {
                         json: String::new(),
                     },
                     // The library refuses it: never recorded.
-                    LibraryKind::ToolCall => return,
+                    LibraryKind::ToolCall => return Ok(()),
+                    _ => return Err(chunk_error::EVENT_NOT_SUPPORTED),
                 };
                 push_open(self, block);
             }
@@ -307,7 +325,9 @@ impl DraftStep {
             }
             StreamEvent::BlockEnd { .. } => self.open = None,
             StreamEvent::Finish { stop_reason, usage } => self.finish = Some((stop_reason, usage)),
+            _ => return Err(chunk_error::EVENT_NOT_SUPPORTED),
         }
+        Ok(())
     }
 
     fn open_block(&mut self) -> Option<&mut LibraryBlock> {
@@ -340,29 +360,85 @@ impl DraftStep {
         closing.rebuild().ok()?.finish(self.model_id().ok()?).ok()
     }
 
+    /// Whether `step`, the library's finish of this one, holds exactly the
+    /// blocks streamed, but the blank texts it drops, in order and kind. The
+    /// stored blocks are built on it ([`Self::blocks`]).
+    fn aligned(&self, step: &Step) -> bool {
+        let kept: Vec<&LibraryBlock> = (0..self.library.len())
+            .filter(|index| !self.dropped_when_finished(*index))
+            .map(|index| &self.library[index])
+            .collect();
+        kept.len() == step.content().len()
+            && kept
+                .iter()
+                .zip(step.content())
+                .all(|(streamed, finished)| Some(streamed.kind()) == assistant_kind(finished))
+    }
+
+    /// Whether the library drops library block `index` from the finished
+    /// step: a blank text, the one a `Text` refuses.
+    fn dropped_when_finished(&self, index: usize) -> bool {
+        match &self.library[index] {
+            LibraryBlock::Text { text } => Text::new(text.as_str()).is_err(),
+            _ => false,
+        }
+    }
+
     /// The step's blocks in push order: the library's JSON of a finished
-    /// step's blocks, the partial preview of a streaming one's.
+    /// step's blocks — without the blank texts the library dropped — the
+    /// partial preview of a streaming one's.
     fn blocks(&self, step: Option<&Step>) -> Vec<StoredBlock> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(position, entry)| match entry {
-                StepEntry::Library { index, id } => StoredBlock {
-                    id: *id,
-                    index: position as i32,
-                    kind: self.library[*index].kind(),
-                    content: match step.and_then(|step| step.content().get(*index)) {
-                        Some(block) => serde_json::to_value(block)
-                            .unwrap_or_else(|_| self.library[*index].preview()),
-                        None => self.library[*index].preview(),
-                    },
-                },
-                StepEntry::Threads(block) => StoredBlock {
-                    index: position as i32,
+        let mut blocks = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            let position = blocks.len() as i32;
+            match entry {
+                StepEntry::Library { index, id } => {
+                    let content = match step {
+                        Some(_) if self.dropped_when_finished(*index) => continue,
+                        Some(step) => {
+                            // The finished step holds the kept blocks in order:
+                            // every finished step is `aligned`, checked when it
+                            // finishes (`fold_chunk`, `salvage`).
+                            let kept = (0..*index)
+                                .filter(|before| !self.dropped_when_finished(*before))
+                                .count();
+                            debug_assert!(
+                                kept < step.content().len(),
+                                "a finished step is aligned"
+                            );
+                            step.content()
+                                .get(kept)
+                                .and_then(|block| serde_json::to_value(block).ok())
+                        }
+                        None => None,
+                    };
+                    blocks.push(StoredBlock {
+                        id: *id,
+                        index: position,
+                        kind: self.library[*index].kind(),
+                        content: content.unwrap_or_else(|| self.library[*index].preview()),
+                    });
+                }
+                StepEntry::Threads(block) => blocks.push(StoredBlock {
+                    index: position,
                     ..block.clone()
-                },
-            })
-            .collect()
+                }),
+            }
+        }
+        blocks
+    }
+}
+
+/// The Threads kind of a library block; `None` for one a later library adds.
+fn assistant_kind(block: &contract_threads::llm::AssistantBlock) -> Option<BlockKind> {
+    use contract_threads::llm::AssistantBlock;
+    match block {
+        AssistantBlock::Text { .. } => Some(BlockKind::Text),
+        AssistantBlock::Thinking(_) => Some(BlockKind::Thinking),
+        AssistantBlock::RedactedThinking(_) => Some(BlockKind::RedactedThinking),
+        AssistantBlock::Structured { .. } => Some(BlockKind::Structured),
+        AssistantBlock::ToolCall(_) => Some(BlockKind::ToolCall),
+        _ => None,
     }
 }
 
@@ -399,6 +475,18 @@ impl MessageDraft {
     /// The first refused chunk, if any: the message has failed there.
     pub fn refusal(&self) -> Option<&StreamRefusal> {
         self.refusal.as_ref()
+    }
+
+    /// Whether a step of the stream calls a tool: only then can its close meet
+    /// the tool call ids of its branch.
+    pub fn calls_tools(&self) -> bool {
+        self.items.iter().any(|item| match item {
+            DraftItem::Step(step) => step
+                .library
+                .iter()
+                .any(|block| matches!(block, LibraryBlock::ToolCall { .. })),
+            DraftItem::ToolResults(_) => false,
+        })
     }
 
     /// The items as the stream holds them now: complete items `COMPLETED`, the
@@ -453,6 +541,9 @@ impl MessageDraft {
                 }
                 DraftItem::ToolResults(results) => match &mut turn {
                     None => return Err(MessageError::TurnMustStartWithStep),
+                    Some(_) if results.results.is_empty() => {
+                        return Err(MessageError::EmptyToolResults);
+                    }
                     Some(turn) => turn.push_results(results.results.iter().cloned())?,
                 },
             }
@@ -526,6 +617,11 @@ fn fold_chunk(draft: &mut MessageDraft, chunk: Chunk) -> Result<(), &'static str
             block_id,
             model,
         } => {
+            let event = event.to_event().map_err(|_| {
+                content::value_refusal(event.as_json(), Shape::StreamEvent)
+                    .map(|error| library_error_code(&error))
+                    .unwrap_or(chunk_error::UNREADABLE)
+            })?;
             if opens_item {
                 draft.items.push(DraftItem::Step(Box::new(DraftStep {
                     model,
@@ -557,10 +653,13 @@ fn fold_chunk(draft: &mut MessageDraft, chunk: Chunk) -> Result<(), &'static str
                 .apply(event.clone())
                 .map_err(|e| library_error_code(&e))?;
             let finishing = matches!(event, StreamEvent::Finish { .. });
-            step.record(event, block_id);
+            step.record(event, block_id)?;
             if finishing {
                 let model = step.model_id().map_err(|e| library_error_code(&e))?;
                 let finished = library.finish(model).map_err(|e| library_error_code(&e))?;
+                if !step.aligned(&finished) {
+                    return Err(chunk_error::STEP_MISALIGNED);
+                }
                 step.step = Some(finished);
                 draft.check_turn().map_err(|e| library_error_code(&e))?;
             }
@@ -575,8 +674,10 @@ fn fold_chunk(draft: &mut MessageDraft, chunk: Chunk) -> Result<(), &'static str
             for (position, block) in blocks.iter().enumerate() {
                 draft.claim(block.id)?;
                 if block.kind().is_library() {
-                    let (result, json) = tool_result_block(block)
-                        .map_err(|_| chunk_error::NOT_A_TOOL_RESULTS_BLOCK)?;
+                    let (result, json) = tool_result_of(block).map_err(|fault| match fault {
+                        ContentFault::Library(error) => library_error_code(&error),
+                        ContentFault::Threads(_) => chunk_error::NOT_A_TOOL_RESULTS_BLOCK,
+                    })?;
                     collected
                         .push(result.clone())
                         .map_err(|e| library_error_code(&e))?;
@@ -650,18 +751,44 @@ pub struct Closed {
     /// Why a completion failed instead: the stream's refusal, or the library's
     /// verdict on what the writer called whole.
     pub failure: Option<&'static str>,
+    /// Of a `FAILED` close, why its content was cut short of what the stream
+    /// held, when it was: the reason of a failure the stream gives none of
+    /// its own.
+    pub cut: Option<&'static str>,
 }
 
-/// Closes a stream.
+impl Closed {
+    /// The content dropped whole: a block id of it is held by another message.
+    /// A `COMPLETED` message always holds its turn, so a completion fails.
+    pub fn without_content(mut self) -> Self {
+        self.items.clear();
+        match self.status {
+            MessageStatus::Completed => {
+                self.status = MessageStatus::Failed;
+                self.failure = Some(chunk_error::BLOCK_ID_REUSED);
+            }
+            MessageStatus::Failed => {
+                self.cut = Some(chunk_error::BLOCK_ID_REUSED);
+            }
+            MessageStatus::Cancelled | MessageStatus::Streaming => {}
+        }
+        self
+    }
+}
+
+/// Closes a stream; `used` holds the tool call ids the other messages of the
+/// branches through it already use.
 ///
 /// A completion of a stream the library accepted whole — every item complete,
-/// the turn starting with a step and not left awaiting tool results — is
-/// `COMPLETED`. Anything else is `FAILED` (`CANCELLED` for a cancel of a stream
-/// with no refusal): every complete item is kept; the step still streaming is
-/// kept when the library can finish it, dropped otherwise; and every tool call
-/// still without a result is answered with an error result saying it was
-/// interrupted, so that the conversation always loads and renders.
-pub fn close(draft: &MessageDraft, kind: CloseKind) -> Closed {
+/// the turn starting with a step and not left awaiting tool results, no tool
+/// call id used before or after it on a branch — is `COMPLETED`. Anything else
+/// is `FAILED` (`CANCELLED` for a cancel of a stream with no refusal): every
+/// complete item is kept up to the first the library refuses; the step still
+/// streaming is kept when the library can finish it, dropped otherwise; and
+/// every tool call still without a result is answered with an error result
+/// saying it was interrupted, so that the conversation always loads and
+/// renders.
+pub fn close(draft: &MessageDraft, kind: CloseKind, used: &UsedCallIds) -> Closed {
     let all_complete = draft.items.iter().all(DraftItem::is_complete);
     if kind == CloseKind::Complete && draft.refusal.is_none() && all_complete {
         let items: Vec<StoredItem> = draft
@@ -670,24 +797,29 @@ pub fn close(draft: &MessageDraft, kind: CloseKind) -> Closed {
             .enumerate()
             .map(|(index, item)| stored_item(index, item, None))
             .collect();
-        match content::turn_of(Uuid::nil(), None, &items) {
+        let judged = content::turn_of(Uuid::nil(), None, &items)
+            .and_then(|turn| content::check_calls_unused(&items, used).map(|()| turn));
+        match judged {
             Ok(turn) if !matches!(turn.state(), TurnState::AwaitingToolResults { .. }) => {
                 return Closed {
                     status: MessageStatus::Completed,
                     items,
                     failure: None,
+                    cut: None,
                 };
             }
             Ok(_) => {
                 return salvage(
                     draft,
+                    used,
                     MessageStatus::Failed,
-                    Some(content::reason::TURN_AWAITING_TOOL_RESULTS),
+                    Some(MessageInvalidError::TurnAwaitingToolResults.as_str()),
                 );
             }
             Err(error) => {
                 return salvage(
                     draft,
+                    used,
                     MessageStatus::Failed,
                     Some(library_error_code(&error)),
                 );
@@ -703,24 +835,51 @@ pub fn close(draft: &MessageDraft, kind: CloseKind) -> Closed {
         CloseKind::Complete => Some(refusal.unwrap_or("missing_finish")),
         CloseKind::Fail | CloseKind::Cancel => refusal,
     };
-    salvage(draft, status, failure)
+    salvage(draft, used, status, failure)
 }
 
-fn salvage(draft: &MessageDraft, status: MessageStatus, failure: Option<&'static str>) -> Closed {
+fn salvage(
+    draft: &MessageDraft,
+    used: &UsedCallIds,
+    status: MessageStatus,
+    failure: Option<&'static str>,
+) -> Closed {
+    // A cancel is sealed as received: the conversation leaves a cancelled
+    // message out, so its calls never meet the branch's.
+    let none = UsedCallIds::new();
+    let used = if status == MessageStatus::Cancelled {
+        &none
+    } else {
+        used
+    };
     let mut items: Vec<StoredItem> = Vec::with_capacity(draft.items.len() + 1);
+    let mut cut = None;
     for (index, item) in draft.items.iter().enumerate() {
         let candidate = match item {
             DraftItem::Step(step) if step.step.is_none() => match step.close_unfinished() {
-                Some(finished) => stored_item(index, item, Some((status, Some(&finished)))),
-                None => break,
+                Some(finished) if step.aligned(&finished) => {
+                    stored_item(index, item, Some((status, Some(&finished))))
+                }
+                Some(_) => {
+                    cut = Some(chunk_error::STEP_MISALIGNED);
+                    break;
+                }
+                None => {
+                    cut = Some(UNFINISHABLE_STEP);
+                    break;
+                }
             },
             _ => stored_item(index, item, None),
         };
-        // An item the stream's refusal fell on may break the turn: it is
-        // dropped, with everything after it, so that what is kept loads.
+        // An item the stream's refusal fell on may break the turn, or reuse a
+        // tool call id of the branch: it is dropped, with everything after
+        // it, so that what is kept loads.
         items.push(candidate);
-        if content::turn_of(Uuid::nil(), None, &items).is_err() {
+        let judged = content::turn_of(Uuid::nil(), None, &items)
+            .and_then(|_| content::check_calls_unused(&items, used));
+        if let Err(error) = judged {
             items.pop();
+            cut = Some(library_error_code(&error));
             break;
         }
     }
@@ -729,6 +888,7 @@ fn salvage(draft: &MessageDraft, status: MessageStatus, failure: Option<&'static
         status,
         items,
         failure,
+        cut: cut.filter(|_| status == MessageStatus::Failed),
     }
 }
 

@@ -12,8 +12,9 @@
 //! `seq` starts at 0 and is contiguous. Every chunk names the item it belongs
 //! to and is one of three parts:
 //!
-//! - `STEP_EVENT`: one stream event of the library (`br-llm-messages/2`),
-//!   folded with the library's step draft for that item. `block_id` names the
+//! - `STEP_EVENT`: one stream event of the library (`br-llm-messages/3`), as
+//!   the library's JSON for it ([`LibraryEvent`]), folded with the library's
+//!   step draft for that item. `block_id` names the
 //!   block a `block_start` or `tool_call_start` opens (the library event carries
 //!   no id) and is refused elsewhere; `model` is allowed on the item's first
 //!   chunk only. The `finish` event completes the item.
@@ -27,10 +28,11 @@
 
 use br_llm_messages::StreamEvent;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::content::Block;
+use crate::content::{Block, LibraryValueError};
 
 /// The stream the engine binds for Threads (`STREAMING_{service}`), declared out
 /// of band like every stream.
@@ -61,7 +63,7 @@ pub enum ChunkPart {
     /// One library stream event of a step.
     #[serde(rename = "STEP_EVENT")]
     StepEvent {
-        event: StreamEvent,
+        event: LibraryEvent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +75,90 @@ pub enum ChunkPart {
     /// A whole Threads block.
     #[serde(rename = "BLOCK")]
     Block { block: Block },
+}
+
+/// One stream event of the library, carried as the library's JSON for it and
+/// judged by Threads when it folds — as a [`crate::LibraryBlock`] is: a chunk
+/// whose event the library refuses still decodes, so that Threads can fail its
+/// message with the library's reason instead of losing the chunk.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LibraryEvent(serde_json::Value);
+
+impl LibraryEvent {
+    /// The JSON `event` loads from.
+    ///
+    /// The library loads stream events from JSON but never serializes them, so
+    /// the contract writes that JSON itself: one arm per event, every field
+    /// under the name the library reads it by (`to_event` of the result gives
+    /// `event` back, and the JSON is the one `br-llm-messages` 0.3 wrote — the
+    /// contract's tests hold both for every event). An event a later library
+    /// adds is refused ([`LibraryValueError::UnsupportedStreamEvent`]) until
+    /// the contract names it.
+    pub fn of(event: &StreamEvent) -> Result<Self, LibraryValueError> {
+        let json = match event {
+            StreamEvent::BlockStart { index, kind } => {
+                json!({ "type": "block_start", "index": index, "kind": kind })
+            }
+            StreamEvent::TextDelta { index, text } => {
+                json!({ "type": "text_delta", "index": index, "text": text })
+            }
+            StreamEvent::ThinkingDelta { index, text } => {
+                json!({ "type": "thinking_delta", "index": index, "text": text })
+            }
+            StreamEvent::SignatureDelta { index, signature } => {
+                json!({ "type": "signature_delta", "index": index, "signature": signature })
+            }
+            StreamEvent::RedactedThinkingData { index, data } => {
+                json!({ "type": "redacted_thinking_data", "index": index, "data": data })
+            }
+            StreamEvent::StructuredDelta {
+                index,
+                json_fragment,
+            } => json!({
+                "type": "structured_delta", "index": index, "json_fragment": json_fragment
+            }),
+            StreamEvent::ToolCallStart { index, id, name } => {
+                json!({ "type": "tool_call_start", "index": index, "id": id, "name": name })
+            }
+            StreamEvent::ToolCallArgumentsDelta {
+                index,
+                json_fragment,
+            } => json!({
+                "type": "tool_call_arguments_delta", "index": index, "json_fragment": json_fragment
+            }),
+            StreamEvent::BlockEnd { index } => json!({ "type": "block_end", "index": index }),
+            StreamEvent::Finish { stop_reason, usage } => match usage {
+                Some(usage) => {
+                    json!({ "type": "finish", "stop_reason": stop_reason, "usage": usage })
+                }
+                None => json!({ "type": "finish", "stop_reason": stop_reason }),
+            },
+            _ => return Err(LibraryValueError::UnsupportedStreamEvent),
+        };
+        Ok(Self(json))
+    }
+
+    /// Raw JSON, as a writer that does not use the library sends it.
+    pub fn from_json(json: serde_json::Value) -> Self {
+        Self(json)
+    }
+
+    pub fn as_json(&self) -> &serde_json::Value {
+        &self.0
+    }
+
+    /// Read as the library's stream event, by the library's rules, without
+    /// copying the JSON.
+    pub fn to_event(&self) -> Result<StreamEvent, serde_json::Error> {
+        StreamEvent::deserialize(&self.0)
+    }
+
+    /// Read as the library's stream event, by the library's rules, consuming
+    /// the JSON.
+    pub fn into_event(self) -> Result<StreamEvent, serde_json::Error> {
+        serde_json::from_value(self.0)
+    }
 }
 
 /// The lane-A frame a writer publishes.
@@ -162,20 +248,23 @@ fn write_canonical(out: &mut Vec<u8>, value: &serde_json::Value) -> Result<(), s
 
 #[cfg(test)]
 mod tests {
-    use br_llm_messages::{BlockKind as StreamBlockKind, StopReason};
-    use serde_json::json;
+    use br_llm_messages::{BlockKind as StreamBlockKind, StopReason, ToolCallId, ToolName, Usage};
 
     use super::*;
     use crate::content::{ArtifactRef, BlockBody};
+
+    fn library(event: StreamEvent) -> LibraryEvent {
+        LibraryEvent::of(&event).unwrap()
+    }
 
     fn text_start(block_id: Uuid) -> Chunk {
         Chunk {
             item_index: 0,
             part: ChunkPart::StepEvent {
-                event: StreamEvent::BlockStart {
+                event: library(StreamEvent::BlockStart {
                     index: 0,
                     kind: StreamBlockKind::Text,
-                },
+                }),
                 block_id: Some(block_id),
                 model: Some("m-1".into()),
             },
@@ -200,6 +289,156 @@ mod tests {
             serde_json::from_value::<Chunk>(wire).unwrap(),
             text_start(block_id)
         );
+    }
+
+    /// Every stream event, with the JSON `br-llm-messages` 0.3 serialized it
+    /// to — the wire of a 0.2 chunk, generated from that version's own
+    /// `Serialize` — which the contract writes as the same JSON value and the
+    /// library loads back to the same event.
+    #[test]
+    fn every_stream_event_is_written_as_the_json_of_a_0_2_chunk() {
+        let id = || ToolCallId::new("call_1").unwrap();
+        let golden: Vec<(StreamEvent, &str)> = vec![
+            (
+                StreamEvent::BlockStart {
+                    index: 0,
+                    kind: StreamBlockKind::Text,
+                },
+                r#"{"type":"block_start","index":0,"kind":"text"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 1,
+                    kind: StreamBlockKind::Thinking,
+                },
+                r#"{"type":"block_start","index":1,"kind":"thinking"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 2,
+                    kind: StreamBlockKind::RedactedThinking,
+                },
+                r#"{"type":"block_start","index":2,"kind":"redacted_thinking"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 3,
+                    kind: StreamBlockKind::Structured,
+                },
+                r#"{"type":"block_start","index":3,"kind":"structured"}"#,
+            ),
+            (
+                StreamEvent::BlockStart {
+                    index: 4,
+                    kind: StreamBlockKind::ToolCall,
+                },
+                r#"{"type":"block_start","index":4,"kind":"tool_call"}"#,
+            ),
+            (
+                StreamEvent::TextDelta {
+                    index: 0,
+                    text: " hello ".into(),
+                },
+                r#"{"type":"text_delta","index":0,"text":" hello "}"#,
+            ),
+            (
+                StreamEvent::ThinkingDelta {
+                    index: 1,
+                    text: "\tlet me think".into(),
+                },
+                r#"{"type":"thinking_delta","index":1,"text":"\tlet me think"}"#,
+            ),
+            (
+                StreamEvent::SignatureDelta {
+                    index: 1,
+                    signature: "c2ln".into(),
+                },
+                r#"{"type":"signature_delta","index":1,"signature":"c2ln"}"#,
+            ),
+            (
+                StreamEvent::RedactedThinkingData {
+                    index: 2,
+                    data: "b3BhcXVl".into(),
+                },
+                r#"{"type":"redacted_thinking_data","index":2,"data":"b3BhcXVl"}"#,
+            ),
+            (
+                StreamEvent::StructuredDelta {
+                    index: 3,
+                    json_fragment: "{\"a\":".into(),
+                },
+                r#"{"type":"structured_delta","index":3,"json_fragment":"{\"a\":"}"#,
+            ),
+            (
+                StreamEvent::ToolCallStart {
+                    index: 4,
+                    id: id(),
+                    name: ToolName::new("search").unwrap(),
+                },
+                r#"{"type":"tool_call_start","index":4,"id":"call_1","name":"search"}"#,
+            ),
+            (
+                StreamEvent::ToolCallArgumentsDelta {
+                    index: 4,
+                    json_fragment: "{\"q\":1}".into(),
+                },
+                r#"{"type":"tool_call_arguments_delta","index":4,"json_fragment":"{\"q\":1}"}"#,
+            ),
+            (
+                StreamEvent::BlockEnd { index: 4 },
+                r#"{"type":"block_end","index":4}"#,
+            ),
+            (
+                StreamEvent::Finish {
+                    stop_reason: StopReason::AwaitingToolResults,
+                    usage: Some(Usage {
+                        input_tokens: 3,
+                        output_tokens: 5,
+                        cache_read_tokens: Some(7),
+                        cache_write_tokens: None,
+                        thinking_tokens: Some(11),
+                    }),
+                },
+                r#"{"type":"finish","stop_reason":{"type":"awaiting_tool_results"},"usage":{"input_tokens":3,"output_tokens":5,"cache_read_tokens":7,"thinking_tokens":11}}"#,
+            ),
+            (
+                StreamEvent::Finish {
+                    stop_reason: StopReason::Other {
+                        reason: "length".into(),
+                    },
+                    usage: None,
+                },
+                r#"{"type":"finish","stop_reason":{"type":"other","reason":"length"}}"#,
+            ),
+        ];
+        for (event, wire) in golden {
+            let written = LibraryEvent::of(&event).unwrap();
+            // The same JSON value: key order is no part of the wire (a chunk
+            // is stored as `jsonb`, and `seal_hash` orders keys).
+            assert_eq!(
+                written.as_json(),
+                &serde_json::from_str::<serde_json::Value>(wire).unwrap(),
+                "{event:?}"
+            );
+            assert_eq!(written.to_event().unwrap(), event, "{wire}");
+            let read: LibraryEvent = serde_json::from_str(wire).unwrap();
+            assert_eq!(read.into_event().unwrap(), event, "{wire}");
+        }
+    }
+
+    #[test]
+    fn an_event_the_library_refuses_still_decodes_so_that_threads_can_judge_it() {
+        let wire = json!({
+            "item_index": 0,
+            "kind": "STEP_EVENT",
+            "event": { "type": "tool_call_start", "index": 0, "id": "c1", "name": "web.search" },
+            "block_id": Uuid::now_v7()
+        });
+        let chunk: Chunk = serde_json::from_value(wire).unwrap();
+        let ChunkPart::StepEvent { event, .. } = chunk.part else {
+            panic!("a step event chunk");
+        };
+        assert!(event.to_event().is_err());
     }
 
     #[test]
@@ -253,10 +492,10 @@ mod tests {
         let finish = Chunk {
             item_index: 0,
             part: ChunkPart::StepEvent {
-                event: StreamEvent::Finish {
+                event: library(StreamEvent::Finish {
                     stop_reason: StopReason::EndTurn,
                     usage: None,
-                },
+                }),
                 block_id: None,
                 model: None,
             },

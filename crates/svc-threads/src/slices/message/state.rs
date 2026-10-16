@@ -154,6 +154,19 @@ pub struct MessageState {
     pub pending: Vec<MessageChange>,
 }
 
+/// Whether a message of a branch is part of the conversation the branch is,
+/// for a runner: not deleted, and complete, or failed after its first step. A
+/// cancelled message, one still streaming and one failed before its first step
+/// are not.
+pub fn in_conversation(status: MessageStatus, deleted: bool, has_a_step: bool) -> bool {
+    !deleted
+        && match status {
+            MessageStatus::Completed => true,
+            MessageStatus::Failed => has_a_step,
+            MessageStatus::Cancelled | MessageStatus::Streaming => false,
+        }
+}
+
 impl MessageState {
     pub fn pending_facts(&self) -> Vec<Fact> {
         self.pending

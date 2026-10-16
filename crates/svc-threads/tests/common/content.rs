@@ -1,5 +1,5 @@
 //! The conversation a scenario stores, built through the contract's and the
-//! library's own types (`contract-threads`, `br-llm-messages/2`): blocks under
+//! library's own types (`contract-threads`, `br-llm-messages/3`): blocks under
 //! caller-minted UUIDv7 ids, the items of an AI turn, and the chunks of a
 //! stream. A builder never decides what is valid — Threads does, with the
 //! library's rules; the raw builders exist to send what the library refuses.
@@ -9,8 +9,8 @@ use contract_threads::llm::{
     StreamEvent, Text, Thinking, ToolCall, ToolCallId, ToolName, ToolResult, ToolResultBlock,
 };
 use contract_threads::{
-    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, Citation, Item, LibraryBlock, Notice,
-    StepItem, ToolResultsItem,
+    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, Citation, Item, LibraryBlock, LibraryEvent,
+    Notice, StepItem, ToolResultsItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -147,13 +147,31 @@ pub fn tool_results(blocks: Vec<Block>) -> Item {
 
 // ── chunks of a stream ──────────────────────────────────────────────────────
 
+/// The library's JSON of a stream event, as the contract writes it.
+fn library_event(event: &StreamEvent) -> LibraryEvent {
+    LibraryEvent::of(event).expect("every event of this library is written")
+}
+
 /// A step event of item `item`.
 pub fn event(item: u32, event: StreamEvent) -> Chunk {
     Chunk {
         item_index: item,
         part: ChunkPart::StepEvent {
-            event,
+            event: library_event(&event),
             block_id: None,
+            model: None,
+        },
+    }
+}
+
+/// A step event of item `item` carrying raw JSON the library may refuse,
+/// opening `block` when it opens one.
+pub fn raw_event(item: u32, json: Value, block: Option<Uuid>) -> Chunk {
+    Chunk {
+        item_index: item,
+        part: ChunkPart::StepEvent {
+            event: LibraryEvent::from_json(json),
+            block_id: block,
             model: None,
         },
     }
@@ -165,7 +183,7 @@ pub fn opening(item: u32, event: StreamEvent, block: Uuid, model: Option<&str>) 
     Chunk {
         item_index: item,
         part: ChunkPart::StepEvent {
-            event,
+            event: library_event(&event),
             block_id: Some(block),
             model: model.map(str::to_string),
         },

@@ -106,8 +106,11 @@ impl BlockBody {
         ))?))
     }
 
-    /// The body of a step's block, under the kind the library gives it.
-    pub fn assistant(block: &AssistantBlock) -> Result<Self, serde_json::Error> {
+    /// The body of a step's block, under the kind the library gives it. A
+    /// block kind a later library adds has no Threads kind yet: it is refused
+    /// ([`LibraryValueError::UnsupportedAssistantBlock`]) until the contract
+    /// names it.
+    pub fn assistant(block: &AssistantBlock) -> Result<Self, LibraryValueError> {
         let json = LibraryBlock::of(block)?;
         Ok(match block {
             AssistantBlock::Text { .. } => Self::Text(json),
@@ -115,6 +118,7 @@ impl BlockBody {
             AssistantBlock::RedactedThinking(_) => Self::RedactedThinking(json),
             AssistantBlock::Structured { .. } => Self::Structured(json),
             AssistantBlock::ToolCall(_) => Self::ToolCall(json),
+            _ => return Err(LibraryValueError::UnsupportedAssistantBlock),
         })
     }
 
@@ -122,6 +126,20 @@ impl BlockBody {
     pub fn tool_result(result: &ToolResult) -> Result<Self, serde_json::Error> {
         Ok(Self::ToolResult(LibraryBlock::of(result)?))
     }
+}
+
+/// Why the contract cannot write a library value as its JSON.
+#[derive(Debug, thiserror::Error)]
+pub enum LibraryValueError {
+    /// An assistant block of a later library, which has no Threads kind yet.
+    #[error("unsupported_assistant_block")]
+    UnsupportedAssistantBlock,
+    /// A stream event of a later library, which the contract does not write
+    /// yet.
+    #[error("unsupported_stream_event")]
+    UnsupportedStreamEvent,
+    #[error("encode")]
+    Encode(#[from] serde_json::Error),
 }
 
 /// The library's JSON for one block, carried as such and judged by Threads.
@@ -146,17 +164,17 @@ impl LibraryBlock {
 
     /// Read as a user input's block, by the library's rules.
     pub fn to_user(&self) -> Result<UserBlock, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
+        UserBlock::deserialize(&self.0)
     }
 
     /// Read as a step's block, by the library's rules.
     pub fn to_assistant(&self) -> Result<AssistantBlock, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
+        AssistantBlock::deserialize(&self.0)
     }
 
     /// Read as a tool result, by the library's rules.
     pub fn to_tool_result(&self) -> Result<ToolResult, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
+        ToolResult::deserialize(&self.0)
     }
 }
 

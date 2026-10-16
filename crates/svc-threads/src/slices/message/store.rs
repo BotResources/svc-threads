@@ -21,7 +21,10 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
-use super::state::{ItemKind, MessageAuthor, MessageChange, MessageState, StoredBlock, StoredItem};
+use super::content::UsedCallIds;
+use super::state::{
+    ItemKind, MessageAuthor, MessageChange, MessageState, StoredBlock, StoredItem, in_conversation,
+};
 use crate::directory::KNOWN_USERS_TABLE;
 use crate::facts::{self, FactNoun};
 use crate::fault::corrupt;
@@ -256,6 +259,73 @@ pub async fn held_block_ids(
             .fetch_all(conn)
             .await?,
     )
+}
+
+/// The tool call ids already used on the branches through message `message`
+/// (whose parent is `parent`): by its ancestors and by its descendants, those a
+/// conversation holds. One statement: the walk reads the branch's messages by
+/// key, and each one's tool calls and first step are probed by index
+/// (`message_block_message_idx`, `message_item_pkey`). The planner cannot
+/// estimate a recursive walk and would rather scan every block of the
+/// database; `OFFSET 0` keeps the block probe a per-message subquery. A tool
+/// call is a step's block, never a user message's.
+///
+/// Every message command locks the message's thread first, so the content of
+/// a thread is written one command at a time: of two messages on one branch,
+/// the one written second reads the other's calls here. A message streaming
+/// has no content in its row yet; it is judged when its stream closes.
+pub async fn used_call_ids(
+    conn: &mut PgConnection,
+    parent: Option<Uuid>,
+    message: Uuid,
+) -> Result<UsedCallIds, EngineError> {
+    let rows = sqlx::query(
+        "WITH RECURSIVE ancestors(id, parent, status, deleted) AS ( \
+             SELECT id, parent_message_id, status, deleted FROM threads.message WHERE id = $1 \
+             UNION ALL \
+             SELECT m.id, m.parent_message_id, m.status, m.deleted \
+             FROM threads.message m JOIN ancestors a ON m.id = a.parent \
+         ), descendants(id, status, deleted) AS ( \
+             SELECT id, status, deleted FROM threads.message WHERE parent_message_id = $2 \
+             UNION ALL \
+             SELECT m.id, m.status, m.deleted \
+             FROM threads.message m JOIN descendants d ON m.parent_message_id = d.id \
+         ), around(id, status, deleted) AS ( \
+             SELECT id, status, deleted FROM ancestors \
+             UNION SELECT id, status, deleted FROM descendants \
+         ) \
+         SELECT around.status, around.deleted, call.content, \
+                step.found IS NOT NULL AS has_a_step \
+         FROM around \
+         CROSS JOIN LATERAL ( \
+             SELECT b.content FROM threads.message_block b \
+             WHERE b.message_id = around.id AND b.item_index IS NOT NULL \
+               AND b.kind = 'TOOL_CALL' \
+             OFFSET 0 \
+         ) call \
+         LEFT JOIN LATERAL ( \
+             SELECT 1 AS found FROM threads.message_item i \
+             WHERE i.message_id = around.id AND i.kind = 'STEP' LIMIT 1 \
+         ) step ON true",
+    )
+    .bind(parent)
+    .bind(message)
+    .fetch_all(conn)
+    .await?;
+    let mut used = UsedCallIds::new();
+    for row in rows {
+        let status: String = row.try_get("status")?;
+        let status = MessageStatus::parse(&status).map_err(corrupt)?;
+        if !in_conversation(status, row.try_get("deleted")?, row.try_get("has_a_step")?) {
+            continue;
+        }
+        let block: contract_threads::llm::AssistantBlock =
+            serde_json::from_value(row.try_get("content")?).map_err(corrupt)?;
+        if let Some(call) = block.as_tool_call() {
+            used.insert(call.id.clone());
+        }
+    }
+    Ok(used)
 }
 
 /// The thread a message belongs to, if it exists.

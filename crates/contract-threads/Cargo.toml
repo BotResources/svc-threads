@@ -1,6 +1,6 @@
 [package]
 name = "contract-threads"
-version = "0.2.0"
+version = "0.3.0"
 description = "Published language of svc-threads: the commands it accepts, the events and KV values it publishes, and the chunk format of its message stream"
 edition.workspace = true
 rust-version.workspace = true
