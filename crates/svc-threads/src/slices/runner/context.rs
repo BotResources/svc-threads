@@ -1,6 +1,7 @@
 //! A thread's context, as a runner reads it: its active branch as a
-//! conversation of the `br-llm-messages/2` model, whole or lightened for the AI
-//! the runner answers for, with the thread's members and resources.
+//! conversation of the `br-llm-messages/3` model, whole or lightened for the AI
+//! the runner answers for, with the thread's members and resources. A user
+//! message is the input, an AI message the turn, under the message's id.
 //!
 //! The conversation leaves out the active branch's deleted messages, its
 //! cancelled ones, those failed before their first step and those still
@@ -9,7 +10,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use contract_threads::MessageStatus;
 use contract_threads::llm::{Author, Conversation, Perspective, lighten};
 use serde::{Deserialize, Serialize};
 use service_engine::error::EngineError;
@@ -27,7 +27,7 @@ use crate::fault::encode;
 use crate::principal::ThreadsPrincipal;
 use crate::slices::message::content::{turn_of, user_input_of};
 use crate::slices::message::draft::has_a_step;
-use crate::slices::message::state::{MessageAuthor, MessageState};
+use crate::slices::message::state::{self, MessageAuthor, MessageState};
 use crate::slices::message::store::{self as message_store, MessageStore};
 use crate::slices::thread::state::{Thread, ThreadState};
 use crate::slices::thread::store::ThreadStore;
@@ -92,12 +92,7 @@ impl Projector for RunnerThreads {
 
 /// Whether a message of the active branch is part of the conversation.
 pub fn in_conversation(message: &MessageState) -> bool {
-    !message.deleted
-        && match message.status {
-            MessageStatus::Completed => true,
-            MessageStatus::Failed => has_a_step(&message.items),
-            MessageStatus::Cancelled | MessageStatus::Streaming => false,
-        }
+    state::in_conversation(message.status, message.deleted, has_a_step(&message.items))
 }
 
 fn author_of(message: &MessageState) -> Result<Author, EngineError> {
@@ -128,9 +123,9 @@ pub fn conversation_of(messages: &[MessageState]) -> Result<Conversation, Engine
             EngineError::Service(format!("message {} does not load: {error}", message.id).into())
         };
         match message.author {
-            MessageAuthor::User { .. } => {
-                conversation.push_input(user_input_of(&message.blocks, author).map_err(corrupt)?)
-            }
+            MessageAuthor::User { .. } => conversation
+                .push_input(user_input_of(message.id, &message.blocks, author).map_err(corrupt)?)
+                .map_err(corrupt)?,
             MessageAuthor::Ai { .. } => conversation
                 .push_turn(turn_of(message.id, Some(author), &message.items).map_err(corrupt)?)
                 .map_err(corrupt)?,
@@ -162,6 +157,8 @@ pub async fn read(
 
 #[cfg(test)]
 mod tests {
+    use contract_threads::MessageStatus;
+
     use super::*;
     use crate::principal::tests::{active, person, service};
     use crate::slices::message::state::tests::message_in;

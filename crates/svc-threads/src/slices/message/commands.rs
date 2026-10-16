@@ -137,7 +137,7 @@ async fn store_message(
                     Refusal::new(ReasonCode::NotAMember).with("user_id", user.author_user_id)
                 ));
             }
-            let blocks = refuse_on!(content::user_blocks(&user.blocks));
+            let blocks = refuse_on!(content::user_blocks(command.message_id, &user.blocks));
             let author = MessageAuthor::User {
                 user_id: user.author_user_id,
                 display_name: None,
@@ -156,6 +156,18 @@ async fn store_message(
             match &ai.delivery {
                 AiDelivery::Completed { items } => {
                     let items = refuse_on!(content::ai_items(command.message_id, items));
+                    if !content::call_ids(&items).is_empty() {
+                        let used = store::used_call_ids(
+                            cx.connection(),
+                            command.parent_message_id,
+                            command.message_id,
+                        )
+                        .await?;
+                        refuse_on!(
+                            content::check_calls_unused(&items, &used)
+                                .map_err(|error| content::invalid_by_library(&error))
+                        );
+                    }
                     (author, MessageStatus::Completed, Vec::new(), items)
                 }
                 AiDelivery::Streaming => (author, MessageStatus::Streaming, Vec::new(), Vec::new()),

@@ -9,6 +9,7 @@
 //! by its kind.
 
 use br_llm_messages::{AssistantBlock, StopReason, Text, ToolResult, Usage, UserBlock};
+use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -106,7 +107,9 @@ impl BlockBody {
         ))?))
     }
 
-    /// The body of a step's block, under the kind the library gives it.
+    /// The body of a step's block, under the kind the library gives it. A
+    /// block kind a later library adds has no Threads kind yet: it is refused
+    /// (`unsupported_assistant_block`) until the contract names it.
     pub fn assistant(block: &AssistantBlock) -> Result<Self, serde_json::Error> {
         let json = LibraryBlock::of(block)?;
         Ok(match block {
@@ -115,6 +118,7 @@ impl BlockBody {
             AssistantBlock::RedactedThinking(_) => Self::RedactedThinking(json),
             AssistantBlock::Structured { .. } => Self::Structured(json),
             AssistantBlock::ToolCall(_) => Self::ToolCall(json),
+            _ => return Err(serde_json::Error::custom("unsupported_assistant_block")),
         })
     }
 

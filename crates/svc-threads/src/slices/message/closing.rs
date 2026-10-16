@@ -1,9 +1,11 @@
 //! Closing a `STREAMING` message, once its stream is sealed: what the close
 //! commands (`message.complete`, `fail`, `cancel`) and the stream watch share.
 //!
-//! The sealed draft closes to its stored content ([`super::draft::close`]);
-//! the `ARTIFACT` blocks it keeps attach their artifacts; the message row, its
-//! items and blocks, and its facts are written; its watch ends.
+//! The sealed draft closes to its stored content ([`super::draft::close`]),
+//! judged against the tool call ids the branches through the message already
+//! use ([`store::used_call_ids`]); the `ARTIFACT` blocks it keeps attach their
+//! artifacts; the message row, its items and blocks, and its facts are
+//! written; its watch ends.
 //!
 //! What a close that nobody can refuse (a failure, a cancel, the watch) keeps
 //! must still be storable: an `ARTIFACT` block whose artifact is not ready is
@@ -38,7 +40,9 @@ pub async fn precheck_completion(
     message: &MessageState,
     preview: &MessageDraft,
 ) -> Result<Result<Vec<ArtifactState>, Refusal>, Fault> {
-    let closed = draft::close(preview, CloseKind::Complete);
+    let used =
+        store::used_call_ids(ops.connection(), message.parent_message_id, message.id).await?;
+    let closed = draft::close(preview, CloseKind::Complete, &used);
     let ids: Vec<Uuid> = closed
         .items
         .iter()
@@ -67,7 +71,9 @@ pub async fn store_closed(
     fallback_reason: Option<&'static str>,
     meta: &FactMeta,
 ) -> Result<MessageOutcome, Fault> {
-    let mut closed = draft::close(sealed, kind);
+    let used =
+        store::used_call_ids(ops.connection(), message.parent_message_id, message.id).await?;
+    let mut closed = draft::close(sealed, kind, &used);
     let held = store::held_block_ids(
         ops.connection(),
         &closed

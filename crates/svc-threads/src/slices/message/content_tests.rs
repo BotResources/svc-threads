@@ -65,7 +65,7 @@ fn a_user_input_holds_text_and_threads_blocks() {
         text: "a quote".into(),
         source_ids: vec!["s1".into()],
     }));
-    let stored = user_blocks(&[user_text("Hello"), citation]).unwrap();
+    let stored = user_blocks(Uuid::now_v7(), &[user_text("Hello"), citation]).unwrap();
     assert_eq!(stored.len(), 2);
     assert_eq!(
         stored[0].content,
@@ -83,31 +83,38 @@ fn a_user_input_the_library_refuses_is_message_invalid() {
             json!({ "type": "text", "text": "  " }),
         )),
     );
-    let refused = user_blocks(&[blank]).unwrap_err();
+    let refused = user_blocks(Uuid::now_v7(), &[blank]).unwrap_err();
     assert_eq!(refused.code, ReasonCode::MessageInvalid);
+    assert_eq!(error_of(&refused), "blank", "the library's own refusal");
+
+    let shapeless = Block::new(
+        Uuid::now_v7(),
+        BlockBody::Text(LibraryBlock::from_json(json!({ "text": 42 }))),
+    );
+    let refused = user_blocks(Uuid::now_v7(), &[shapeless]).unwrap_err();
     assert_eq!(error_of(&refused), reason::BLOCK_CONTENT_INVALID);
 
-    let refused = user_blocks(&[result("c1")]).unwrap_err();
+    let refused = user_blocks(Uuid::now_v7(), &[result("c1")]).unwrap_err();
     assert_eq!(error_of(&refused), reason::BLOCK_KIND_NOT_ALLOWED);
 
     let artifact = block(BlockBody::Artifact(ArtifactRef {
         artifact_id: Uuid::now_v7(),
     }));
-    let refused = user_blocks(&[user_text("see"), artifact]).unwrap_err();
+    let refused = user_blocks(Uuid::now_v7(), &[user_text("see"), artifact]).unwrap_err();
     assert_eq!(error_of(&refused), reason::ARTIFACT_IN_USER_MESSAGE);
 
     let only_threads = block(BlockBody::Citation(Citation {
         text: "q".into(),
         source_ids: Vec::new(),
     }));
-    let refused = user_blocks(&[only_threads]).unwrap_err();
+    let refused = user_blocks(Uuid::now_v7(), &[only_threads]).unwrap_err();
     assert_eq!(error_of(&refused), "empty_user_content");
 }
 
 #[test]
 fn a_block_id_appears_once_in_a_message() {
     let text = user_text("twice");
-    let refused = user_blocks(&[text.clone(), text]).unwrap_err();
+    let refused = user_blocks(Uuid::now_v7(), &[text.clone(), text]).unwrap_err();
     assert_eq!(refused.code, ReasonCode::KeyReused);
 }
 
@@ -219,8 +226,14 @@ fn a_thinking_is_kept_byte_for_byte_and_read_back_by_the_library() {
 
 #[test]
 fn a_user_input_reads_back_under_its_author() {
-    let stored = user_blocks(&[user_text("Hi")]).unwrap();
-    let input = user_input_of(&stored, Author::new("u1", "Ada").unwrap()).unwrap();
+    let message = Uuid::now_v7();
+    let stored = user_blocks(message, &[user_text("Hi")]).unwrap();
+    let input = user_input_of(message, &stored, Author::new("u1", "Ada").unwrap()).unwrap();
+    assert_eq!(
+        input.id().as_str(),
+        message.to_string(),
+        "the input's id is the message's"
+    );
     assert_eq!(
         input.content(),
         &[UserBlock::text(Text::new("Hi").unwrap())]
@@ -233,20 +246,211 @@ fn a_user_input_reads_back_under_its_author() {
 
 #[test]
 fn every_library_error_has_a_stable_code() {
+    let id = || ToolCallId::new("c1").unwrap();
+    let name = |name: &str| ToolName::new(name).unwrap();
     let errors = [
-        MessageError::EmptyStep,
-        MessageError::MissingFinish,
-        MessageError::Blank { field: "text" },
-        MessageError::InvalidJson {
-            field: "tool_arguments",
-            message: "eof".into(),
-        },
+        (MessageError::EmptyStep, "empty_step"),
+        (MessageError::MissingFinish, "missing_finish"),
+        (MessageError::Blank { field: "text" }, "blank"),
+        (
+            MessageError::InvalidJson {
+                field: "tool_arguments",
+                message: "eof".into(),
+            },
+            "invalid_json",
+        ),
+        (MessageError::InvalidToolName, "invalid_tool_name"),
+        (
+            MessageError::DuplicateToolCallIdInTurn { id: id() },
+            "duplicate_tool_call_id_in_turn",
+        ),
+        (
+            MessageError::DuplicateToolCallIdInConversation { id: id() },
+            "duplicate_tool_call_id_in_conversation",
+        ),
+        (
+            MessageError::ToolNameMismatch {
+                id: id(),
+                call: name("search"),
+                result: name("fetch"),
+            },
+            "tool_name_mismatch",
+        ),
+        (MessageError::EmptyToolResults, "empty_tool_results"),
+        (
+            MessageError::DuplicateEntryId { id: "m1".into() },
+            "duplicate_entry_id",
+        ),
+        (MessageError::WireListEmpty, "wire_list_empty"),
+        (
+            MessageError::WireToolCallIdRepeated {
+                message: 1,
+                block: 0,
+                id: id(),
+            },
+            "wire_tool_call_id_repeated",
+        ),
     ];
-    for error in errors {
+    for (error, expected) in errors {
         let code = library_error_code(&error);
+        assert_eq!(code, expected, "{error:?}");
         assert!(
             code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
             "{code}"
         );
     }
+    let refused = invalid_by_library(&MessageError::DuplicateToolCallIdInConversation { id: id() });
+    assert_eq!(refused.code, ReasonCode::MessageInvalid);
+    assert_eq!(refused.params["tool_call_id"], "c1");
+}
+
+fn raw(kind: &str, json: serde_json::Value) -> Block {
+    let raw = LibraryBlock::from_json(json);
+    let body = match kind {
+        "TOOL_CALL" => BlockBody::ToolCall(raw),
+        "TOOL_RESULT" => BlockBody::ToolResult(raw),
+        _ => BlockBody::Text(raw),
+    };
+    Block::new(Uuid::now_v7(), body)
+}
+
+fn result_named(id: &str, tool: &str) -> Block {
+    block(
+        BlockBody::tool_result(&ToolResult::new(
+            ToolCallId::new(id).unwrap(),
+            ToolName::new(tool).unwrap(),
+            Vec::new(),
+            false,
+        ))
+        .unwrap(),
+    )
+}
+
+#[test]
+fn the_stricter_rules_of_the_library_refuse_with_its_codes() {
+    let at = |items: Vec<Item>| error_of(&ai_items(Uuid::now_v7(), &items).unwrap_err()).to_owned();
+
+    // A tool name no provider accepts, in a call and in a result.
+    let dotted_call = raw(
+        "TOOL_CALL",
+        json!({ "type": "tool_call", "id": "c1", "name": "web.search", "arguments": {} }),
+    );
+    assert_eq!(
+        at(vec![step(
+            StopReason::AwaitingToolResults,
+            vec![dotted_call]
+        )]),
+        "invalid_tool_name"
+    );
+    let dotted_result = raw(
+        "TOOL_RESULT",
+        json!({ "tool_call_id": "c1", "tool_name": "web.search", "content": [], "is_error": false }),
+    );
+    assert_eq!(
+        at(vec![
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![dotted_result]
+            }),
+        ]),
+        "invalid_tool_name"
+    );
+
+    // A result naming another tool than its call.
+    assert_eq!(
+        at(vec![
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![result_named("c1", "fetch")]
+            }),
+        ]),
+        "tool_name_mismatch"
+    );
+
+    // A call id reused by a later step of the same turn.
+    assert_eq!(
+        at(vec![
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![result("c1")]
+            }),
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![result("c1")]
+            }),
+            step(StopReason::EndTurn, vec![ai_text("done")]),
+        ]),
+        "duplicate_tool_call_id_in_turn"
+    );
+
+    // A tool results item holding no result: Threads blocks alone are none.
+    let citation = block(BlockBody::Citation(Citation {
+        text: "q".into(),
+        source_ids: Vec::new(),
+    }));
+    assert_eq!(
+        at(vec![
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![result("c1")]
+            }),
+            step(StopReason::AwaitingToolResults, vec![call("c2")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![citation]
+            }),
+        ]),
+        "empty_tool_results"
+    );
+}
+
+#[test]
+fn a_tool_call_id_is_used_once_on_every_branch_through_a_message() {
+    let stored = ai_items(
+        Uuid::now_v7(),
+        &[
+            step(StopReason::AwaitingToolResults, vec![call("c1")]),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![result("c1")],
+            }),
+            step(StopReason::EndTurn, vec![ai_text("done")]),
+        ],
+    )
+    .unwrap();
+    assert_eq!(call_ids(&stored), vec![ToolCallId::new("c1").unwrap()]);
+    assert_eq!(check_calls_unused(&stored, &UsedCallIds::new()), Ok(()));
+    let used: UsedCallIds = [ToolCallId::new("c9").unwrap()].into_iter().collect();
+    assert_eq!(check_calls_unused(&stored, &used), Ok(()));
+    let used: UsedCallIds = [ToolCallId::new("c1").unwrap()].into_iter().collect();
+    assert_eq!(
+        check_calls_unused(&stored, &used),
+        Err(MessageError::DuplicateToolCallIdInConversation {
+            id: ToolCallId::new("c1").unwrap()
+        })
+    );
+}
+
+#[test]
+fn a_value_the_library_refuses_is_named_by_its_own_constructor() {
+    let refusal = |json: serde_json::Value| value_refusal(&json).map(|e| library_error_code(&e));
+    assert_eq!(
+        refusal(json!({ "type": "tool_call_start", "index": 0, "id": "c1", "name": "a b" })),
+        Some("invalid_tool_name")
+    );
+    assert_eq!(
+        refusal(json!({ "type": "tool_call", "id": "", "name": "search", "arguments": {} })),
+        Some("blank")
+    );
+    assert_eq!(
+        refusal(json!({ "type": "thinking", "text": "", "signature": "" })),
+        Some("blank")
+    );
+    assert_eq!(
+        refusal(json!({
+            "tool_call_id": "c1", "tool_name": "search",
+            "content": [{ "type": "text", "text": " " }], "is_error": false
+        })),
+        Some("blank")
+    );
+    assert_eq!(refusal(json!({ "type": "text", "text": "fine" })), None);
+    assert_eq!(refusal(json!({ "type": "audio" })), None);
 }

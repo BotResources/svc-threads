@@ -9,7 +9,7 @@ members = ["crates/contract-threads", "crates/svc-threads"]
 [workspace.package]
 edition = "2024"
 # The floor of what the service is built on: br-service-engine v0.4.1 and
-# br-llm-messages v0.3.0 declare 1.89, contract-jobs v0.5.0 (the title Job's
+# br-llm-messages v0.5.0 declare 1.89, contract-jobs v0.5.0 (the title Job's
 # published language) 1.94. CI builds on stable.
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -17,10 +17,10 @@ repository = "https://github.com/BotResources/svc-threads"
 publish = false
 
 [workspace.dependencies]
-contract-threads = { path = "crates/contract-threads", version = "0.2.0" }
+contract-threads = { path = "crates/contract-threads", version = "0.3.0" }
 
-# The conversation model Threads stores messages in (schema `br-llm-messages/2`).
-br-llm-messages = { git = "https://github.com/BotResources/br-llm-messages-rs", package = "br-llm-messages", tag = "br-llm-messages/v0.3.0", version = "0.3.0" }
+# The conversation model Threads stores messages in (schema `br-llm-messages/3`).
+br-llm-messages = { git = "https://github.com/BotResources/br-llm-messages-rs", package = "br-llm-messages", tag = "br-llm-messages/v0.5.0", version = "0.5.0" }
 
 # The engine and the one `br-rust-common` tag it pins (engine README's table:
 # v0.4.1 ↔ v1.3.0). Cargo keys a git source on its reference, so every

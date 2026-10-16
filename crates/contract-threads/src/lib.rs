@@ -21,8 +21,9 @@
 //! The contract decodes shapes; Threads judges values. A command whose payload
 //! decodes is always answered — a value the conversation model or a business
 //! rule refuses is a refusal with its [`ReasonCode`], never a dead letter.
-//! Library content therefore travels as the library's JSON ([`content::LibraryBlock`])
-//! and is parsed by Threads, not at decode time.
+//! Library content therefore travels as the library's JSON
+//! ([`content::LibraryBlock`], [`chunk::LibraryEvent`]) and is parsed by
+//! Threads, not at decode time.
 
 pub mod chunk;
 pub mod content;
@@ -42,8 +43,8 @@ mod wire;
 pub use br_llm_messages as llm;
 
 pub use chunk::{
-    Chunk, ChunkFrame, ChunkPart, MESSAGE_CONTENT_ACCUMULATOR, STREAMING_STREAM, chunk_subject,
-    seal_hash,
+    Chunk, ChunkFrame, ChunkPart, LibraryEvent, MESSAGE_CONTENT_ACCUMULATOR, STREAMING_STREAM,
+    chunk_subject, seal_hash,
 };
 pub use content::{
     ArtifactRef, Block, BlockBody, Citation, Item, JobRef, LibraryBlock, Notice, StepItem,

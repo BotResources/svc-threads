@@ -29,7 +29,7 @@ pub struct AiPerspective {
 #[derive(Debug, Clone, SimpleObject)]
 pub struct ThreadContext {
     pub thread_id: Uuid,
-    /// The active branch as a `br-llm-messages/2` conversation (its JSON).
+    /// The active branch as a `br-llm-messages/3` conversation (its JSON).
     pub conversation: JsonScalar,
     pub members: Vec<MemberView>,
     pub resources: Vec<ResourceView>,

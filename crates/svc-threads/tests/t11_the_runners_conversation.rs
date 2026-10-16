@@ -4,7 +4,7 @@
 //! > "Analyst" and a2 "Critic", a deleted message, a CANCELLED turn, a turn
 //! > FAILED before its first step, and a turn carrying an ARTIFACT block. A
 //! > service account holding threads:runner reads T's context: schema
-//! > br-llm-messages/2, the active branch without the deleted, cancelled and
+//! > br-llm-messages/3, the active branch without the deleted, cancelled and
 //! > failed-before-first-step messages, no Threads block, every message
 //! > carrying its author: {id, name} of the AI, or the user's id and current
 //! > display name; plus T's members and resources. It reads it again naming
@@ -15,7 +15,9 @@
 //! > unknown thread answers not found.
 //!
 //! The expected conversation is computed with `br-llm-messages` itself: its
-//! `lighten` and its `render` are the rule the specification names.
+//! `lighten` and its `render` are the rule the specification names. "A
+//! message's id is the id of its input or its turn": every entry of the
+//! conversation bears its message's id, whole and lightened.
 //!
 //! Channels: the runner operation (2) and its refusals; the conversation as
 //! the library loads, lightens and renders it.
@@ -157,7 +159,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     .await;
     message_confirmed(&ctx, failed, MessageStatus::Failed, "failing M7").await;
     // M8, B's last word.
-    store(
+    let m8 = store(
         &ctx,
         user_message(t, Some(m7), b.id, vec![user_text("Final word")]),
         MessageStatus::Completed,
@@ -169,7 +171,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
 
     // Then it is T's, in the library's schema, with T's members and resources.
     assert_eq!(whole_context["threadId"], Value::String(t.to_string()));
-    assert_eq!(whole_context["conversation"]["schema"], "br-llm-messages/2");
+    assert_eq!(whole_context["conversation"]["schema"], "br-llm-messages/3");
     let mut members: Vec<(String, String)> = whole_context["members"]
         .as_array()
         .expect("members")
@@ -199,6 +201,21 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     let whole = conversation_of(&whole_context);
     let entries = whole.entries();
     assert_eq!(entries.len(), 5, "{whole:?}");
+    // And each entry bears its message's id: a user input the id of its user
+    // message, a turn the id of its AI message.
+    let ids_of = |conversation: &contract_threads::llm::Conversation| -> Vec<String> {
+        conversation
+            .entries()
+            .iter()
+            .map(|entry| entry.id().to_string())
+            .collect()
+    };
+    let branch_ids: Vec<String> = [m1, m2, m3, m4, m8].iter().map(Uuid::to_string).collect();
+    assert_eq!(ids_of(&whole), branch_ids);
+    assert!(
+        matches!(whole.entry(&m3.to_string()), Some(Entry::UserInput(_))),
+        "B's question is found by its message's id"
+    );
     let user = |entry: &Entry| match entry {
         Entry::UserInput(input) => input.clone(),
         Entry::Turn(turn) => panic!("a user input expected, got a turn {turn:?}"),
@@ -304,6 +321,7 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
     // exactly as the whole one does.
     let perspective = Perspective::new(analyst.to_library().unwrap());
     assert_eq!(lightened, lighten(&whole, &perspective));
+    assert_eq!(ids_of(&lightened), branch_ids, "lightening keeps the ids");
     assert_eq!(
         render(&lightened, &perspective).expect("the lightened conversation renders"),
         render(&whole, &perspective).expect("the whole conversation renders")

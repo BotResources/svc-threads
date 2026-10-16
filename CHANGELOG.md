@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.3.0
+
+### Changed
+
+- **The conversation model is `br-llm-messages` v0.5.0, schema
+  `br-llm-messages/3`** (was v0.3.0, `br-llm-messages/2`), through
+  `contract-threads` 0.3.0. A runner's context names `br-llm-messages/3` in its
+  conversation's `schema`.
+- **A message's id is the id of its input or its turn.** A user message is
+  checked and read back as a user input whose id is the message's; an AI
+  message's turn already bore it. Every entry of a runner's conversation, whole
+  or lightened, bears its message's id.
+- **The library's stricter rules hold on every message**, refused
+  `MESSAGE_INVALID` with the library's code in `error`: a tool name of 1 to 64
+  ASCII letters, digits, `_` or `-` (`invalid_tool_name`); a tool call id used
+  once in its turn (`duplicate_tool_call_id_in_turn`); a tool result naming the
+  tool of the call it answers (`tool_name_mismatch`); a tool results item
+  holding at least one result — Threads blocks alone are none
+  (`empty_tool_results`). In a stream, the chunk the library refuses fails the
+  message under the same code.
+- **A tool call id is used once in the conversation, on every branch.** The
+  library judges one conversation; Threads holds the rule for every branch
+  through a message. A whole AI turn reusing a tool call id of a message before
+  it on its branch is refused `MESSAGE_INVALID`
+  (`duplicate_tool_call_id_in_conversation`, with `tool_call_id`); a fork is
+  another branch and may reuse it. A stream is judged when it closes, against
+  the messages before it and after it — one stored under it while it streamed
+  included: it fails from the step that reuses an id, its `Failed` fact naming
+  the code. Every message command locks the thread first, so of two messages
+  on one branch the second written sees the first.
+- **A value the library refuses names the library's code.** A library block,
+  tool result or stream event whose JSON the library cannot load is refused
+  with the code of the value it refuses (`invalid_tool_name`, `blank`, …),
+  found with the library's own constructors; `block_content_invalid`
+  (`chunk_unreadable` for a stream event) remains for JSON that is not the
+  library's shape. A blank user text is now refused `blank` (0.2:
+  `block_content_invalid`).
+- **A streamed step is stored as the library finished it.** The library drops
+  a step's blank text blocks when it finishes it; Threads no longer stores
+  them, so the stored blocks are the step's. A step still streaming shows them.
+- A library refusal of a later library version maps to `library_refusal` until
+  Threads names it; a stream event of a later version is refused
+  `event_not_supported`.
+- GraphQL: `ThreadContext.conversation`'s description names
+  `br-llm-messages/3`; no type or field changes.
+
+### Migration
+
+- None. No Threads deployment holds data written by 0.1 or 0.2, so no stored
+  conversation predates the stricter rules or the `br-llm-messages/3` schema;
+  a stored message that broke them would no longer load in a runner's
+  conversation.
+
 ## 0.2.0
 
 ### Changed

@@ -65,7 +65,7 @@ impl Accumulator for MessageContent {
 #[cfg(test)]
 mod tests {
     use contract_threads::llm::{BlockKind, StreamEvent};
-    use contract_threads::{Chunk, ChunkPart};
+    use contract_threads::{Chunk, ChunkPart, LibraryEvent};
     use uuid::Uuid;
 
     use super::*;
@@ -79,10 +79,11 @@ mod tests {
             serde_json::to_value(Chunk {
                 item_index: 0,
                 part: ChunkPart::StepEvent {
-                    event: StreamEvent::BlockStart {
+                    event: LibraryEvent::of(&StreamEvent::BlockStart {
                         index: 0,
                         kind: BlockKind::Text,
-                    },
+                    })
+                    .unwrap(),
                     block_id: Some(Uuid::now_v7()),
                     model: None,
                 },

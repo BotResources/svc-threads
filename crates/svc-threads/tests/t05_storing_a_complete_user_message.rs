@@ -9,6 +9,12 @@
 //! > library refuses (an empty text, a TOOL_RESULT in a user input) is refused
 //! > MESSAGE_INVALID and nothing is stored. A user author who is not a member
 //! > is refused. A parent from another thread is refused MESSAGE_INVALID.
+//!
+//! The library's rules include those of `br-llm-messages` 0.5 an AI turn given
+//! whole meets: a tool name every provider accepts, and a tool call id used
+//! once in the conversation — on the branch of the message, before or after
+//! it, a fork being another conversation. Each refusal names the library's
+//! code in its `error` param.
 //! > Reusing M1's id is refused KEY_REUSED. The thread is closed COMPLETED:
 //! > storing on it is refused THREAD_NOT_OPEN, as is any later close. Renaming
 //! > A in Identity shows the new name on M1 everywhere, while no fact carries a
@@ -22,7 +28,9 @@
 
 mod common;
 
-use common::content::{raw_text, text_content, tool_result, tool_results, user_text};
+use common::content::{
+    ai_text, raw_text, step, text_content, tool_call, tool_result, tool_results, user_text,
+};
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
@@ -31,8 +39,10 @@ use common::flows::{
     user_message,
 };
 use common::{TestContext, identity};
-use contract_threads::llm::{Entry, UserBlock};
-use contract_threads::{CloseThread, ClosingStatus, MessageStatus, ReasonCode};
+use contract_threads::llm::{Entry, StopReason, UserBlock};
+use contract_threads::{
+    Block, BlockBody, CloseThread, ClosingStatus, LibraryBlock, MessageStatus, ReasonCode,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -244,6 +254,71 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     )
     .await;
     assert!(facts::of(&ctx.pool, "message", no_step_id).await.is_empty());
+
+    // When an AI turn names a tool no provider accepts.
+    let dotted = Block::new(
+        Uuid::now_v7(),
+        BlockBody::ToolCall(LibraryBlock::from_json(json!({
+            "type": "tool_call", "id": "call-x", "name": "web.search", "arguments": {}
+        }))),
+    );
+    let dotted_turn = ai_message(
+        t,
+        Some(m1),
+        ai("a1", "Analyst"),
+        vec![step(StopReason::AwaitingToolResults, None, vec![dotted])],
+    );
+    let dotted_id = dotted_turn.message_id;
+    let dotted_command = command(&ctx, &dotted_turn).await;
+    // Then refused MESSAGE_INVALID with the library's code, nothing stored.
+    let refused = message_refused(
+        &ctx,
+        dotted_command,
+        ReasonCode::MessageInvalid,
+        "an invalid tool name",
+    )
+    .await;
+    assert_eq!(refused.params["error"], "invalid_tool_name", "{refused:?}");
+    assert!(facts::of(&ctx.pool, "message", dotted_id).await.is_empty());
+
+    // When an AI turn calls tool call-1 and answers, and the next turn of its
+    // branch calls call-1 again.
+    let calling = |id: &str| {
+        vec![
+            step(
+                StopReason::AwaitingToolResults,
+                None,
+                vec![tool_call(id, "search", json!({ "q": "q3" }))],
+            ),
+            tool_results(vec![tool_result(id, "search", "found")]),
+            step(StopReason::EndTurn, None, vec![ai_text("answered")]),
+        ]
+    };
+    let first_call =
+        common::flows::answer(&ctx, t, Some(m1), ai("a1", "Analyst"), calling("call-1")).await;
+    let again = ai_message(t, Some(first_call), ai("a2", "Critic"), calling("call-1"));
+    let again_id = again.message_id;
+    let again_command = command(&ctx, &again).await;
+    // Then the second is refused MESSAGE_INVALID with the library's code and
+    // the id, nothing stored: the conversation of the branch would not load.
+    let refused = message_refused(
+        &ctx,
+        again_command,
+        ReasonCode::MessageInvalid,
+        "a tool call id reused on the branch",
+    )
+    .await;
+    assert_eq!(
+        refused.params["error"], "duplicate_tool_call_id_in_conversation",
+        "{refused:?}"
+    );
+    assert_eq!(refused.params["tool_call_id"], "call-1", "{refused:?}");
+    assert!(facts::of(&ctx.pool, "message", again_id).await.is_empty());
+
+    // When a regeneration of the first answer — a fork, another branch —
+    // calls call-1.
+    // Then it is stored: no branch holds call-1 twice.
+    common::flows::answer(&ctx, t, Some(m1), ai("a1", "Analyst"), calling("call-1")).await;
 
     // When a new store reuses M1's id.
     let mut reuse = user_message(t, None, b.id, vec![user_text("mine")]);
