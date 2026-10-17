@@ -397,8 +397,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-auth"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-auth%2Fv0.1.0#7f028db1498ded2b3c5469bb2baa8e52597100b8"
 dependencies = [
  "base64 0.22.1",
  "br-core-kernel",
@@ -412,8 +412,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-directory"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-directory%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
 dependencies = [
  "serde",
  "serde_json",
@@ -423,8 +423,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-events"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-events%2Fv0.1.0#7f028db1498ded2b3c5469bb2baa8e52597100b8"
 dependencies = [
  "br-core-kernel",
  "chrono",
@@ -435,8 +435,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-integration"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-integration%2Fv0.1.0#efe30d483d4b76cc3a72503d92bbc4901b145cee"
 dependencies = [
  "br-core-events",
  "chrono",
@@ -447,8 +447,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-kernel"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-kernel%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
 dependencies = [
  "serde",
  "uuid",
@@ -456,8 +456,8 @@ dependencies = [
 
 [[package]]
 name = "br-core-scope"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-core-scope%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
 dependencies = [
  "serde",
  "thiserror",
@@ -474,16 +474,16 @@ dependencies = [
 
 [[package]]
 name = "br-scope-declaration-contract"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-scope-declaration-contract%2Fv0.1.0#cb9bbb3c5da89718f78719c9ca4f9b3d02972c8a"
 dependencies = [
  "br-core-integration",
 ]
 
 [[package]]
 name = "br-test-harness"
-version = "1.2.1"
-source = "git+https://github.com/BotResources/br-e2e-harness?tag=v1.2.1#13c4d64f80561937a26263bbc97ecd8e794d5173"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-e2e-harness?tag=br-test-harness%2Fv0.1.0#c8a1819a6423885e9af01a30f306a6eaf121df34"
 dependencies = [
  "async-nats",
  "br-core-auth",
@@ -511,22 +511,31 @@ dependencies = [
 
 [[package]]
 name = "br-util-axum-readiness"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-axum-readiness%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
 dependencies = [
  "axum",
  "tracing",
 ]
 
 [[package]]
+name = "br-util-boot"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-boot%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
+dependencies = [
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "br-util-directory"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-directory%2Fv0.1.0#5fef8fc9e285e2255547632c58679aa7469d6c31"
 dependencies = [
  "async-trait",
  "br-core-directory",
  "br-util-nats-fabric",
- "br-util-postgres",
+ "br-util-postgres 0.1.0",
  "serde_json",
  "sqlx",
  "thiserror",
@@ -536,8 +545,8 @@ dependencies = [
 
 [[package]]
 name = "br-util-nats-fabric"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-nats-fabric%2Fv0.1.0#cb9bbb3c5da89718f78719c9ca4f9b3d02972c8a"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -554,8 +563,8 @@ dependencies = [
 
 [[package]]
 name = "br-util-observability"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-observability%2Fv0.1.0#d7fd2f174735b5c6a24cc87b41daaa0ea890baaa"
 dependencies = [
  "axum",
  "chrono",
@@ -571,13 +580,27 @@ dependencies = [
 
 [[package]]
 name = "br-util-postgres"
-version = "1.3.0"
-source = "git+https://github.com/BotResources/br-rust-common?tag=v1.3.0#edac9c28e3cd0f5b2715710c2df4dfc610c3c680"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-postgres%2Fv0.1.0#7f028db1498ded2b3c5469bb2baa8e52597100b8"
 dependencies = [
+ "br-util-boot",
  "sqlx",
  "thiserror",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "br-util-postgres"
+version = "0.1.1"
+source = "git+https://github.com/BotResources/br-rust-common?tag=br-util-postgres%2Fv0.1.1#49a488782d450c2cd6acbdd8f2eb6bbadb1753af"
+dependencies = [
+ "br-util-boot",
+ "postgres-protocol",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -722,8 +745,8 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "conformance-directory"
-version = "1.2.1"
-source = "git+https://github.com/BotResources/br-e2e-harness?tag=v1.2.1#13c4d64f80561937a26263bbc97ecd8e794d5173"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-e2e-harness?tag=conformance-directory%2Fv0.1.0#e5d06abc129b89bb5ce8e0609f9e7259f06cdb2c"
 dependencies = [
  "async-trait",
  "br-core-directory",
@@ -740,8 +763,8 @@ dependencies = [
 
 [[package]]
 name = "conformance-scope"
-version = "1.2.1"
-source = "git+https://github.com/BotResources/br-e2e-harness?tag=v1.2.1#13c4d64f80561937a26263bbc97ecd8e794d5173"
+version = "0.1.0"
+source = "git+https://github.com/BotResources/br-e2e-harness?tag=conformance-scope%2Fv0.1.0#e5d06abc129b89bb5ce8e0609f9e7259f06cdb2c"
 dependencies = [
  "br-core-integration",
  "br-core-scope",
@@ -771,8 +794,8 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "contract-jobs"
-version = "0.5.0"
-source = "git+https://github.com/BotResources/svc-jobs?tag=contract-jobs%2Fv0.5.0#c2d408e6abe687ca09df28083de1117975bdb27d"
+version = "0.5.1"
+source = "git+https://github.com/BotResources/svc-jobs?tag=contract-jobs%2Fv0.5.1#5e4ff8fd283eaa32f5afbf5a37cb66be62268907"
 dependencies = [
  "br-core-integration",
  "chrono",
@@ -783,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "br-core-integration",
  "br-llm-messages",
@@ -1228,6 +1251,12 @@ dependencies = [
  "left-right",
  "smallvec",
 ]
+
+[[package]]
+name = "fallible-iterator"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 
 [[package]]
 name = "fast_chemail"
@@ -2494,6 +2523,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-protocol"
+version = "0.6.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08808e3c483c46e999108051c78334f473d5adb59d78bb80a1268c7e6aa6c514"
+dependencies = [
+ "base64 0.22.1",
+ "byteorder",
+ "bytes",
+ "fallible-iterator",
+ "hmac 0.13.0",
+ "md-5 0.11.0",
+ "memchr",
+ "rand 0.10.3",
+ "sha2 0.11.1",
+ "stringprep",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3154,8 +3201,8 @@ dependencies = [
 
 [[package]]
 name = "service-engine"
-version = "0.4.1"
-source = "git+https://github.com/BotResources/br-service-engine?tag=v0.4.1#584ff1683d161aa539aa1b45891269d362fc98c3"
+version = "0.4.2"
+source = "git+https://github.com/BotResources/br-service-engine?tag=br-service-engine%2Fv0.4.2#aa0bd6b89e95d1ac7c5129836b0925cd20d4f3d8"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -3168,7 +3215,7 @@ dependencies = [
  "br-scope-declaration-contract",
  "br-util-axum-readiness",
  "br-util-observability",
- "br-util-postgres",
+ "br-util-postgres 0.1.1",
  "bytes",
  "chrono",
  "croner",
@@ -3609,7 +3656,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svc-threads"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-graphql",
  "br-core-auth",
@@ -3688,7 +3735,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

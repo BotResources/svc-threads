@@ -4,8 +4,8 @@ description: Threads — the shared conversation store (threads, members, messag
 type: application
 # Set by scripts/publish.sh to the service version at publish time
 # (`helm package --version --app-version`), in lockstep with the image.
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.3.1
+appVersion: "0.3.1"
 home: https://github.com/BotResources/svc-threads
 sources:
   - https://github.com/BotResources/svc-threads
@@ -20,6 +20,6 @@ keywords:
   - postgres
 dependencies:
   - name: br-service-engine-chart
-    # The pair the engine released with v0.4.1 (engine README, Compatibility).
+    # The pair the engine released with v0.4.2 (engine README, Compatibility).
     version: "2.0.0"
     repository: "oci://ghcr.io/botresources/charts"
