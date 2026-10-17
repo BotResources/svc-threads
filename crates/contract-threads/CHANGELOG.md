@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.3.1 - 2026-10-17
+
+- Dependency re-pin only. The contract is unchanged: coordinates, payload
+  shapes, the chunk format and the error vocabulary are byte-identical to 0.3.0.
+- `CommandCoords`, `EventCoords` and the other `br-core-integration` types the
+  crate names are those of `br-core-integration/v0.1.0`, pinned at the per-crate
+  tag instead of the legacy workspace tag `v1.3.0`. A platform consumer on
+  `br-service-engine` 0.4.2 pins `contract-threads/v0.3.1` together with the
+  per-crate tags and resolves one copy of each type; a consumer still on
+  `v1.3.0` keeps `contract-threads/v0.3.0`.
+
 ## 0.3.0
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "svc-threads"
-version = "0.3.0"
+version = "0.3.1"
 description = "Threads — the shared conversation store: threads, members, messages in the br-llm-messages model, artifacts and read marks, served live to their members (fatty manner on br-service-engine)"
 edition.workspace = true
 rust-version.workspace = true
@@ -52,11 +52,11 @@ br-core-scope.workspace = true
 br-scope-declaration-contract.workspace = true
 br-util-nats-fabric.workspace = true
 # The directory consumer kit: Threads mirrors Identity's `identity/users/`.
-conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-directory", tag = "v1.2.1", version = "1.2.1" }
+conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-directory", tag = "conformance-directory/v0.1.0", version = "0.1.0" }
 # Jobs' published language — the title Job's commands Threads sends Jobs and the
 # facts the suite, playing Jobs, answers with — decoded and built through the
-# real types. Its tag pins the same br-rust-common v1.3.0.
-contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.0", version = "0.5.0", features = [
+# real types. Its tag pins the same per-crate br-rust-common tags.
+contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.1", version = "0.5.1", features = [
     "integration",
 ] }
 dotenvy = "0.15"

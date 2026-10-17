@@ -9,6 +9,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.3.1 - 2026-10-17
+
+Dependency maintenance release: Threads moves from `br-service-engine` 0.4.1 to
+0.4.2. No wire, schema, migration or published-language change; `contract-threads`
+0.3.1 only moves its `br-core-integration` pin (see its changelog).
+
+### Changed
+
+- **`br-service-engine` v0.4.1 -> `br-service-engine/v0.4.2`.** No source change
+  in Threads. The chart pairing is unchanged (`br-service-engine-chart` 2.0.0
+  serves 0.4.2).
+- **`br-rust-common` moves from the legacy workspace tag `v1.3.0` to the
+  per-crate tags** `{crate}/v0.1.0`: `br-core-auth`, `br-core-directory`,
+  `br-core-integration`, `br-core-scope`, `br-scope-declaration-contract`,
+  `br-util-nats-fabric`; the engine brings `br-util-postgres` 0.1.1. The service
+  graph resolves one copy of each `br-*` crate.
+- **Jobs' published language** `contract-jobs` v0.5.0 -> `contract-jobs/v0.5.1`
+  (re-pin only; its wire is byte-identical to 0.5.0), so `CommandCoords` and
+  `EventCoords` are those of the per-crate `br-core-integration`.
+- **The e2e harness** moves to the per-crate tags `br-test-harness/v0.1.0`,
+  `conformance-scope/v0.1.0` and `conformance-directory/v0.1.0`. The
+  conformance crates pin `br-test-harness` 0.1.0 and name its types, so the
+  harness stays on 0.1.0: the suite holds one copy of it. Only the test graph
+  holds two copies of `br-util-postgres` (0.1.0 through
+  `conformance-directory` and `br-util-directory`, 0.1.1 through the engine);
+  the service binary's graph holds one of each `br-*` crate.
+
+### Fixed (through the engine)
+
+- A database URL is no longer accepted without TLS on a remote host by reading
+  its host after the first `@` of the whole URL; every entry point reads the
+  host from the URL authority.
+- `Engine::run` no longer fails at boot with `SchemaParse "stack limit
+  reached"` on a static musl binary.
+- An undecodable value under a consumed KV prefix (the directory mirror) is
+  dead-lettered instead of restarting the mirror in a loop.
+- A led mirror no longer drops a change on a multi-pod deployment.
+- A pod that loses the schema-version claim stops (readiness lowered, workers
+  stopped, `EngineError::SchemaClaimLost`) instead of only lowering readiness.
+- `run_service` handles `SIGTERM` and `SIGINT` as a graceful shutdown.
+- A `/graphql/ws` operation re-resolves its principal and its facts, so a member
+  removed or deactivated while a socket is open loses access at the next
+  operation instead of keeping the upgrade-time principal.
+- `POST /graphql` and the `/graphql/ws` upgrade answer a refused passport with
+  `401` and a GraphQL error envelope (`UNAUTHENTICATED`), not plain text.
+- `rustls` 0.23.46 clears RUSTSEC-2026-0346 to -0349.
+
+### Behavior changes (operators)
+
+- **Stricter database URL.** `DATABASE_URL` and `DATABASE_URL_OWNER` must name
+  their host explicitly in the authority: a URL with no scheme, a foreign
+  scheme, no host (`postgres:///db`) or a `host=` / `hostaddr=` override is
+  refused at boot, even on loopback or with `sslmode=require`.
+- **`migrate` under replicas.** The engine's `migrate` grants app access in one
+  transaction under an advisory lock with a bounded retry, so replicas that
+  migrate together no longer fail with `tuple concurrently updated`.
+- **Duration and blob-TTL checks at boot.** Every engine duration must be at
+  least one microsecond; the blob upload window (`THREADS_UPLOAD_WINDOW_MS`)
+  must lie between 1 millisecond and 7 days and the download TTL between 1
+  second and 7 days. A value outside is refused at boot instead of booting a
+  broken reaper or signing expired URLs.
+- **`/graphql/ws` needs a principal.** Every socket operation resolves the
+  principal again through Threads' registered `PrincipalResolver`; a principal
+  that resolves to nothing is refused `UNAUTHENTICATED` for that operation.
+
 ## 0.3.0
 
 ### Breaking (consumers)
