@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## Unreleased
+
+### Added
+
+- Release pipeline integration with the production Services registry:
+  `scripts/registry-gate.sh` (sealed-and-not-implemented gate at PR time,
+  pre-build, and pre-push), `scripts/registry-docs.sh` (procedural SDL + DB
+  schema posed from the built artifacts before the image push), and
+  `scripts/registry-implement.sh` (image record + advisory implemented-flip
+  probe after the push). CI/CD only — no service behavior changes.
+
 ## 0.3.1 - 2026-10-17
 
 Dependency maintenance release: Threads moves from `br-service-engine` 0.4.1 to

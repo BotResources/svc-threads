@@ -257,6 +257,56 @@ jobs:
           fi
           exit $fail
 
+  registry-gate:
+    name: registry gate (bumped versions sealed in the registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gate bumped services against the Services registry
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          source scripts/tracked-services.sh
+
+          read_version() {
+              awk '
+                  /^\[package\]/      { in_pkg = 1; next }
+                  /^\[/ && !/^\[package\]/ { in_pkg = 0 }
+                  in_pkg && /^version *=/ {
+                      gsub(/[" ]/, "", $3); print $3; exit
+                  }'
+          }
+
+          git fetch -q origin "${BASE_REF}"
+
+          gated=0
+          for svc in ${TRACKED_SERVICES}; do
+              cargo="crates/${svc}/Cargo.toml"
+              [[ -f "${cargo}" ]] || { echo "::error::missing ${cargo}"; exit 1; }
+
+              version="$(read_version <"${cargo}")"
+              base_version="$(git show "origin/${BASE_REF}:${cargo}" 2>/dev/null | read_version || true)"
+
+              if [[ "${version}" == "${base_version}" ]]; then
+                  continue
+              fi
+              if [[ "${version}" == *-dev* || "${version}" == *-rc* || "${version}" == *-pre* ]]; then
+                  echo "${svc}: ${version} is non-release — not gated."
+                  continue
+              fi
+
+              echo "${svc}: ${base_version:-<absent>} -> ${version} — gating against the registry."
+              scripts/registry-gate.sh "${svc}" "${version}"
+              gated=1
+          done
+
+          [[ "${gated}" -eq 1 ]] || echo "No tracked service version bump in this PR — nothing to gate."
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest
