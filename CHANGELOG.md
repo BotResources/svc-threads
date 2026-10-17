@@ -18,6 +18,15 @@ heading exists.
   `cargo deny` on every PR. No code, contract or version change: the fix ships
   with the next release.
 
+### Added
+
+- Release pipeline integration with the production Services registry:
+  `scripts/registry-gate.sh` (sealed-and-not-implemented gate at PR time,
+  pre-build, and pre-push), `scripts/registry-docs.sh` (procedural SDL + DB
+  schema posed from the built artifacts before the image push), and
+  `scripts/registry-implement.sh` (image record + advisory implemented-flip
+  probe after the push). CI/CD only — no service behavior changes.
+
 ## 0.4.0 - 2026-10-20
 
 Threads 0.4 (registry patch 0.4.0): a user message is edited in place by its

@@ -121,9 +121,67 @@ jobs:
             echo "contract_version=${contract_version}"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Registry gate (pre-build)
+        if: steps.detect.outputs.publish_service == 'true'
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+        run: >
+          scripts/registry-gate.sh
+          svc-threads
+          "${{ steps.detect.outputs.service_version }}"
+          ghcr.io/botresources/br-svc-threads
+
+  registry-docs:
+    name: Registry docs svc-threads
+    needs: detect-bump
+    if: needs.detect-bump.outputs.publish_service == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Registry gate (pre-publish re-check)
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+        run: >
+          scripts/registry-gate.sh
+          svc-threads
+          "${{ needs.detect-bump.outputs.service_version }}"
+          ghcr.io/botresources/br-svc-threads
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install sqlx-cli (pinned to Cargo.lock's sqlx)
+        run: >
+          cargo install sqlx-cli
+          --version 0.8.6
+          --locked
+          --no-default-features
+          --features rustls,postgres
+
+      - name: Build svc-threads (SDL source)
+        run: cargo build --locked -p svc-threads
+
+      - name: Registry docs (pose SDL + DB schema before the push)
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+        run: >
+          scripts/registry-docs.sh
+          svc-threads
+          "${{ needs.detect-bump.outputs.service_version }}"
+          --pg docker
+          --binary target/debug/svc-threads
+
   publish:
     name: Publish image + chart
-    needs: detect-bump
+    needs: [detect-bump, registry-docs]
     if: needs.detect-bump.outputs.publish_service == 'true'
     runs-on: ubuntu-latest
     # GitHub-hosted (free for public repos — self-hosted ARC runners refuse
@@ -183,6 +241,26 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: ./scripts/publish.sh --skip-checks
+
+  registry-implement:
+    name: Registry implement svc-threads
+    needs: [detect-bump, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.detect-bump.outputs.publish_service == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Record image + observe implemented flip
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+        run: >
+          scripts/registry-implement.sh
+          svc-threads
+          "${{ needs.detect-bump.outputs.service_version }}"
+          ghcr.io/botresources/br-svc-threads:${{ needs.detect-bump.outputs.service_version }}
 
   tag-service:
     name: Tag + Release svc-threads
