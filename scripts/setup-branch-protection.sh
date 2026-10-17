@@ -14,6 +14,7 @@ REQUIRED_CHECKS=(
     "cargo-deny check"
     "cargo-machete (unused deps)"
     "changelog entry present (per crate)"
+    "registry gate (bumped versions sealed in the registry)"
     "shellcheck"
     "trufflehog (secret scan)"
 )
