@@ -154,7 +154,10 @@ mod tests {
             .close(ClosingStatus::Completed, &meta())
             .unwrap()
             .unwrap();
-        assert!(resolved.resolution.is_some(), "closing keeps the resolution");
+        assert!(
+            resolved.resolution.is_some(),
+            "closing keeps the resolution"
+        );
         assert_eq!(code(resolved.reopen(&meta())), ReasonCode::ThreadNotOpen);
 
         let mut closed = thread_with(&[user]);
@@ -162,6 +165,9 @@ mod tests {
             .close(ClosingStatus::Cancelled, &meta())
             .unwrap()
             .unwrap();
-        assert_eq!(code(closed.resolve(user, &meta())), ReasonCode::ThreadNotOpen);
+        assert_eq!(
+            code(closed.resolve(user, &meta())),
+            ReasonCode::ThreadNotOpen
+        );
     }
 }

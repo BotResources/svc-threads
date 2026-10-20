@@ -36,8 +36,9 @@ impl MessageState {
     /// `MESSAGE_NOT_EDITABLE` unless the message is a user message,
     /// `COMPLETED` and not deleted.
     pub fn not_editable(&self) -> Option<Refusal> {
-        let editable =
-            self.author_user().is_some() && self.status == MessageStatus::Completed && !self.deleted;
+        let editable = self.author_user().is_some()
+            && self.status == MessageStatus::Completed
+            && !self.deleted;
         (!editable).then(|| {
             Refusal::new(ReasonCode::MessageNotEditable)
                 .with("status", self.status.as_str())
@@ -53,7 +54,9 @@ impl MessageState {
             return Some(refusal);
         }
         if self.author_user() != Some(acting_user) {
-            return Some(Refusal::new(ReasonCode::NotTheAuthor).with("acting_user_id", acting_user));
+            return Some(
+                Refusal::new(ReasonCode::NotTheAuthor).with("acting_user_id", acting_user),
+            );
         }
         if i64::try_from(expected_version).ok() != Some(self.version) {
             return Some(
@@ -184,7 +187,10 @@ mod tests {
         ] {
             let mut ai = message_in(&[author]);
             ai.status = status;
-            assert_eq!(code(ai.not_editable()), Some(ReasonCode::MessageNotEditable));
+            assert_eq!(
+                code(ai.not_editable()),
+                Some(ReasonCode::MessageNotEditable)
+            );
         }
         let mut deleted = by_user(author);
         deleted.deleted = true;
