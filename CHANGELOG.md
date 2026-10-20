@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.4.0 - 2026-10-20
+
+Threads 0.4 (registry patch 0.4.0): a user message is edited in place by its
+author, and a thread is resolved and reopened. `contract-threads` 0.4.0 carries
+the new commands and reason codes (see its changelog).
+
+### Added
+
+- **`message.edit`** (`integration.cmd.threads.message.edit.v1`): a `COMPLETED`
+  user message that is not deleted, rewritten in place by its author from its
+  current version. Its blocks are replaced whole and judged as a stored user
+  message's (at least one text, no artifact); a block id of the edited message
+  may be kept, any other held id is `KEY_REUSED`. The message keeps its id, its
+  place in the tree and its descendants; `edited_at` is set and `version`
+  raised. Refusals in order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+  `THREAD_RESOLVED`, `MESSAGE_NOT_FOUND`, `MESSAGE_NOT_EDITABLE`,
+  `NOT_THE_AUTHOR`, `VERSION_CONFLICT` (naming `current_version`), then the
+  content (`ID_NOT_UUIDV7`, `KEY_REUSED`, `MESSAGE_INVALID`). An `Edited` fact
+  records the new blocks' kinds and positions, never their text; followers
+  receive the updated message live.
+- **`thread.resolve` / `thread.reopen`**: a resolved thread records
+  `resolved_by` / `resolved_at` and stays `OPEN`. While resolved, storing,
+  editing and deleting a message are refused `THREAD_RESOLVED`; a `STREAMING`
+  message still completes, fails or cancels; title, members, resources, read
+  marks, closing and deletion still apply, and closing keeps the resolution.
+  Repeats are refused `THREAD_ALREADY_RESOLVED` / `THREAD_NOT_RESOLVED`; a
+  closed thread is neither resolved nor reopened (`THREAD_NOT_OPEN`).
+  `Resolved` / `Reopened` facts; followers receive the thread live.
+- GraphQL: `MessageView.editedAt`, `ThreadView.resolvedBy`,
+  `ThreadView.resolvedAt`.
+- Migration `9800000004_edit_and_resolve`: `threads.message.edited_at`,
+  `threads.thread.resolved_by` / `resolved_at` (set together).
+
+### Changed
+
+- `message.store` and `message.delete` are refused `THREAD_RESOLVED` on a
+  resolved thread.
+
+### Tests
+
+- e2e scenarios T19 (editing), T20 (two edits from one version), T21 (an edit
+  is live), T22 (resolving and reopening), T24 (a command received again: the
+  stored answer replayed, then — once the harness expires it as the engine's
+  retention sweep does — the command judged anew under its own guards). T09's
+  and T10's transcripts follow their current gestures (T10: "a retry of M1").
+
 ## 0.3.1 - 2026-10-17
 
 Dependency maintenance release: Threads moves from `br-service-engine` 0.4.1 to

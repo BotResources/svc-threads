@@ -4,8 +4,8 @@ description: Threads — the shared conversation store (threads, members, messag
 type: application
 # Set by scripts/publish.sh to the service version at publish time
 # (`helm package --version --app-version`), in lockstep with the image.
-version: 0.3.1
-appVersion: "0.3.1"
+version: 0.4.0
+appVersion: "0.4.0"
 home: https://github.com/BotResources/svc-threads
 sources:
   - https://github.com/BotResources/svc-threads
