@@ -8,6 +8,8 @@
 //! - `title_job`: the title Job with Jobs, its runner's operations and Jobs'
 //!   events;
 //! - `commands`: the reactions to the thread commands, each answered once;
+//! - `resolution`: resolving and reopening a thread, and the gate it puts on
+//!   the message commands;
 //! - `departure`: the threads of an owner who left the roster;
 //! - `read_mark`: a member's own read mark;
 //! - `store`: the thread's rows and its facts, soft EDA;
@@ -24,6 +26,7 @@
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
 //! | thread row (title, status, last activity, origin) | set title (command or title Job), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
+//! | resolution (resolved by, resolved at) | resolve, reopen | resource, `thread` noun | Upsert |
 //! | title Job | started, ended by its runner or by Jobs, cancelled | resource, `thread` noun | none shown (no field) — re-render, no delta |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
@@ -43,6 +46,7 @@ pub mod departure;
 pub mod graphql;
 pub mod offer;
 pub mod read_mark;
+pub mod resolution;
 pub mod state;
 pub mod store;
 pub mod title_job;
@@ -69,6 +73,8 @@ literal_enum! {
         TitleChanged => "TITLE_CHANGED",
         TitleJobEnded => "TITLE_JOB_ENDED",
         Closed => "CLOSED",
+        Resolved => "RESOLVED",
+        Reopened => "REOPENED",
         Deleted => "DELETED",
         ReadMarkSet => "READ_MARK_SET",
         MessageStored => "MESSAGE_STORED",
@@ -92,6 +98,8 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     )?;
     engine.register_reaction("threads-thread-set-title", commands::set_title)?;
     engine.register_reaction("threads-thread-close", commands::close)?;
+    engine.register_reaction("threads-thread-resolve", commands::resolve)?;
+    engine.register_reaction("threads-thread-reopen", commands::reopen)?;
     engine.register_reaction("threads-thread-delete", commands::delete)?;
 
     engine.register_reaction(

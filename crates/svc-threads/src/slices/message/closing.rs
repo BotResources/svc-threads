@@ -75,7 +75,7 @@ pub async fn precheck_completion(
         .iter()
         .flat_map(|item| item.blocks.iter().map(|block| block.id))
         .collect();
-    let held = store::held_block_ids(ops.connection(), &ids).await?;
+    let held = store::held_block_ids(ops.connection(), &ids, None).await?;
     if !held.is_empty() {
         return Ok(Err(
             Refusal::new(ReasonCode::KeyReused).with("block_ids", held)
@@ -114,6 +114,7 @@ pub async fn store_closed(
             .iter()
             .flat_map(|item| item.blocks.iter().map(|block| block.id))
             .collect::<Vec<_>>(),
+        None,
     )
     .await?;
     if !held.is_empty() {

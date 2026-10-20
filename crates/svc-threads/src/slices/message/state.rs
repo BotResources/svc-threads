@@ -125,7 +125,8 @@ pub enum MessageChange {
     /// The message's content is written: at its creation when it arrives
     /// whole, at its close when it streamed.
     ContentWritten,
-    /// Its author deleted it: its content goes, the node stays.
+    /// Its author deleted it: its content goes, the node stays. (An edit
+    /// rewrites the content whole: `ContentWritten` replaces what was there.)
     ContentRemoved,
     Recorded(Fact),
 }
@@ -141,6 +142,8 @@ pub struct MessageState {
     pub status: MessageStatus,
     pub deleted: bool,
     pub created_at: DateTime<Utc>,
+    /// The date of its author's latest edit; `None` until the first.
+    pub edited_at: Option<DateTime<Utc>>,
     pub version: i64,
     /// A user message's blocks, in order; empty for an AI message and once
     /// deleted.
@@ -211,6 +214,7 @@ pub(crate) mod tests {
             status: MessageStatus::Completed,
             deleted: false,
             created_at: Utc::now(),
+            edited_at: None,
             version: 1,
             blocks: Vec::new(),
             items: Vec::new(),

@@ -176,6 +176,8 @@ pub struct MessageView {
     pub status: MessageStatusView,
     pub deleted: bool,
     pub created_at: DateTime<Utc>,
+    /// When its author last edited it; `null` until the first edit.
+    pub edited_at: Option<DateTime<Utc>>,
     pub version: i64,
     /// A user message's blocks.
     pub blocks: Vec<BlockView>,
@@ -239,6 +241,7 @@ impl MessagesView {
             status: message.status.into(),
             deleted: message.deleted,
             created_at: message.created_at,
+            edited_at: message.edited_at,
             version: message.version,
             blocks: message.blocks.iter().map(block_view).collect(),
             items: items.iter().map(item_view).collect(),

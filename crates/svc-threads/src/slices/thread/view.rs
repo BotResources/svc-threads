@@ -82,6 +82,11 @@ pub struct ThreadView {
     pub parent_thread_id: Option<Uuid>,
     pub origin_block_id: Option<Uuid>,
     pub status: ThreadStatusView,
+    /// The user who resolved the thread, while it is resolved. A resolved
+    /// thread is still `OPEN`: it accepts no message until it is reopened.
+    pub resolved_by: Option<Uuid>,
+    /// When it was resolved, set together with `resolvedBy`.
+    pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// The date of the latest message, or the creation date while there is
     /// none: the order of the list.
@@ -169,6 +174,8 @@ impl Projector for ThreadsView {
             parent_thread_id: thread.origin.map(|origin| origin.thread_id),
             origin_block_id: thread.origin.map(|origin| origin.block_id),
             status: thread.status.into(),
+            resolved_by: thread.resolution.map(|resolution| resolution.by),
+            resolved_at: thread.resolution.map(|resolution| resolution.at),
             created_at: thread.created_at,
             last_activity_at: thread.last_activity_at,
             version: thread.version,

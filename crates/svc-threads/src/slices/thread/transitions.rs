@@ -205,6 +205,7 @@ pub fn create(
         title,
         origin,
         status: ThreadStatus::Open,
+        resolution: None,
         created_at: now,
         last_activity_at: now,
         version: 1,
