@@ -5,7 +5,13 @@
 //! A user message is always stored complete. An AI message is stored complete,
 //! or opened `STREAMING`: its content then travels on Threads' message stream
 //! as ordered chunks ([`crate::chunk`]), never as commands, and the writer
-//! completes, fails or cancels it with a seal.
+//! completes, fails or cancels it with a seal. A completed user message may be
+//! edited in place by its author.
+//!
+//! Every message command acts on an `OPEN` thread (`THREAD_NOT_FOUND`,
+//! `THREAD_NOT_OPEN`). While the thread is resolved, storing, editing and
+//! deleting a message are refused `THREAD_RESOLVED`; a message already
+//! `STREAMING` can still be completed, failed or cancelled.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -36,7 +42,8 @@ macro_rules! message_command {
 /// `STREAMING`. The first user message of an untitled thread starts its title
 /// Job.
 ///
-/// Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `KEY_REUSED` (the message id
+/// Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `THREAD_RESOLVED`,
+/// `KEY_REUSED` (the message id
 /// or a block id), `MESSAGE_NOT_FOUND` (a parent nobody stored),
 /// `MESSAGE_INVALID` (content the library's rules refuse, or a parent of
 /// another thread), `ARTIFACT_NOT_READY`, `NOT_A_MEMBER` (a user author outside
@@ -174,8 +181,10 @@ message_command!(CancelMessage, "cancel");
 
 /// `message.delete` — on its author's gesture: content, items, blocks and
 /// artifacts go, the empty node stays in the tree. An AI message is never
-/// deleted. Refused `MESSAGE_NOT_FOUND`, `NOT_THE_AUTHOR`; an already deleted
-/// message is confirmed and changes nothing.
+/// deleted. Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `THREAD_RESOLVED`,
+/// `MESSAGE_NOT_FOUND`, `NOT_THE_AUTHOR` (judged before anything else of the
+/// message, so an AI message is refused it); an already deleted message is
+/// confirmed and changes nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteMessage {
     pub message_id: Uuid,
@@ -187,6 +196,44 @@ pub struct DeleteMessage {
 impl ThreadsCommand for DeleteMessage {
     const AGGREGATE: &'static str = MESSAGE_AGGREGATE;
     const VERB: &'static str = "delete";
+
+    fn thread_id(&self) -> Uuid {
+        self.thread_id
+    }
+
+    fn acting_user_id(&self) -> Option<Uuid> {
+        Some(self.acting_user_id)
+    }
+}
+
+/// `message.edit` — on its author's gesture, a `COMPLETED` user message that is
+/// not deleted is rewritten in place: its blocks are replaced whole (judged as
+/// a stored user message's: at least one text, no artifact), and it keeps its
+/// id, its place in the tree and its descendants. Its `version` is raised and
+/// its `edited_at` set.
+///
+/// Refused, in this order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+/// `THREAD_RESOLVED`, `MESSAGE_NOT_FOUND`, `MESSAGE_NOT_EDITABLE` (an AI
+/// message, one not `COMPLETED`, a deleted one), `NOT_THE_AUTHOR`,
+/// `VERSION_CONFLICT` (the message left `expected_version`; the refusal names
+/// the current one in `current_version`), then the content: `ID_NOT_UUIDV7`,
+/// `KEY_REUSED` (a block id held by another message, or named twice),
+/// `MESSAGE_INVALID`. A block id of the edited message may be kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditMessage {
+    pub message_id: Uuid,
+    pub thread_id: Uuid,
+    /// Required: the edit is the author's own gesture.
+    pub acting_user_id: Uuid,
+    /// The version of the message the edit was made from.
+    pub expected_version: u64,
+    /// The message's new blocks, whole.
+    pub blocks: Vec<Block>,
+}
+
+impl ThreadsCommand for EditMessage {
+    const AGGREGATE: &'static str = MESSAGE_AGGREGATE;
+    const VERB: &'static str = "edit";
 
     fn thread_id(&self) -> Uuid {
         self.thread_id
@@ -342,6 +389,38 @@ mod tests {
                 "thread_id": Uuid::now_v7(),
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn an_edit_names_its_author_its_version_and_its_new_blocks() {
+        assert_eq!(EditMessage::command_type(), "message.edit");
+        assert_eq!(EditMessage::coords().verb.as_str(), "edit");
+        let (message_id, thread_id, author, block) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        let edit: EditMessage = serde_json::from_value(json!({
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "acting_user_id": author,
+            "expected_version": 3,
+            "blocks": [{ "id": block, "kind": "TEXT", "content": { "type": "text", "text": "hi" } }]
+        }))
+        .unwrap();
+        assert_eq!(edit.expected_version, 3);
+        assert_eq!(edit.acting_user_id(), Some(author));
+        assert!(
+            serde_json::from_value::<EditMessage>(json!({
+                "message_id": message_id,
+                "thread_id": thread_id,
+                "acting_user_id": author,
+                "blocks": []
+            }))
+            .is_err(),
+            "an edit always names the version it was made from"
         );
     }
 

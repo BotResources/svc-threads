@@ -5,9 +5,11 @@
 use crate::wire::wire_enum;
 
 wire_enum! {
-    /// Why a command was refused. Codes marked *proposed* are not named by the
-    /// functional specification (it describes the refusal without a code) and
-    /// await ratification.
+    /// Why a command was refused. Every code is named by the functional
+    /// specification.
+    ///
+    /// The enum is closed: a consumer built on an earlier version of this
+    /// crate cannot decode a code added later.
     pub enum ReasonCode {
         /// The id a creation names is already held.
         KeyReused => "KEY_REUSED",
@@ -17,12 +19,12 @@ wire_enum! {
         OwnerNotRemovable => "OWNER_NOT_REMOVABLE",
         /// A child thread's owner is not a member of the parent thread.
         OwnerNotParentMember => "OWNER_NOT_PARENT_MEMBER",
-        /// *Proposed*: a child thread names its parent without the block it was
-        /// started from.
+        /// A child thread names its parent without the block it was started
+        /// from.
         OriginBlockRequired => "ORIGIN_BLOCK_REQUIRED",
-        /// *Proposed*: an id the caller mints that is not a UUIDv7.
+        /// An id the caller mints that is not a UUIDv7.
         IdNotUuidV7 => "ID_NOT_UUIDV7",
-        /// *Proposed*: a resource key that is blank.
+        /// A resource key that is blank.
         ResourceKeyInvalid => "RESOURCE_KEY_INVALID",
         /// The thread is completed, failed or cancelled.
         ThreadNotOpen => "THREAD_NOT_OPEN",
@@ -39,7 +41,7 @@ wire_enum! {
         /// An `ARTIFACT` block names an artifact of another thread, or one
         /// whose bytes are absent or of another digest.
         ArtifactNotReady => "ARTIFACT_NOT_READY",
-        /// The acting user of a deletion is not the message's author.
+        /// The acting user of a deletion or an edit is not the message's author.
         NotTheAuthor => "NOT_THE_AUTHOR",
         /// A user author who is not a member of the thread.
         NotAMember => "NOT_A_MEMBER",
@@ -47,6 +49,18 @@ wire_enum! {
         MessageNotStreaming => "MESSAGE_NOT_STREAMING",
         /// A seal whose last chunk or digest differs from what Threads received.
         StreamMismatch => "STREAM_MISMATCH",
+        /// Storing, editing or deleting a message on a resolved thread.
+        ThreadResolved => "THREAD_RESOLVED",
+        /// Resolving a thread that is already resolved.
+        ThreadAlreadyResolved => "THREAD_ALREADY_RESOLVED",
+        /// Reopening a thread that is not resolved.
+        ThreadNotResolved => "THREAD_NOT_RESOLVED",
+        /// Editing an AI message, a message that is not `COMPLETED`, or a
+        /// deleted one.
+        MessageNotEditable => "MESSAGE_NOT_EDITABLE",
+        /// An edit made from a version the message has left; the refusal names
+        /// the current one (`current_version`).
+        VersionConflict => "VERSION_CONFLICT",
     }
 }
 
@@ -86,6 +100,14 @@ mod tests {
             "NOT_A_MEMBER",
             "MESSAGE_NOT_STREAMING",
             "STREAM_MISMATCH",
+            "THREAD_RESOLVED",
+            "THREAD_ALREADY_RESOLVED",
+            "THREAD_NOT_RESOLVED",
+            "MESSAGE_NOT_EDITABLE",
+            "VERSION_CONFLICT",
+            "ID_NOT_UUIDV7",
+            "ORIGIN_BLOCK_REQUIRED",
+            "RESOURCE_KEY_INVALID",
         ] {
             assert!(ReasonCode::parse(named).is_ok(), "{named}");
         }

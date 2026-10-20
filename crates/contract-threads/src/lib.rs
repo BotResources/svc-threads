@@ -61,14 +61,14 @@ pub use event::{
 pub use invalid::MessageInvalidError;
 pub use members::{MEMBERS_MANIFEST_KEY, MEMBERS_PREFIX, MEMBERS_VERSION, PublishedThreadMembers};
 pub use message::{
-    AiAuthor, AiDelivery, AiMessage, CancelMessage, CompleteMessage, DeleteMessage, FailMessage,
-    NewMessage, StoreMessage, StreamSeal, UserMessage,
+    AiAuthor, AiDelivery, AiMessage, CancelMessage, CompleteMessage, DeleteMessage, EditMessage,
+    FailMessage, NewMessage, StoreMessage, StreamSeal, UserMessage,
 };
 pub use reason::ReasonCode;
 pub use status::{BlockKind, ClosingStatus, MessageStatus, ThreadStatus};
 pub use thread::{
     AddMembers, AddResourceIds, CloseThread, CreateThread, DeleteThread, RemoveMembers,
-    RemoveResourceIds, SetTitle,
+    RemoveResourceIds, ReopenThread, ResolveThread, SetTitle,
 };
 pub use title_job::TitleJobConfig;
 pub use value::{SealDigest, SealDigestError, ThreadTitle, ThreadTitleError, TitleTooLong};

@@ -37,7 +37,7 @@ macro_rules! thread_command {
 ///
 /// Refused `KEY_REUSED` (the id is held), `USER_UNKNOWN` (the owner or a member
 /// is not a known user still in the roster), `TITLE_EMPTY`, `TITLE_TOO_LONG`,
-/// `THREAD_NOT_FOUND` (the parent), `OWNER_NOT_PARENT_MEMBER` and the proposed
+/// `THREAD_NOT_FOUND` (the parent), `OWNER_NOT_PARENT_MEMBER` and
 /// `ORIGIN_BLOCK_REQUIRED` (a parent without its origin block).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateThread {
@@ -141,6 +141,42 @@ pub struct CloseThread {
 }
 thread_command!(CloseThread, "close");
 
+/// `thread.resolve` — the discussion is settled: the thread accepts no new
+/// message, edit or deletion of a message until it is reopened, and records who
+/// resolved it and when. It is not closed: it stays `OPEN`, and a message
+/// already `STREAMING` can still be completed, failed or cancelled. Refused
+/// `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `THREAD_ALREADY_RESOLVED`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveThread {
+    pub thread_id: Uuid,
+    /// Required: the user who resolves the thread, recorded as its resolver.
+    pub acting_user_id: Uuid,
+}
+
+impl ThreadsCommand for ResolveThread {
+    const AGGREGATE: &'static str = THREAD_AGGREGATE;
+    const VERB: &'static str = "resolve";
+
+    fn thread_id(&self) -> Uuid {
+        self.thread_id
+    }
+
+    fn acting_user_id(&self) -> Option<Uuid> {
+        Some(self.acting_user_id)
+    }
+}
+
+/// `thread.reopen` — a resolved thread accepts messages again and no longer
+/// records a resolution. Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+/// `THREAD_NOT_RESOLVED`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReopenThread {
+    pub thread_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_user_id: Option<Uuid>,
+}
+thread_command!(ReopenThread, "reopen");
+
 /// `thread.delete` — the thread with its members, resources, messages, items,
 /// blocks, artifacts (bytes included) and read marks; its running title Job is
 /// cancelled and its members entry retracted. Child threads survive. Refused
@@ -204,6 +240,14 @@ mod tests {
             subject(&DeleteThread::coords()),
             "integration.cmd.threads.thread.delete.v1"
         );
+        assert_eq!(
+            subject(&ResolveThread::coords()),
+            "integration.cmd.threads.thread.resolve.v1"
+        );
+        assert_eq!(
+            subject(&ReopenThread::coords()),
+            "integration.cmd.threads.thread.reopen.v1"
+        );
         assert_eq!(CreateThread::command_type(), "thread.create");
     }
 
@@ -246,6 +290,19 @@ mod tests {
         assert!(command.user_ids.is_empty());
         assert!(command.resources.is_empty());
         assert_eq!(command.thread_id(), thread_id);
+    }
+
+    #[test]
+    fn a_resolution_always_names_its_resolver_and_a_reopening_may_not() {
+        let thread_id = Uuid::now_v7();
+        assert!(
+            serde_json::from_value::<ResolveThread>(json!({ "thread_id": thread_id })).is_err()
+        );
+        let reopen: ReopenThread =
+            serde_json::from_value(json!({ "thread_id": thread_id })).unwrap();
+        assert_eq!(reopen.acting_user_id(), None);
+        assert_eq!(ResolveThread::command_type(), "thread.resolve");
+        assert_eq!(ReopenThread::command_type(), "thread.reopen");
     }
 
     #[test]
