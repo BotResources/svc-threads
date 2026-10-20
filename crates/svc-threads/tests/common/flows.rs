@@ -8,10 +8,10 @@ use std::collections::BTreeMap;
 
 use br_core_auth::Passport;
 use contract_threads::{
-    AiAuthor, AiDelivery, AiMessage, Block, CompleteMessage, CreateThread, Item,
-    MessageCommandConfirmed, MessageCommandRefused, MessageStatus, NewMessage, ReasonCode,
-    StoreMessage, StreamSeal, ThreadCommandConfirmed, ThreadCommandRefused, ThreadsCommand,
-    UserMessage,
+    AiAuthor, AiDelivery, AiMessage, Block, CompleteMessage, CreateThread, DeleteMessage,
+    EditMessage, Item, MessageCommandConfirmed, MessageCommandRefused, MessageStatus, NewMessage,
+    ReasonCode, ReopenThread, ResolveThread, StoreMessage, StreamSeal, ThreadCommandConfirmed,
+    ThreadCommandRefused, ThreadsCommand, UserMessage,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -375,6 +375,60 @@ pub fn completion(thread: Uuid, message: Uuid, last_seq: u64, hash: &str) -> Com
         },
         acting_user_id: None,
     }
+}
+
+/// `acting`'s edit of `message`, made from `expected_version`, with `blocks`.
+pub fn edit_of(
+    thread: Uuid,
+    message: Uuid,
+    acting: Uuid,
+    expected_version: u64,
+    blocks: Vec<Block>,
+) -> EditMessage {
+    EditMessage {
+        message_id: message,
+        thread_id: thread,
+        acting_user_id: acting,
+        expected_version,
+        blocks,
+    }
+}
+
+/// `acting`'s deletion of `message`.
+pub fn deletion_of(thread: Uuid, message: Uuid, acting: Uuid) -> DeleteMessage {
+    DeleteMessage {
+        message_id: message,
+        thread_id: thread,
+        acting_user_id: acting,
+    }
+}
+
+/// `acting` resolves `thread`.
+pub fn resolution_of(thread: Uuid, acting: Uuid) -> ResolveThread {
+    ResolveThread {
+        thread_id: thread,
+        acting_user_id: acting,
+    }
+}
+
+/// `acting` reopens `thread`.
+pub fn reopening_of(thread: Uuid, acting: Uuid) -> ReopenThread {
+    ReopenThread {
+        thread_id: thread,
+        acting_user_id: Some(acting),
+    }
+}
+
+/// The message's version as a member reads it.
+pub async fn message_version(
+    ctx: &TestContext,
+    passport: &Passport,
+    thread: Uuid,
+    message: Uuid,
+) -> u64 {
+    message_view(ctx, passport, thread, message).await["version"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("message {message} has a version"))
 }
 
 // ── reads ───────────────────────────────────────────────────────────────────
