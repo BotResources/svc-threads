@@ -47,25 +47,27 @@ ignore = [
     # expected while rsa stays lockfile-only.
     { id = "RUSTSEC-2023-0071" },
 
-    # RUSTSEC-2026-0381 — webpki-roots 0.26.11 (bundled root store still trusts
-    # distrusted emSign intermediates).
+    # RUSTSEC-2026-0381 — webpki-roots < 1.0.10 (a bundled root store trusting
+    # distrusted emSign intermediates). A version-match false positive here.
     #
-    # Why: webpki-roots 0.26.11 is pulled in by sqlx-core 0.8.6 (the
-    # `tls-rustls-ring-webpki` feature of the workspace pin) and by
-    # tokio-websockets 0.10.1 (async-nats 0.48, through service-engine). This
-    # code is compiled in, so the path is NOT unreachable: it matters only when
-    # a TLS connection to Postgres or NATS is made to a server whose chain goes
-    # through an emSign intermediate. Those links are internal to the cluster
-    # and their certificates are ours; the TLS settings of the deployment live
-    # in dp-, not in this repo, and were not verified. Our own bumps are done:
-    # webpki-roots 1.0.10 and rustls-webpki 0.103.16 are in Cargo.lock.
+    # Who pulls it in: webpki-roots 0.26.11, through sqlx-core 0.8.6 (the
+    # `tls-rustls-ring-webpki` feature of the workspace pin) and tokio-websockets
+    # 0.10.1 (async-nats 0.48, through service-engine).
     #
-    # Upstream status (checked 2026-10-21): no fixed 0.26.x; the fix is only in
-    # webpki-roots 1.0.10+. Newer sqlx (0.9) and async-nats (0.50) exist; whether
-    # they move to webpki-roots 1.x was not evaluated.
+    # Why it is safe: 0.26.11 is the semver-trick release of webpki-roots. Its
+    # whole API is `pub use parent::TLS_SERVER_ROOTS;` over webpki-roots 1.x, and
+    # Cargo.lock resolves that parent to 1.0.10, the fixed release. The root store
+    # compiled into the binary is therefore the fixed one; the advisory matches
+    # the 0.26.11 version number only, not the roots it re-exports.
     #
-    # Retire this ignore when sqlx-core and tokio-websockets resolve
-    # webpki-roots >= 1.0.10, i.e. when 0.26.x leaves Cargo.lock.
+    # Upstream status (checked 2026-10-21): the fix ships in webpki-roots 1.0.10;
+    # no 0.26.x release is flagged as fixed, although 0.26.11 forwards to it.
+    # Newer sqlx (0.9) and async-nats (0.50) exist; whether they depend on
+    # webpki-roots 1.x directly was not evaluated.
+    #
+    # Retire this ignore when 0.26.x leaves Cargo.lock (sqlx-core and
+    # tokio-websockets depend on webpki-roots >= 1.0.10 directly), or if the
+    # lock ever resolves 0.26.11's parent below 1.0.10.
     #
     # Tools: cargo audit reports it from Cargo.lock, so it is mirrored in
     # .cargo/audit.toml.
