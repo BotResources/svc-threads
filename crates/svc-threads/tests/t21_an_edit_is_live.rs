@@ -7,8 +7,9 @@
 //! > receives nothing.
 //!
 //! A follows over WebSocket (the direct leg), B over SSE (the gateway's leg).
-//! The user outside T follows their own list of threads: nothing of T reaches
-//! it.
+//! U, outside T, tries to follow T itself, before and after the edit: each
+//! time the subscription opens exactly as one to a thread nobody created (as
+//! T04 pins), so no frame of T — the edit included — ever reaches U.
 //!
 //! Channels: the live feeds (3); the answer (4).
 
@@ -16,7 +17,7 @@ mod common;
 
 use common::TestContext;
 use common::content::{texts_of, user_text};
-use common::feed::{Live, upsert_of};
+use common::feed::{Live, thread_feed, upsert_of, ws_opening};
 use common::flows::{command, create_thread, edit_of, message_confirmed, message_version, say};
 use contract_threads::MessageStatus;
 use serde_json::Value;
@@ -40,7 +41,7 @@ fn one_update(deltas: &[Value], message: Uuid, who: &str) -> Value {
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
     // Given T with members A and B, M1 by A; A and B follow T live; U, not a
-    // member, follows their own list.
+    // member, tries to follow T.
     let ctx = TestContext::setup().await;
     let (a, b, u) = (
         ctx.enrol("ada").await,
@@ -52,7 +53,13 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
     let v = message_version(&ctx, &a.passport, t, m1).await;
     let mut a_feed = Live::thread_ws(&ctx, &a.passport, t).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
-    let mut u_list = Live::list(&ctx, &u.passport).await;
+    let nobodys = Uuid::now_v7();
+    let as_unknown = ws_opening(&ctx, &u.passport, &thread_feed(nobodys, 20), &[nobodys]).await;
+    assert_eq!(
+        ws_opening(&ctx, &u.passport, &thread_feed(t, 20), &[t]).await,
+        as_unknown,
+        "U following T is refused as for an unknown thread"
+    );
     // The title Job's start and anything else the store set off settle first.
     a_feed.drain().await;
     b_feed.drain().await;
@@ -79,7 +86,12 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
         assert_eq!(update["status"], "COMPLETED");
     }
     // And U, who is not a member of T, receives nothing.
-    u_list.silence("nothing of T reaches a non-member").await;
+    let after = ws_opening(&ctx, &u.passport, &thread_feed(t, 20), &[t]).await;
+    assert_eq!(
+        after, as_unknown,
+        "after the edit too: nothing of T reaches U"
+    );
+    assert!(!after.contains(NEW), "{after}");
 
     ctx.teardown().await;
 }

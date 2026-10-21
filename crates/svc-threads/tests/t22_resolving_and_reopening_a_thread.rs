@@ -138,6 +138,19 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
         "deleting on a resolved T",
     )
     .await;
+    // And the resolution is judged before the message: an unknown one too.
+    let unknown = command(
+        &ctx,
+        &edit_of(t, Uuid::now_v7(), a.id, 1, vec![user_text("x")]),
+    )
+    .await;
+    message_refused(
+        &ctx,
+        unknown,
+        ReasonCode::ThreadResolved,
+        "an unknown message on a resolved T",
+    )
+    .await;
     assert_eq!(message_view(&ctx, &a.passport, t, m1).await, m1_before);
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
 

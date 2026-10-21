@@ -154,6 +154,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
 
     // When the harness edits M1 with acting user A, from its current version,
     // keeping its first block's id and adding a new block.
+    let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
     let edited = command(&ctx, &edit_of(t, m1, a.id, v, new_blocks.clone())).await;
 
     // Then (4) confirmed: M1 is a COMPLETED message, not deleted.
@@ -170,8 +171,8 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     assert!(view["editedAt"].is_string(), "{view}");
     assert_eq!(view["version"].as_u64(), Some(v + 1));
     assert_eq!(
-        view["createdAt"],
-        message_view(&ctx, &a.passport, t, m1).await["createdAt"]
+        view["createdAt"], created_at,
+        "an edit keeps the creation date"
     );
     // And it is still the parent of M2 and M2b, which stay readable under it.
     for reply in [m2, m2b] {

@@ -80,6 +80,28 @@ async fn t20_an_edit_from_a_stale_version_is_refused_and_overwrites_nothing() {
         "only the edit to C1 is recorded"
     );
 
+    // When an edit from v also carries content the rules refuse (no text).
+    let stale_invalid = command(
+        &ctx,
+        &edit_of(
+            t,
+            m1,
+            a.id,
+            v,
+            vec![common::content::warning_block("note", "no text")],
+        ),
+    )
+    .await;
+    // Then it is refused VERSION_CONFLICT: the version is judged before the
+    // content.
+    message_refused(
+        &ctx,
+        stale_invalid,
+        ReasonCode::VersionConflict,
+        "a stale edit with invalid content",
+    )
+    .await;
+
     // When the same edit is sent again, made from v+1.
     let edit_c2 = edit_of(t, m1, a.id, v + 1, vec![user_text(C2)]);
     let current = command(&ctx, &edit_c2).await;
