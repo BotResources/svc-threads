@@ -46,32 +46,6 @@ ignore = [
     # and warns `advisory-not-detected` for this entry; that warning is
     # expected while rsa stays lockfile-only.
     { id = "RUSTSEC-2023-0071" },
-
-    # RUSTSEC-2026-0381 — webpki-roots < 1.0.10 (a bundled root store trusting
-    # distrusted emSign intermediates). A version-match false positive here.
-    #
-    # Who pulls it in: webpki-roots 0.26.11, through sqlx-core 0.8.6 (the
-    # `tls-rustls-ring-webpki` feature of the workspace pin) and tokio-websockets
-    # 0.10.1 (async-nats 0.48, through service-engine).
-    #
-    # Why it is safe: 0.26.11 is the semver-trick release of webpki-roots. Its
-    # whole API is `pub use parent::TLS_SERVER_ROOTS;` over webpki-roots 1.x, and
-    # Cargo.lock resolves that parent to 1.0.10, the fixed release. The root store
-    # compiled into the binary is therefore the fixed one; the advisory matches
-    # the 0.26.11 version number only, not the roots it re-exports.
-    #
-    # Upstream status (checked 2026-10-21): the fix ships in webpki-roots 1.0.10;
-    # no 0.26.x release is flagged as fixed, although 0.26.11 forwards to it.
-    # Newer sqlx (0.9) and async-nats (0.50) exist; whether they depend on
-    # webpki-roots 1.x directly was not evaluated.
-    #
-    # Retire this ignore when 0.26.x leaves Cargo.lock (sqlx-core and
-    # tokio-websockets depend on webpki-roots >= 1.0.10 directly), or if the
-    # lock ever resolves 0.26.11's parent below 1.0.10.
-    #
-    # Tools: cargo audit reports it from Cargo.lock, so it is mirrored in
-    # .cargo/audit.toml.
-    { id = "RUSTSEC-2026-0381" },
 ]
 
 [licenses]
