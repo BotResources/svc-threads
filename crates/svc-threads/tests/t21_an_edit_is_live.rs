@@ -7,9 +7,15 @@
 //! > receives nothing.
 //!
 //! A follows over WebSocket (the direct leg), B over SSE (the gateway's leg).
-//! U, outside T, tries to follow T itself, before and after the edit: each
-//! time the subscription opens exactly as one to a thread nobody created (as
-//! T04 pins), so no frame of T — the edit included — ever reaches U.
+//!
+//! "A user who is not a member receives nothing" is proven two ways:
+//!
+//! - U, never a member, asking to follow T is answered exactly as for a thread
+//!   nobody created (as T04 pins), before and after the edit — the gate.
+//! - B, a member following T, is removed from T while the feed stays open;
+//!   A's next edit then reaches B's feed in no frame. This pins the message
+//!   feed's own cohort end to end: past the gate, an open feed stops carrying
+//!   a message once its reader leaves the thread's members.
 //!
 //! Channels: the live feeds (3); the answer (4).
 
@@ -17,9 +23,11 @@ mod common;
 
 use common::TestContext;
 use common::content::{texts_of, user_text};
-use common::feed::{Live, thread_feed, upsert_of, ws_opening};
-use common::flows::{command, create_thread, edit_of, message_confirmed, message_version, say};
-use contract_threads::MessageStatus;
+use common::feed::{Live, Revoked, thread_feed, upsert_of, ws_opening};
+use common::flows::{
+    command, create_thread, edit_of, message_confirmed, message_version, say, thread_confirmed,
+};
+use contract_threads::{MessageStatus, RemoveMembers};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -55,6 +63,9 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
     let nobodys = Uuid::now_v7();
     let as_unknown = ws_opening(&ctx, &u.passport, &thread_feed(nobodys, 20), &[nobodys]).await;
+    // The reference is an answer, not a timeout or a closed socket that every
+    // thread would share.
+    assert!(as_unknown.starts_with("data:"), "{as_unknown}");
     assert_eq!(
         ws_opening(&ctx, &u.passport, &thread_feed(t, 20), &[t]).await,
         as_unknown,
@@ -86,12 +97,43 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
         assert_eq!(update["status"], "COMPLETED");
     }
     // And U, who is not a member of T, receives nothing.
-    let after = ws_opening(&ctx, &u.passport, &thread_feed(t, 20), &[t]).await;
     assert_eq!(
-        after, as_unknown,
-        "after the edit too: nothing of T reaches U"
+        ws_opening(&ctx, &u.passport, &thread_feed(t, 20), &[t]).await,
+        as_unknown,
+        "after the edit too: U following T is answered as for an unknown thread"
     );
-    assert!(!after.contains(NEW), "{after}");
+
+    // When B, still following T, is removed from its members.
+    let removed = command(
+        &ctx,
+        &RemoveMembers {
+            thread_id: t,
+            user_ids: vec![b.id],
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    thread_confirmed(&ctx, removed, "removing B").await;
+    let revoked = b_feed.until_revoked("B loses T", t).await;
+    // The feed stays open: B is told T left the window, not cut off — so the
+    // silence below is the cohort's, not a closed stream's.
+    assert_eq!(revoked, Revoked::Removed);
+    // And A edits M1 again.
+    const NEWER: &str = "a third wording, for members only";
+    let again = command(&ctx, &edit_of(t, m1, a.id, v + 1, vec![user_text(NEWER)])).await;
+    message_confirmed(&ctx, again, MessageStatus::Completed, "editing M1 again").await;
+    // Then A is told, and B's open feed carries the edit in no frame.
+    a_feed
+        .until("A is told of the second edit", |delta| {
+            upsert_of(delta, m1).is_some_and(|view| texts_of(view) == [NEWER])
+        })
+        .await;
+    let rest = b_feed.rest().await;
+    assert!(
+        rest.iter()
+            .all(|delta| upsert_of(delta, m1).is_none() && !delta.to_string().contains(NEWER)),
+        "a removed member's feed carries nothing of the edit: {rest:?}"
+    );
 
     ctx.teardown().await;
 }
