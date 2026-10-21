@@ -137,6 +137,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     .await;
     let runner = ctx.service_account(true);
     let v = message_version(&ctx, &a.passport, t, m1).await;
+    let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
     let new_blocks = vec![text_as(first_block, NEW), user_text(ADDED)];
 
     // When the harness edits M1 with acting user B.
@@ -154,7 +155,6 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
 
     // When the harness edits M1 with acting user A, from its current version,
     // keeping its first block's id and adding a new block.
-    let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
     let edited = command(&ctx, &edit_of(t, m1, a.id, v, new_blocks.clone())).await;
 
     // Then (4) confirmed: M1 is a COMPLETED message, not deleted.

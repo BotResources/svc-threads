@@ -180,19 +180,20 @@ mod tests {
             Some(ReasonCode::MessageNotEditable),
             "an AI message"
         );
-        // A user message is always COMPLETED (`message_user_input_is_complete`):
-        // a non-completed message is an AI one, refused already as such. The
-        // status check is defensive; these messages pin only that it agrees.
+        // A stored user message is always COMPLETED
+        // (`message_user_input_is_complete`), so the status check is defensive:
+        // pinned here on an in-memory user message in each other status.
         for status in [
             MessageStatus::Streaming,
             MessageStatus::Failed,
             MessageStatus::Cancelled,
         ] {
-            let mut ai = message_in(&[author]);
-            ai.status = status;
+            let mut user = by_user(author);
+            user.status = status;
             assert_eq!(
-                code(ai.not_editable()),
-                Some(ReasonCode::MessageNotEditable)
+                code(user.not_editable()),
+                Some(ReasonCode::MessageNotEditable),
+                "{status:?}"
             );
         }
         let mut deleted = by_user(author);
