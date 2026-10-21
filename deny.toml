@@ -46,6 +46,30 @@ ignore = [
     # and warns `advisory-not-detected` for this entry; that warning is
     # expected while rsa stays lockfile-only.
     { id = "RUSTSEC-2023-0071" },
+
+    # RUSTSEC-2026-0381 — webpki-roots 0.26.11 (bundled root store still trusts
+    # distrusted emSign intermediates).
+    #
+    # Why: webpki-roots 0.26.11 is pulled in by sqlx-core 0.8.6 (the
+    # `tls-rustls-ring-webpki` feature of the workspace pin) and by
+    # tokio-websockets 0.10.1 (async-nats 0.48, through service-engine). This
+    # code is compiled in, so the path is NOT unreachable: it matters only when
+    # a TLS connection to Postgres or NATS is made to a server whose chain goes
+    # through an emSign intermediate. Those links are internal to the cluster
+    # and their certificates are ours; the TLS settings of the deployment live
+    # in dp-, not in this repo, and were not verified. Our own bumps are done:
+    # webpki-roots 1.0.10 and rustls-webpki 0.103.16 are in Cargo.lock.
+    #
+    # Upstream status (checked 2026-10-21): no fixed 0.26.x; the fix is only in
+    # webpki-roots 1.0.10+. Newer sqlx (0.9) and async-nats (0.50) exist; whether
+    # they move to webpki-roots 1.x was not evaluated.
+    #
+    # Retire this ignore when sqlx-core and tokio-websockets resolve
+    # webpki-roots >= 1.0.10, i.e. when 0.26.x leaves Cargo.lock.
+    #
+    # Tools: cargo audit reports it from Cargo.lock, so it is mirrored in
+    # .cargo/audit.toml.
+    { id = "RUSTSEC-2026-0381" },
 ]
 
 [licenses]

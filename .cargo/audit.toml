@@ -5,4 +5,7 @@ ignore = [
     # rsa via sqlx-macros-core → sqlx-mysql: lockfile-only, never compiled (the
     # workspace enables the postgres backend alone). See deny.toml.
     "RUSTSEC-2023-0071",
+    # webpki-roots 0.26.11 via sqlx-core 0.8.6 and tokio-websockets 0.10.1:
+    # compiled in, internal TLS links only. See deny.toml.
+    "RUSTSEC-2026-0381",
 ]
