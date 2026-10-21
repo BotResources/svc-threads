@@ -36,7 +36,7 @@
 //!
 //! State is built **only** through the service's own surfaces and the published
 //! language it consumes: the suite never writes a row of the service. Its SQL
-//! is `SELECT`, on the app role — with one exception, the engine's own
+//! is on the app role, and `SELECT` — with one exception, the engine's own
 //! housekeeping: [`TestContext::expire_answers`] removes the stored answers of
 //! commands exactly as the engine's retention sweep does, which no scenario
 //! could otherwise wait for (the sweep keeps a claim at least as long as the
@@ -141,7 +141,8 @@ pub struct TestContext {
     /// Jobs' side of the title Job: every command Threads sends Jobs, captured
     /// from before the boot, and the facts the scenario answers with.
     pub jobs: jobs::Jobs,
-    /// The app role's pool: `SELECT` only.
+    /// The app role's pool: `SELECT`, and the engine's claim sweep
+    /// ([`TestContext::expire_answers`]).
     pub pool: PgPool,
     pub minio: infra::Minio,
     db: E2eDatabase,
@@ -438,25 +439,23 @@ impl TestContext {
     }
 
     /// The stored answers of `commands` expire: their idempotency claims are
-    /// deleted, as the engine's retention sweep deletes a claim older than the
-    /// message retention (`DELETE FROM service_engine.message_claim`). A
-    /// command received again afterwards is judged anew. The sweep runs on the
-    /// deployment's database-management role; so does this, on the owner.
+    /// deleted with the statement of the engine's retention sweep
+    /// (`HostedOutboxRelay` → `sweep_claims`, `DELETE FROM
+    /// service_engine.message_claim`), on the role it runs on — the service's
+    /// runtime pool, the app role — narrowed to the commands named instead of
+    /// to claims older than the retention. A command received again afterwards
+    /// is judged anew.
     pub async fn expire_answers(&self, commands: &[Uuid]) {
-        let owner = PgPool::connect(&self.db.owner_migration_url())
-            .await
-            .expect("connect the owner, the role the engine's housekeeping runs on");
         let swept =
             sqlx::query("DELETE FROM service_engine.message_claim WHERE message_id = ANY($1)")
                 .bind(commands)
-                .execute(&owner)
+                .execute(&self.pool)
                 .await
-                .expect("sweep the commands' claims");
+                .expect("sweep the commands' claims, as the app role");
         assert!(
             swept.rows_affected() >= commands.len() as u64,
             "every command named had a stored answer to expire"
         );
-        owner.close().await;
     }
 
     /// The duplicate window of `INTEGRATION_EVT` shortened to `window`: an
