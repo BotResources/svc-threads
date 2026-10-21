@@ -28,6 +28,15 @@ exists.
   service that reads Threads' refusals must move to 0.4.0 before it sends the
   new commands — and before Threads 0.4 can refuse its `message.store` or
   `message.delete` with `THREAD_RESOLVED`.
+- **Rolling upgrade.** While 0.3.1 and 0.4 pods run side by side, a 0.3.1 pod
+  knows no resolution: it may accept a `message.store` or `message.delete` on a
+  thread a 0.4 pod resolved. Nothing is corrupted (the resolution columns are
+  untouched and the message is stored or deleted as on an open thread); the
+  window closes when the last 0.3.1 pod is gone.
+- **NATS permissions.** The commanding services' publish permissions must allow
+  the three new command subjects: `integration.cmd.threads.message.edit.v1`,
+  `integration.cmd.threads.thread.resolve.v1` and
+  `integration.cmd.threads.thread.reopen.v1`.
 
 ### Changed
 
