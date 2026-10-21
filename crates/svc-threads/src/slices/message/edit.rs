@@ -180,6 +180,9 @@ mod tests {
             Some(ReasonCode::MessageNotEditable),
             "an AI message"
         );
+        // A user message is always COMPLETED (`message_user_input_is_complete`):
+        // a non-completed message is an AI one, refused already as such. The
+        // status check is defensive; these messages pin only that it agrees.
         for status in [
             MessageStatus::Streaming,
             MessageStatus::Failed,
