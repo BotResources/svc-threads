@@ -10,6 +10,8 @@
 //! - `stream`: the `message_content` accumulator of `STREAMING_threads`;
 //! - `transitions`: the guarded transition of each command, its facts;
 //! - `commands`: the reactions to the message commands, each answered once;
+//! - `edit`: a user message edited in place by its author — its decision and
+//!   its reaction;
 //! - `closing`: closing a sealed stream, shared by the close commands and the
 //!   watch;
 //! - `watch`: the stream watch (idle writer, refused stream);
@@ -24,8 +26,8 @@
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | message row (status, deleted) | store, complete, fail, cancel, delete, stream watch | resource, `message` noun, caused | Upsert; the open head repopulates on a new message (it enters the page, the oldest leaves) |
-//! | items, blocks | store (whole), close (folded content), delete (content gone) | resource, `message` noun | Upsert |
+//! | message row (status, deleted, edited at, version) | store, complete, fail, cancel, edit, delete, stream watch | resource, `message` noun, caused | Upsert; the open head repopulates on a new message (it enters the page, the oldest leaves) |
+//! | items, blocks | store (whole), close (folded content), edit (blocks replaced), delete (content gone) | resource, `message` noun | Upsert |
 //! | a streaming message's content | a chunk folded on any pod (lane A) | resource, `message_stream` noun, staged by the engine | Upsert of that message only, with the content so far; never a repopulation |
 //! | the thread's members | add/remove members, thread deleted | principal facts of each user added or removed, `MEMBERSHIP_DEPS` | the member's windows repopulated: Upsert / Remove |
 //! | a user author's name | directory mirror | foreign `threads.known_user`, inverted to the messages they wrote | Upsert |
@@ -42,6 +44,7 @@ pub mod commands;
 pub mod content;
 pub mod decision;
 pub mod draft;
+pub mod edit;
 pub mod graphql;
 pub mod state;
 pub mod store;
@@ -66,6 +69,7 @@ literal_enum! {
     pub enum MessageCause {
         Stored => "STORED",
         Closed => "CLOSED",
+        Edited => "EDITED",
         Deleted => "DELETED",
     }
 }
@@ -89,6 +93,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_reaction("threads-message-complete", commands::complete)?;
     engine.register_reaction("threads-message-fail", commands::fail)?;
     engine.register_reaction("threads-message-cancel", commands::cancel)?;
+    engine.register_reaction("threads-message-edit", edit::edit)?;
     engine.register_reaction("threads-message-delete", commands::delete)?;
     engine.register_reaction("threads-message-stream-watch", watch::due)?;
     engine.register_schema_slice(SliceFragment::derive::<

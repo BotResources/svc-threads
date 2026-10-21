@@ -285,6 +285,16 @@ impl Live {
         }
     }
 
+    /// Every delta that arrives over the quiet window, or until the stream
+    /// ends — an end is not a failure here.
+    pub async fn rest(&mut self) -> Vec<Value> {
+        let mut deltas = Vec::new();
+        while let Frame::Delta(frame) = self.read(QUIET_WINDOW).await {
+            deltas.push(frame[self.root].clone());
+        }
+        deltas
+    }
+
     /// Every delta that arrives over the quiet window.
     pub async fn drain(&mut self) -> Vec<Value> {
         let mut deltas = Vec::new();

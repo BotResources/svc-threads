@@ -7,6 +7,11 @@
 //! locked first (`THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`), then the message, then
 //! the artifacts it names — the one lock order of the service. A refusal writes
 //! nothing; a close that must refuse is judged before its seal.
+//!
+//! A resolved thread refuses the commands that would change its conversation —
+//! store, delete, and the edit of [`super::edit`] — with `THREAD_RESOLVED`
+//! ([`writable_thread`]); a message already `STREAMING` still completes, fails
+//! or cancels ([`open_thread`] alone).
 
 use contract_threads::llm::Author;
 use contract_threads::{
@@ -39,7 +44,7 @@ use crate::slices::thread::{ThreadCause, title_job};
 /// six seconds of ingestion lag.
 const SEAL_TRUNCATION_ATTEMPTS: u32 = 6;
 
-type Verdict = Result<MessageOutcome, Refusal>;
+pub(super) type Verdict = Result<MessageOutcome, Refusal>;
 
 fn thread_not_found() -> Refusal {
     Refusal::new(ReasonCode::ThreadNotFound)
@@ -49,7 +54,8 @@ fn message_not_found() -> Refusal {
     Refusal::new(ReasonCode::MessageNotFound)
 }
 
-/// The thread a message command names, loaded and locked, and `OPEN`.
+/// The thread a message command names, loaded and locked, and `OPEN`: what a
+/// close of a `STREAMING` message needs, resolved or not.
 async fn open_thread(
     cx: &mut Reaction<'_>,
     thread: Uuid,
@@ -63,8 +69,23 @@ async fn open_thread(
     Ok(Ok(thread))
 }
 
+/// The thread a command changing its conversation names — store, edit,
+/// delete — loaded and locked, `OPEN` and not resolved (`THREAD_RESOLVED`).
+pub(super) async fn writable_thread(
+    cx: &mut Reaction<'_>,
+    thread: Uuid,
+) -> Result<Result<ThreadState, Refusal>, Fault> {
+    Ok(match open_thread(cx, thread).await? {
+        Ok(thread) => match thread.resolved_refusal() {
+            Some(refusal) => Err(refusal),
+            None => Ok(thread),
+        },
+        Err(refusal) => Err(refusal),
+    })
+}
+
 /// The message a command names, loaded and locked, when it is one of `thread`'s.
-async fn message_of(
+pub(super) async fn message_of(
     cx: &mut Reaction<'_>,
     thread: Uuid,
     message: Uuid,
@@ -83,6 +104,7 @@ macro_rules! refuse_on {
         }
     };
 }
+pub(super) use refuse_on;
 
 // ── message.store ───────────────────────────────────────────────────────────
 
@@ -103,7 +125,7 @@ async fn store_message(
     call: &Call,
     command: &StoreMessage,
 ) -> Result<Verdict, Fault> {
-    let mut thread = refuse_on!(open_thread(cx, command.thread_id).await?);
+    let mut thread = refuse_on!(writable_thread(cx, command.thread_id).await?);
     refuse_on!(crate::command::minted("message_id", command.message_id));
     if cx
         .load::<MessageState>(&command.message_id)
@@ -181,7 +203,7 @@ async fn store_message(
         .chain(items.iter().flat_map(|item| item.blocks.iter()))
         .map(|block| block.id)
         .collect();
-    let held = store::held_block_ids(cx.connection(), &block_ids).await?;
+    let held = store::held_block_ids(cx.connection(), &block_ids, None).await?;
     if !held.is_empty() {
         return Ok(Err(
             Refusal::new(ReasonCode::KeyReused).with("block_ids", held)
@@ -397,7 +419,7 @@ async fn delete_message(
     call: &Call,
     command: &DeleteMessage,
 ) -> Result<Verdict, Fault> {
-    refuse_on!(open_thread(cx, command.thread_id).await?);
+    refuse_on!(writable_thread(cx, command.thread_id).await?);
     let mut state = refuse_on!(message_of(cx, command.thread_id, command.message_id).await?);
     let applied = refuse_on!(state.delete(command.acting_user_id, &call.meta)?);
     if applied == Applied::Changed {

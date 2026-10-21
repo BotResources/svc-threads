@@ -2,11 +2,17 @@
 //!
 //! > On thread T: user message M1, AI answer M2, user message M3 answering M2.
 //! > The harness regenerates M2 as AI message M2b with parent M1, then stores
-//! > M3b answering M2b. A member reads T's active branch: M1, M2b, M3b. Reading
-//! > the branch ending at M3 returns M1, M2, M3. An edit of M1 stored as M1b
-//! > without parent becomes the active branch's start once it is the most
-//! > recent; M1's branch stays readable. Pages of a long branch follow each
-//! > other with no gap and no duplicate.
+//! > M3b answering M2b: a member's live view switches branch (M2b enters, M2
+//! > and M3 leave it). A member reads T's active branch: M1, M2b, M3b, and a
+//! > runner's conversation follows it. Reading the branch ending at M3 returns
+//! > M1, M2, M3. A retry of M1 stored as M1b without parent, being the most
+//! > recent, starts and ends the active branch; M1's branch stays readable. A
+//! > branch of twelve messages read page by page, five at a time, each page
+//! > starting before the oldest message of the previous one: the pages follow
+//! > each other with no gap and no duplicate.
+//!
+//! A retry is a new message, a fork of M1: the in-place edit of a message is
+//! T19's.
 //!
 //! Channels: the branch reads (2) — the active one and a named one, page by
 //! page — and the runner's conversation, which follows the active branch.
@@ -90,7 +96,7 @@ async fn t10_the_active_branch_ends_at_the_most_recent_message_and_every_branch_
         "the runner reads M2b, not M2: {conversation:?}"
     );
 
-    // When M1 is edited: M1b, without parent, is the most recent.
+    // When M1 is retried: M1b, without parent, is the most recent.
     let m1b = say(&ctx, t, None, &a, "first question, rephrased").await;
 
     // Then the active branch starts — and ends — at M1b.

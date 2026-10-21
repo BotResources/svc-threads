@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.4.0 - 2026-10-20
+
+### Added
+
+- `EditMessage` (`message.edit`): `message_id`, `thread_id`, a required
+  `acting_user_id`, `expected_version` and the new `blocks`.
+- `ResolveThread` (`thread.resolve`, with a required `acting_user_id`, the
+  resolver) and `ReopenThread` (`thread.reopen`).
+- `ReasonCode` variants `THREAD_RESOLVED`, `THREAD_ALREADY_RESOLVED`,
+  `THREAD_NOT_RESOLVED`, `MESSAGE_NOT_EDITABLE`, `VERSION_CONFLICT` (its
+  refusal names `current_version` and `expected_version` in `params`).
+
+### Compatibility
+
+- `ReasonCode` is a closed enum: a consumer built on 0.3.x fails to decode a
+  `thread.refused` / `message.refused` carrying one of the new codes. Every
+  service that reads Threads' refusals must move to 0.4.0 before it sends the
+  new commands — and before Threads 0.4 can refuse its `message.store` or
+  `message.delete` with `THREAD_RESOLVED`.
+- **Rolling upgrade.** While 0.3.1 and 0.4 pods run side by side, a 0.3.1 pod
+  knows no resolution: it may accept a `message.store` or `message.delete` on a
+  thread a 0.4 pod resolved. Nothing is corrupted (the resolution columns are
+  untouched and the message is stored or deleted as on an open thread); the
+  window closes when the last 0.3.1 pod is gone.
+- **NATS permissions.** The commanding services' publish permissions must allow
+  the three new command subjects: `integration.cmd.threads.message.edit.v1`,
+  `integration.cmd.threads.thread.resolve.v1` and
+  `integration.cmd.threads.thread.reopen.v1`.
+
+### Changed
+
+- `ORIGIN_BLOCK_REQUIRED`, `ID_NOT_UUIDV7` and `RESOURCE_KEY_INVALID` are named
+  by the specification: their documentation loses the *proposed* mark. No
+  wire change.
+
 ## 0.3.1 - 2026-10-17
 
 - Dependency re-pin only. The contract is unchanged: coordinates, payload

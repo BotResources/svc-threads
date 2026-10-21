@@ -98,12 +98,13 @@ pub const Q_THREADS: &str = "query($size: Int!, $before: UUID) { \
         members { userId displayName inRoster } resources { key ids } } }";
 
 pub const Q_THREAD: &str = "query($id: UUID!) { threadsThread(id: $id) { \
-    id ownerId title parentThreadId originBlockId status createdAt lastActivityAt version \
-    readMark affordances members { userId displayName inRoster } resources { key ids } } }";
+    id ownerId title parentThreadId originBlockId status resolvedBy resolvedAt createdAt \
+    lastActivityAt version readMark affordances members { userId displayName inRoster } \
+    resources { key ids } } }";
 
 pub const Q_MESSAGES: &str = "query($thread: UUID!, $size: Int!, $before: UUID, $tip: UUID) { \
     threadsMessages(threadId: $thread, size: $size, before: $before, branchTip: $tip) { \
-        id threadId parentMessageId jobId status deleted createdAt version affordances \
+        id threadId parentMessageId jobId status deleted createdAt editedAt version affordances \
         author { kind userId aiId name } \
         blocks { id index kind content } \
         items { index kind status stopReason usage model blocks { id index kind content } } } }";
@@ -142,13 +143,13 @@ pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(si
 
 /// The fields of a message the suite reads, on every channel.
 pub const MESSAGE_FIELDS: &str = "id threadId parentMessageId jobId status deleted createdAt \
-    version affordances author { kind userId aiId name } \
+    editedAt version affordances author { kind userId aiId name } \
     blocks { id index kind content } \
     items { index kind status stopReason usage model blocks { id index kind content } }";
 
 /// The fields of a thread the suite reads on its live channels.
 pub const THREAD_FIELDS: &str = "id ownerId title parentThreadId originBlockId status \
-    lastActivityAt version readMark affordances members { userId displayName inRoster } \
+    resolvedBy resolvedAt lastActivityAt version readMark affordances members { userId displayName inRoster } \
     resources { key ids }";
 
 // ── timeouts ────────────────────────────────────────────────────────────────

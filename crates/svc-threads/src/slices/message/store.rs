@@ -62,12 +62,14 @@ impl Persistence for MessageStore {
     ) -> BoxFuture<'a, Result<(), EngineError>> {
         Box::pin(async move {
             sqlx::query(&format!(
-                "UPDATE {TABLE} SET status = $2, deleted = $3, version = $4 WHERE id = $1"
+                "UPDATE {TABLE} SET status = $2, deleted = $3, version = $4, edited_at = $5 \
+                 WHERE id = $1"
             ))
             .bind(message.id)
             .bind(message.status.as_str())
             .bind(message.deleted)
             .bind(message.version)
+            .bind(message.edited_at)
             .execute(&mut *conn)
             .await?;
             write_changes(conn, message, changes).await
@@ -245,20 +247,24 @@ async fn write_content(conn: &mut PgConnection, message: &MessageState) -> Resul
     Ok(())
 }
 
-/// Of `ids`, those some block already holds: a block id is used once.
+/// Of `ids`, those some block already holds: a block id is used once. The
+/// blocks of `except` do not count — an edit keeps its own message's ids.
 pub async fn held_block_ids(
     conn: &mut PgConnection,
     ids: &[Uuid],
+    except: Option<Uuid>,
 ) -> Result<Vec<Uuid>, EngineError> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(
-        sqlx::query_scalar("SELECT id FROM threads.message_block WHERE id = ANY($1)")
-            .bind(ids)
-            .fetch_all(conn)
-            .await?,
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM threads.message_block \
+         WHERE id = ANY($1) AND ($2::uuid IS NULL OR message_id <> $2)",
     )
+    .bind(ids)
+    .bind(except)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// The tool call ids already used on the branches through message `message`
@@ -413,7 +419,8 @@ async fn read_many(
 ) -> Result<Vec<(Uuid, MessageState)>, EngineError> {
     let rows = sqlx::query(&format!(
         "SELECT m.id, m.thread_id, m.parent_message_id, m.author_user_id, m.author_ai_id, \
-                m.author_ai_name, m.job_id, m.status, m.deleted, m.created_at, m.version, \
+                m.author_ai_name, m.job_id, m.status, m.deleted, m.created_at, m.edited_at, \
+                m.version, \
                 k.display_name, COALESCE(k.in_roster, false) AS in_roster \
          FROM {TABLE} m LEFT JOIN {KNOWN_USERS_TABLE} k ON k.user_id = m.author_user_id \
          WHERE m.id = ANY($1)"
@@ -483,6 +490,7 @@ fn message_of_row(row: &PgRow) -> Result<MessageState, EngineError> {
         status: MessageStatus::parse(&status).map_err(corrupt)?,
         deleted: row.try_get("deleted")?,
         created_at: row.try_get("created_at")?,
+        edited_at: row.try_get("edited_at")?,
         version: row.try_get("version")?,
         blocks: Vec::new(),
         items: Vec::new(),

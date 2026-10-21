@@ -35,8 +35,12 @@
 //! beside it ([`TestContext::spawn_pod`]) — the service is declared multi-pod.
 //!
 //! State is built **only** through the service's own surfaces and the published
-//! language it consumes: the suite never writes a row. Its only SQL is
-//! `SELECT`, on the app role.
+//! language it consumes: the suite never writes a row of the service. Its SQL
+//! is on the app role, and `SELECT` — with one exception, the engine's own
+//! housekeeping: [`TestContext::expire_answers`] removes the stored answers of
+//! commands exactly as the engine's retention sweep does, which no scenario
+//! could otherwise wait for (the sweep keeps a claim at least as long as the
+//! command stream retains its messages).
 
 #![allow(dead_code)] // each scenario file uses an overlapping, not identical, subset.
 
@@ -137,7 +141,8 @@ pub struct TestContext {
     /// Jobs' side of the title Job: every command Threads sends Jobs, captured
     /// from before the boot, and the facts the scenario answers with.
     pub jobs: jobs::Jobs,
-    /// The app role's pool: `SELECT` only.
+    /// The app role's pool: `SELECT`, and the engine's claim sweep
+    /// ([`TestContext::expire_answers`]).
     pub pool: PgPool,
     pub minio: infra::Minio,
     db: E2eDatabase,
@@ -431,6 +436,45 @@ impl TestContext {
                 );
             }
         }
+    }
+
+    /// The stored answers of `commands` expire: their idempotency claims are
+    /// deleted with the statement of the engine's retention sweep
+    /// (`HostedOutboxRelay` → `sweep_claims`, `DELETE FROM
+    /// service_engine.message_claim`), on the role it runs on — the service's
+    /// runtime pool, the app role — narrowed to the commands named instead of
+    /// to claims older than the retention. A command received again afterwards
+    /// is judged anew.
+    pub async fn expire_answers(&self, commands: &[Uuid]) {
+        let swept =
+            sqlx::query("DELETE FROM service_engine.message_claim WHERE message_id = ANY($1)")
+                .bind(commands)
+                .execute(&self.pool)
+                .await
+                .expect("sweep the commands' claims, as the app role");
+        assert!(
+            swept.rows_affected() >= commands.len() as u64,
+            "every command named had a stored answer to expire"
+        );
+    }
+
+    /// The duplicate window of `INTEGRATION_EVT` shortened to `window`: an
+    /// answer the engine publishes again under its first event id is then
+    /// stored again by the broker once the window has passed, and a capture
+    /// sees it — within the window the broker drops it as a duplicate.
+    pub async fn shorten_event_duplicate_window(&self, window: Duration) {
+        infra::nats_cli(
+            &self.nats.url(),
+            &[
+                "stream",
+                "edit",
+                br_util_nats_fabric::INTEGRATION_EVT,
+                "--dupe-window",
+                &format!("{}s", window.as_secs().max(1)),
+                "--force",
+            ],
+        )
+        .await;
     }
 
     /// The first pod's readiness endpoint, for the conformance battery.

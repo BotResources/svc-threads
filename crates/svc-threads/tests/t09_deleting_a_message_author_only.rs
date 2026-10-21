@@ -1,22 +1,17 @@
 //! **T09 — Deleting a message: author only, the node stays.**
 //!
-//! > M1, by user A, has two answers M2 and M2b (a fork). The harness sends
-//! > message.delete for M1 with acting user B, also a member: refused
-//! > NOT_THE_AUTHOR, nothing changes. With acting user A: confirmed; M1 reads
-//! > as deleted with no content, M2 and M2b stay readable under it, and a
-//! > subscriber is told once. An artifact attached to a deleted AI message is
-//! > removed with its bytes and its read access fails. No fact, before or
-//! > after, carries M1's text. Deleting M1 again is confirmed and changes
-//! > nothing. Deleting an unknown message is refused MESSAGE_NOT_FOUND. A
-//! > runner's context no longer contains M1.
-//!
-//! The gesture's "artifact attached to a deleted AI message" cannot be reached:
-//! the specification says "An AI message is never deleted: it is regenerated",
-//! and a deletion whose acting user is not the author is refused
-//! NOT_THE_AUTHOR. This scenario asserts that refusal — the AI message and its
-//! artifact stay — and leaves the gap to the operator (an artifact's removal
-//! with its bytes is asserted where it is reachable: T17, the thread's
-//! deletion).
+//! > M1, by user A, has two answers M2 (an AI message carrying an attached
+//! > artifact X) and M2b, a fork. The harness sends message.delete for M1 with
+//! > acting user B, also a member: refused NOT_THE_AUTHOR, nothing changes.
+//! > With acting user A: confirmed; M1 reads as deleted with no content, still
+//! > in the tree, M2 and M2b stay readable under it, and a member following T
+//! > is told once. A Deleted fact records it; no fact, before or after, carries
+//! > M1's text, and no block of M1 is left in the store. A runner's context no
+//! > longer contains M1. Deleting M1 again is confirmed and changes nothing.
+//! > Deleting an unknown message is refused MESSAGE_NOT_FOUND. Deleting M2, the
+//! > AI's message, with acting user A is refused NOT_THE_AUTHOR: an AI message
+//! > is never deleted, it is regenerated; M2 and its artifact X stay, X's read
+//! > access still returns its bytes (an artifact goes with its thread — T17).
 //!
 //! Channels: the answers (4), the messages as members read them (2), B's live
 //! feed (3), the fact log, a runner's context, the artifact's read access.

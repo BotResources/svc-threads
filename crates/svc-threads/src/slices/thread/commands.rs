@@ -1,6 +1,6 @@
 //! The thread commands, one reaction each: `integration.cmd.threads.thread.
 //! {create, add_members, remove_members, add_resource_ids, remove_resource_ids,
-//! set_title, close, delete}.v1`.
+//! set_title, close, resolve, reopen, delete}.v1`.
 //!
 //! Each reaction loads and locks what the command names, calls the command's
 //! transition, writes only what the transition changed, stages the impacts of
@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use contract_threads::{
     AddMembers, AddResourceIds, CloseThread, CreateThread, DeleteThread, ReasonCode, RemoveMembers,
-    RemoveResourceIds, SetTitle,
+    RemoveResourceIds, ReopenThread, ResolveThread, SetTitle,
 };
 use futures_util::future::BoxFuture;
 use service_engine::pipeline::{Ops, Reaction};
@@ -219,6 +219,30 @@ pub fn close<'r>(
         on_thread!(cx, command, |thread, call| {
             let verdict = thread.close(command.status, &call.meta)?;
             Ok((verdict, ThreadCause::Closed, Vec::new()))
+        })
+    })
+}
+
+pub fn resolve<'r>(
+    cx: &'r mut Reaction<'r>,
+    Inbound(command): Inbound<ResolveThread>,
+) -> BoxFuture<'r, Result<(), Fault>> {
+    Box::pin(async move {
+        on_thread!(cx, command, |thread, call| {
+            let verdict = thread.resolve(command.acting_user_id, &call.meta)?;
+            Ok((verdict, ThreadCause::Resolved, Vec::new()))
+        })
+    })
+}
+
+pub fn reopen<'r>(
+    cx: &'r mut Reaction<'r>,
+    Inbound(command): Inbound<ReopenThread>,
+) -> BoxFuture<'r, Result<(), Fault>> {
+    Box::pin(async move {
+        on_thread!(cx, command, |thread, call| {
+            let verdict = thread.reopen(&call.meta)?;
+            Ok((verdict, ThreadCause::Reopened, Vec::new()))
         })
     })
 }

@@ -29,8 +29,8 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use super::state::{
-    MEMBER_DIM, Member, ThreadChange, ThreadOrigin, ThreadState, TitleJob, TitleJobState,
-    UnknownStoredValue,
+    MEMBER_DIM, Member, Resolution, ThreadChange, ThreadOrigin, ThreadState, TitleJob,
+    TitleJobState, UnknownStoredValue,
 };
 use crate::directory::KNOWN_USERS_TABLE;
 use crate::facts::{self, FactNoun};
@@ -38,7 +38,8 @@ use crate::fault::corrupt;
 
 pub const TABLE: &str = "threads.thread";
 const COLUMNS: &str = "t.id, t.owner_id, t.title, t.parent_thread_id, t.origin_block_id, \
-                       t.status, t.created_at, t.last_activity_at, t.version, \
+                       t.status, t.resolved_by, t.resolved_at, t.created_at, \
+                       t.last_activity_at, t.version, \
                        j.job_id AS title_job_id, j.state AS title_job_state, \
                        j.created_at AS title_job_created_at, j.ended_at AS title_job_ended_at";
 
@@ -72,7 +73,8 @@ impl Persistence for ThreadStore {
     ) -> BoxFuture<'a, Result<(), EngineError>> {
         Box::pin(async move {
             sqlx::query(&format!(
-                "UPDATE {TABLE} SET title = $2, status = $3, last_activity_at = $4, version = $5 \
+                "UPDATE {TABLE} SET title = $2, status = $3, last_activity_at = $4, version = $5, \
+                     resolved_by = $6, resolved_at = $7 \
                  WHERE id = $1"
             ))
             .bind(thread.id)
@@ -80,6 +82,8 @@ impl Persistence for ThreadStore {
             .bind(thread.status.as_str())
             .bind(thread.last_activity_at)
             .bind(thread.version)
+            .bind(thread.resolution.map(|resolution| resolution.by))
+            .bind(thread.resolution.map(|resolution| resolution.at))
             .execute(&mut *conn)
             .await?;
             write_title_job(conn, thread).await?;
@@ -389,6 +393,18 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
         }),
         _ => None,
     };
+    let resolved_by: Option<Uuid> = row.try_get("resolved_by")?;
+    let resolved_at: Option<DateTime<Utc>> = row.try_get("resolved_at")?;
+    let resolution = match (resolved_by, resolved_at) {
+        (Some(by), Some(at)) => Some(Resolution { by, at }),
+        (None, None) => None,
+        _ => {
+            return Err(corrupt(UnknownStoredValue {
+                column: "thread.resolved_at",
+                value: "set without its resolver, or the reverse".to_owned(),
+            }));
+        }
+    };
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     Ok(ThreadState {
         id: row.try_get("id")?,
@@ -396,6 +412,7 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
         title: title.map(ThreadTitle::parse).transpose().map_err(corrupt)?,
         origin,
         status: ThreadStatus::parse(&status).map_err(corrupt)?,
+        resolution,
         created_at,
         last_activity_at: row.try_get("last_activity_at")?,
         version: row.try_get("version")?,

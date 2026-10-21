@@ -66,6 +66,15 @@ pub struct ThreadOrigin {
     pub block_id: Uuid,
 }
 
+/// The resolution of a thread whose discussion is settled: who resolved it and
+/// when. Set together by a resolution, cleared together by a reopening. It is
+/// not a status — a resolved thread is still `OPEN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolution {
+    pub by: Uuid,
+    pub at: DateTime<Utc>,
+}
+
 /// A member, with what the roster copy holds for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
@@ -168,6 +177,9 @@ pub struct ThreadState {
     pub title: Option<ThreadTitle>,
     pub origin: Option<ThreadOrigin>,
     pub status: ThreadStatus,
+    /// Set while the thread is resolved: it then accepts no new message, edit
+    /// or deletion.
+    pub resolution: Option<Resolution>,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub version: i64,
@@ -227,6 +239,7 @@ pub(crate) mod tests {
             title: None,
             origin: None,
             status: ThreadStatus::Open,
+            resolution: None,
             created_at: now,
             last_activity_at: now,
             version: 1,

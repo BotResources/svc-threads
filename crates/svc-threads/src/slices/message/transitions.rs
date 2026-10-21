@@ -22,6 +22,7 @@ pub const ITEM_ADDED: &str = "ItemAdded";
 pub const COMPLETED: &str = "Completed";
 pub const FAILED: &str = "Failed";
 pub const CANCELLED: &str = "Cancelled";
+pub const EDITED: &str = "Edited";
 pub const DELETED: &str = "Deleted";
 
 #[derive(Serialize)]
@@ -33,7 +34,7 @@ struct AuthorShape<'a> {
 }
 
 #[derive(Serialize)]
-struct BlockShape {
+pub(super) struct BlockShape {
     index: i32,
     kind: &'static str,
 }
@@ -64,7 +65,8 @@ struct ClosedFact<'a> {
 #[derive(Serialize)]
 struct NoPayload {}
 
-fn shapes(blocks: &[StoredBlock]) -> Vec<BlockShape> {
+/// The kinds and positions of blocks — what a fact may say of content.
+pub(super) fn shapes(blocks: &[StoredBlock]) -> Vec<BlockShape> {
     blocks
         .iter()
         .map(|block| BlockShape {
@@ -140,6 +142,7 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
         status: new.status,
         deleted: false,
         created_at: new.created_at,
+        edited_at: None,
         version: 1,
         blocks: new.blocks,
         items: new.items,
