@@ -130,7 +130,7 @@ jobs:
     # public repos by design), but inside the org runner image so the job
     # gets the same baked toolchain as arc-ubuntu, Zig included.
     container:
-      image: ghcr.io/botresources/br-arc-runner:stable
+      image: ghcr.io/botresources/br-arc-runner:latest
       # root: the image's `runner` user is in docker gid 123, the hosted VM's
       # /var/run/docker.sock is gid 118 — as `runner`, every docker call is
       # "permission denied". The VM is discarded after the job, so running
