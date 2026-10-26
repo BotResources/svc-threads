@@ -1,0 +1,19 @@
+# The binary is pre-compiled outside Docker (by scripts/publish.sh), so the
+# target/ directory must be available in the build context. Migrations are
+# embedded in the binary at compile time, so nothing but the binary is copied.
+
+.git/
+.env
+README.md
+LICENSE
+CHANGELOG.md
+.gitignore
+.dockerignore
+.github/
+.cargo/
+charts/
+crates/
+scripts/
+Cargo.lock
+Cargo.toml
+deny.toml

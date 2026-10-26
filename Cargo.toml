@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = ["crates/contract-threads", "crates/svc-threads"]
+
+# `version` is deliberately not inherited: each crate is its own release
+# decision. `svc-threads` ships as an image tagged `svc-threads/v{version}`;
+# `contract-threads` is released by its tag `contract-threads/v{version}`
+# alone (consumers pull it as a git dependency). See `.github/workflows/cd.yml`.
+[workspace.package]
+edition = "2024"
+# The floor of what the service is built on: br-service-engine v0.4.2 and
+# br-llm-messages v0.5.0 declare 1.89, contract-jobs v0.5.1 (the title Job's
+# published language) 1.94. CI builds on stable.
+rust-version = "1.94"
+license = "Apache-2.0"
+repository = "https://github.com/BotResources/svc-threads"
+publish = false
+
+[workspace.dependencies]
+contract-threads = { path = "crates/contract-threads", version = "0.4.0" }
+
+# The conversation model Threads stores messages in (schema `br-llm-messages/3`).
+br-llm-messages = { git = "https://github.com/BotResources/br-llm-messages-rs", package = "br-llm-messages", tag = "br-llm-messages/v0.5.0", version = "0.5.0" }
+
+# The engine and the per-crate `br-rust-common` tags it pins (engine README's
+# table: v0.4.2 ↔ `{crate}/v0.1.0`). Cargo keys a git source on its reference,
+# so every `br-core-*` crate is pinned by the same tag as the engine's, or the
+# Passport, the envelope and the coordinates would exist twice in the graph.
+service-engine = { git = "https://github.com/BotResources/br-service-engine", package = "service-engine", tag = "br-service-engine/v0.4.2", version = "0.4.2" }
+br-core-auth = { git = "https://github.com/BotResources/br-rust-common", package = "br-core-auth", tag = "br-core-auth/v0.1.0", version = "0.1.0" }
+br-core-directory = { git = "https://github.com/BotResources/br-rust-common", package = "br-core-directory", tag = "br-core-directory/v0.1.0", version = "0.1.0" }
+br-core-integration = { git = "https://github.com/BotResources/br-rust-common", package = "br-core-integration", tag = "br-core-integration/v0.1.0", version = "0.1.0" }
+br-core-scope = { git = "https://github.com/BotResources/br-rust-common", package = "br-core-scope", tag = "br-core-scope/v0.1.0", version = "0.1.0" }
+br-scope-declaration-contract = { git = "https://github.com/BotResources/br-rust-common", package = "br-scope-declaration-contract", tag = "br-scope-declaration-contract/v0.1.0", version = "0.1.0" }
+br-util-nats-fabric = { git = "https://github.com/BotResources/br-rust-common", package = "br-util-nats-fabric", tag = "br-util-nats-fabric/v0.1.0", version = "0.1.0" }
+
+# The published language of Jobs: the title Job Threads creates, finishes,
+# fails and cancels, and the events it reacts to.
+contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.1", version = "0.5.1", features = ["integration"] }
+
+# The e2e harness and its conformance crates, on per-crate `br-rust-common` tags.
+br-test-harness = { git = "https://github.com/BotResources/br-e2e-harness", package = "br-test-harness", tag = "br-test-harness/v0.1.0", version = "0.1.0", default-features = false }
+conformance-scope = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-scope", tag = "conformance-scope/v0.1.0", version = "0.1.0" }
+
+async-graphql = { version = "=7.0.19", features = ["uuid", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+sqlx = { version = "0.8", features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring-webpki",
+    "uuid",
+    "chrono",
+    "json",
+    "macros",
+    "migrate",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v7", "serde"] }

@@ -1,0 +1,8 @@
+# cargo audit's own configuration (the `cargo audit (RustSec)` CI job reads it).
+# Every ignore mirrors deny.toml's `[advisories] ignore`, with its reason there.
+[advisories]
+ignore = [
+    # rsa via sqlx-macros-core → sqlx-mysql: lockfile-only, never compiled (the
+    # workspace enables the postgres backend alone). See deny.toml.
+    "RUSTSEC-2023-0071",
+]
