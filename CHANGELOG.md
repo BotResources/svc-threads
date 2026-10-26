@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## Unreleased
+
+### Security
+
+- `Cargo.lock` only: `ctutils` 0.4.3 → 0.4.6 (RUSTSEC-2026-0385, non-constant-time
+  mask generation and `u128` comparisons), which failed `cargo audit` and
+  `cargo deny` on every PR. No code, contract or version change: the fix ships
+  with the next release.
+
 ## 0.4.0 - 2026-10-20
 
 Threads 0.4 (registry patch 0.4.0): a user message is edited in place by its
