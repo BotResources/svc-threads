@@ -14,7 +14,7 @@ content }`.
 
 ## `contract-threads` 0.5.0
 
-- `pub use br_llm_messages as llm;` re-exports **br-llm-messages 2.0.0**. The
+- `pub use br_llm_messages as llm;` re-exports **br-llm-messages 2.1.0**. The
   suite builds every library value with the library's own constructors and
   serializes it with the library's `Serialize`.
 - `LibraryJson`, the library's JSON carried as is (`#[serde(transparent)]`

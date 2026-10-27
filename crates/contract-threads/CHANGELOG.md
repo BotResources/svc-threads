@@ -12,13 +12,17 @@ exists.
 ## 0.5.0 - 2026-10-27
 
 The published language of Threads 0.5 (registry patch 0.5.0): a message is a
-turn of the `br-llm-messages` 2.0 model (schema `br-llm-messages/5`).
+turn of the `br-llm-messages` 2.1 model (schema `br-llm-messages/5`).
 
 ### Added
 
-- `llm` re-exports **br-llm-messages 2.0.0** (was 0.5.0): commanders build
+- `llm` re-exports **br-llm-messages 2.1.0** (was 0.5.0): commanders build
   turns, entries, blocks and response deltas with the exact library version
-  Threads judges them by.
+  Threads judges them by. 2.1 is additive over 2.0, but a 2.0 reader refuses
+  what only 2.1 accepts (a `runtime_notice` entry, an order of entries 2.0
+  refused, results after a closure for a call it left outstanding, a tool name
+  over 64 characters): a commander writes those once the Threads it talks to
+  reads 2.1. The refusal vocabulary is unchanged: 2.1 adds no error code.
 - `LibraryJson`: the library's JSON carried as is and judged by Threads
   (`to_turn`, `to_entry`, `to_plain_block`, `to_delta`): a command or a chunk
   whose library part the library refuses still decodes, and is answered.

@@ -57,6 +57,9 @@ CREATE INDEX message_to_convert_idx ON threads.message (id)
 -- and record state as the library's literals, its sender and author columns,
 -- its observed time and its payload) at its position in the turn. A response
 -- interrupted when its message closed is kept `interrupted`, for members only.
+-- `kind` admits every entry kind of the library (br-llm-messages 2.1,
+-- `TurnEntryKind::ALL`, `runtime_notice` included); a unit test of the message
+-- slice holds the list to the library's.
 CREATE TABLE threads.message_entry (
     id          uuid    PRIMARY KEY,
     message_id  uuid    NOT NULL REFERENCES threads.message (id) ON DELETE CASCADE,
@@ -64,7 +67,8 @@ CREATE TABLE threads.message_entry (
     kind        text    NOT NULL CHECK (kind IN (
                     'human_message', 'agent_request', 'agent_mail', 'request_accepted',
                     'queue_position', 'task_started', 'task_completed', 'task_failed',
-                    'model_response', 'runtime_tool_results', 'turn_closure')),
+                    'runtime_notice', 'model_response', 'runtime_tool_results',
+                    'turn_closure')),
     state       text    NOT NULL CHECK (state IN ('producing', 'complete', 'interrupted')),
     sender_kind text    CHECK (sender_kind IN ('human', 'agent')),
     sender_id   uuid,

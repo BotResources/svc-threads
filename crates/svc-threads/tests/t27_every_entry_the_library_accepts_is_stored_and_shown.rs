@@ -20,8 +20,10 @@
 //! and checks every kind of that list is read back. A library bump that adds a
 //! kind turns this scenario red until a message holding it is stored here.
 //! Beside the gesture's turns, a fourth AI turn of a1 holds what the gesture's
-//! do not — a request accepted, a task that failed, a runtime tool call and its
-//! results — and A's opening question is the human message.
+//! do not — a request accepted, a task that failed, a runtime tool call, a
+//! runtime notice while the call waits for its results (an order the library
+//! accepts since 2.1), then the results — a fifth message is an input turn
+//! holding a runtime notice, and A's opening question is the human message.
 //!
 //! T is created with a title, so that no title Job is in play: any Job, any
 //! command to Jobs, would come of these messages. Threads commands nothing but
@@ -40,7 +42,8 @@ use std::collections::BTreeSet;
 use common::content::{
     ai_turn, assert_same_turn, call, calling, closed, closure, closure_kind, conversation_id,
     human, input_turn, kinds_of, mail, queue_position, reply, request, request_accepted, result_of,
-    results, task, task_completed, task_failed, task_started, text, to_json, turn_of, turn_refusal,
+    results, runtime_notice, task, task_completed, task_failed, task_started, text, to_json,
+    turn_of, turn_refusal,
 };
 use common::facts;
 use common::feed::{Live, upsert_of};
@@ -135,8 +138,8 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     )
     .await;
     // And an AI turn of a1 holding the kinds the others do not: a request
-    // accepted, a task started then failed, a runtime tool call and its
-    // results, an answer and its closure.
+    // accepted, a task started then failed, a runtime tool call, a runtime
+    // notice while the call waits, its results, an answer and its closure.
     let failing = task();
     let lookup = call("search", serde_json::json!({ "q": "sources" }));
     let m4 = Uuid::now_v7();
@@ -150,6 +153,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
                     task_started(failing),
                     task_failed(failing, "the source was unreachable"),
                     calling(&[&lookup]),
+                    runtime_notice("the search is slow to answer"),
                     results(vec![result_of(&lookup, "two sources", false)]),
                 ],
                 reply("Done with what was reachable."),
@@ -163,11 +167,23 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
         MessageStatus::Completed,
     )
     .await;
+    // And an input turn holding a runtime notice.
+    let m5 = Uuid::now_v7();
+    let notice_turn = Turn::from(input_turn(
+        m5,
+        vec![runtime_notice("the analyst resumes after a restart")],
+    ));
+    store(
+        &ctx,
+        whole_message(t, Some(m4), m5, &analyst, &notice_turn, Vec::new()),
+        MessageStatus::Completed,
+    )
+    .await;
 
     // Then (3) A's feed receives each of them.
     pushed_all(
         &mut a_feed,
-        &[m1, m2, m3, m4],
+        &[m1, m2, m3, m4, m5],
         "each stored message reaches A",
     )
     .await;
@@ -196,11 +212,13 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
                 "task_started",
                 "task_failed",
                 "model_response",
+                "runtime_notice",
                 "runtime_tool_results",
                 "model_response",
                 "turn_closure",
             ],
         ),
+        (m5, &notice_turn, vec!["runtime_notice"]),
     ] {
         let view = message_view(&ctx, &a.passport, t, message).await;
         assert_eq!(kinds_of(&view), kinds, "{view}");
@@ -210,7 +228,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     // And every kind the library lists is among what members read: A's
     // question holds the human message.
     let mut read = BTreeSet::new();
-    for message in [m0, m1, m2, m3, m4] {
+    for message in [m0, m1, m2, m3, m4, m5] {
         read.extend(kinds_of(&message_view(&ctx, &a.passport, t, message).await));
     }
     for kind in TurnEntryKind::ALL {
@@ -228,6 +246,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
         request_turn.clone(),
         queued_turn.clone(),
         a1_second_turn.clone(),
+        notice_turn.clone(),
     ]);
     assert_eq!(
         conversation,
@@ -262,7 +281,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     let code = turn_refusal(&orphan_turn).expect("the library refuses that order");
     let refused = command(
         &ctx,
-        &raw_whole_message(t, Some(m4), orphan, &analyst, orphan_turn, Vec::new()),
+        &raw_whole_message(t, Some(m5), orphan, &analyst, orphan_turn, Vec::new()),
     )
     .await;
 
@@ -290,7 +309,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     let refused = command(
         &ctx,
-        &whole_message(t, Some(m4), posing, &analyst, &posing_turn, Vec::new()),
+        &whole_message(t, Some(m5), posing, &analyst, &posing_turn, Vec::new()),
     )
     .await;
     // Then refused MESSAGE_INVALID (human_message_in_ai_message), and nothing
@@ -311,12 +330,12 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     a_feed.silence("a refused message reaches no one").await;
     assert_eq!(
         active_branch(&ctx, &a.passport, t).await,
-        vec![m0, m1, m2, m3, m4]
+        vec![m0, m1, m2, m3, m4, m5]
     );
 
     // When whole AI turns closed otherwise than completed are stored:
     // budget_exhausted, cancelled, failed, interrupted.
-    let mut parent = m4;
+    let mut parent = m5;
     let mut closed_otherwise = Vec::new();
     for (reason, status, read_as) in [
         (

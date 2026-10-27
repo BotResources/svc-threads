@@ -1,7 +1,7 @@
 //! The vocabulary of a `MESSAGE_INVALID` refusal's `error` param, and of the
 //! reason a stream failed: why Threads refused a message's content.
 //!
-//! Most codes are the conversation model's own (`br-llm-messages` 2.0
+//! Most codes are the conversation model's own (`br-llm-messages` 2.1
 //! [`ErrorCode`]), published under the library's name: the refusal then also
 //! names the library's `object_id` and `location` when the library gives them.
 //! The others are Threads' rules on a message (a user message holding an
@@ -16,7 +16,7 @@ wire_enum! {
     /// library: a consumer matching it keeps a fallback arm.
     #[non_exhaustive]
     pub enum MessageInvalidError {
-        // ── the conversation model's refusals (br-llm-messages 2.0) ─────────
+        // ── the conversation model's refusals (br-llm-messages 2.1) ─────────
         InvalidIdentity => "invalid_identity",
         ReusedIdentity => "reused_identity",
         InvalidAuthor => "invalid_author",
@@ -114,14 +114,14 @@ impl MessageInvalidError {
 mod tests {
     use super::*;
 
-    /// Every error code of `br-llm-messages` v2.0.0 is published under the
+    /// Every error code of `br-llm-messages` v2.1.0 is published under the
     /// library's own name: the table is the contract.
     #[test]
     fn every_code_of_the_library_is_published_under_its_own_name() {
         assert_eq!(
             ErrorCode::ALL.len(),
             19,
-            "the 19 codes of br-llm-messages v2.0.0"
+            "the 19 codes of br-llm-messages v2.1.0 (2.1 adds none)"
         );
         let mut codes = std::collections::BTreeSet::new();
         for code in ErrorCode::ALL {

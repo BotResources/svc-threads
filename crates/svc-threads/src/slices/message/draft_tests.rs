@@ -1,7 +1,7 @@
 use contract_threads::llm::{
     BlockStart, ClosureReason, ContentBlock, DeltaOp, Finalization, HumanId, HumanMessage,
-    PlainBlock, ResponseEnding, ResponseMetadata, RuntimeToolResult, RuntimeToolResults, TextBlock,
-    ToolName, TurnEntry,
+    PlainBlock, ResponseEnding, ResponseMetadata, RuntimeNotice, RuntimeToolResult,
+    RuntimeToolResults, TextBlock, ToolName, TurnEntry,
 };
 use contract_threads::{Annotation, AnnotationBody, ArtifactRef, LibraryJson};
 
@@ -184,6 +184,33 @@ fn a_tool_call_answered_by_a_whole_results_entry_then_an_answer_completes() {
         kinds(&closed.content),
         [
             ("model_response", "complete"),
+            ("runtime_tool_results", "complete"),
+            ("model_response", "complete"),
+            ("turn_closure", "complete")
+        ]
+    );
+}
+
+/// The library's 2.1 order: an incoming entry at any point of an open turn —
+/// here a runtime notice while a call waits for its results, which 2.0
+/// refused `entry_out_of_order`.
+#[test]
+fn a_runtime_notice_while_a_call_is_outstanding_folds_and_the_turn_completes() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    let notice = RuntimeNotice::new(EntryId::from_uuid(v7()).unwrap(), "the search is slow")
+        .unwrap();
+    writer.entry(notice.into());
+    writer.results(call);
+    writer.text_response(&["done"], Some(ResponseEnding::finished()));
+    assert_eq!(writer.draft.refusal(), None);
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Completed);
+    assert_eq!(
+        kinds(&closed.content),
+        [
+            ("model_response", "complete"),
+            ("runtime_notice", "complete"),
             ("runtime_tool_results", "complete"),
             ("model_response", "complete"),
             ("turn_closure", "complete")

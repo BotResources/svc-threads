@@ -935,6 +935,83 @@ mod tests {
         }
     }
 
+    /// The library's 2.1 turn rules: after a closure, the results of a call
+    /// the closure left outstanding; a tool name of 256 characters.
+    #[test]
+    fn a_whole_ai_turn_holding_results_after_its_closure_is_stored_under_its_closure() {
+        use contract_threads::llm::{
+            OpaqueJson, RecordSet, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults,
+            ToolName,
+        };
+
+        let message = v7();
+        let agent = AgentId::from_uuid(v7()).unwrap();
+        let name = ToolName::new("t".repeat(256)).unwrap();
+        let call = RuntimeToolCall::new(
+            BlockId::from_uuid(v7()).unwrap(),
+            name.clone(),
+            OpaqueJson::from_serialize(&serde_json::json!({ "q": "late" })).unwrap(),
+        )
+        .unwrap();
+        let mut ai = AITurn::open(
+            TurnId::from_uuid(message).unwrap(),
+            agent,
+            Author::new("Analyst").unwrap(),
+        );
+        for entry in [
+            ModelResponse::new(
+                EntryId::from_uuid(v7()).unwrap(),
+                vec![ContentBlock::from(call.clone())],
+                ResponseEnding::tool_use(),
+                ResponseMetadata::new(),
+            )
+            .unwrap()
+            .into(),
+            draft::closure_entry(v7(), ClosureReason::cancelled()).unwrap(),
+            RuntimeToolResults::new(
+                EntryId::from_uuid(v7()).unwrap(),
+                vec![
+                    RuntimeToolResult::new(
+                        BlockId::from_uuid(v7()).unwrap(),
+                        call.id(),
+                        name.clone(),
+                        false,
+                        vec![PlainBlock::try_from(text("found, too late")).unwrap()],
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap()
+            .into(),
+        ] {
+            ai.push_entry(entry).unwrap();
+        }
+        let turn = Turn::AITurn(ai);
+        let stored = MessageTurn::Ai(AiTurn {
+            agent_id: agent.as_uuid(),
+            author_name: "Analyst".into(),
+            delivery: AiDelivery::Completed {
+                turn: LibraryJson::of(&turn).unwrap(),
+                annotations: Vec::new(),
+            },
+        });
+
+        let judged = judge(message, &stored).unwrap();
+        assert_eq!(judged.status, MessageStatus::Cancelled);
+        let kinds: Vec<_> = judged.content.entries.iter().map(|e| e.kind()).collect();
+        assert_eq!(
+            kinds,
+            [
+                TurnEntryKind::ModelResponse,
+                TurnEntryKind::TurnClosure,
+                TurnEntryKind::RuntimeToolResults
+            ]
+        );
+        // What members read and a runner receives is rebuilt from these rows.
+        let record = RecordSet::from_turn(&turn).unwrap().turns()[0].clone();
+        assert_eq!(judged.content.to_turn(record).unwrap(), turn);
+    }
+
     fn input_turn_of_an_ai(message: Uuid, entry: TurnEntry) -> MessageTurn {
         let incoming = IncomingEntry::try_from(entry).unwrap();
         let turn: Turn = InputTurn::new(TurnId::from_uuid(message).unwrap(), vec![incoming])

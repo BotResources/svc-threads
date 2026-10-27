@@ -179,6 +179,12 @@ impl TurnDraft {
                     .to_entry()
                     .map_err(|error| StreamRefusal::library(&error))?;
                 let id = Some(entry.id().as_uuid());
+                // Threads' rule, not the library's (2.1 orders entries
+                // freely): one response is produced at a time and nothing
+                // joins the turn meanwhile, so the items' arrival order is the
+                // turn's entry order, which `Judged::content` relies on. A
+                // writer still reaches every order the library accepts by
+                // pushing the entry before or after the response.
                 if self.producing.is_some() {
                     return Err(StreamRefusal::threads(
                         MessageInvalidError::ResponseStillProducing,
@@ -585,10 +591,10 @@ pub fn close(mut judged: Judged, kind: CloseKind) -> Result<Closed, EngineError>
         (_, Some(code)) => failed(code)?,
         (CloseKind::Complete, None) if was_producing => failed(reason::RESPONSE_STILL_PRODUCING)?,
         (CloseKind::Complete, None) => {
-            let mut trial = judged.turn.clone();
-            match trial.push_entry(closure_entry(closure_id, ClosureReason::completed())?) {
-                Ok(()) => (MessageStatus::Completed, ClosureReason::completed(), None),
-                Err(error) => failed(MessageInvalidError::of_library(error.code()).as_str())?,
+            let completed = closure_entry(closure_id, ClosureReason::completed())?;
+            match judged.turn.would_refuse(&completed) {
+                None => (MessageStatus::Completed, ClosureReason::completed(), None),
+                Some(error) => failed(MessageInvalidError::of_library(error.code()).as_str())?,
             }
         }
     };

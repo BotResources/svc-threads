@@ -811,4 +811,23 @@ mod tests {
         assert_eq!(annotation_body("ERROR", content).unwrap(), body);
         assert!(annotation_body("error", serde_json::json!({})).is_err());
     }
+
+    /// `insert_entries` writes the library's kind literal: the column's CHECK
+    /// admits exactly the library's kinds, or a kind a library bump adds is
+    /// refused by Postgres at the first insert.
+    #[test]
+    fn the_entry_kind_column_admits_every_kind_of_the_library() {
+        let migration = include_str!("../../../migrations/9800000005_llm_messages_2_records.sql");
+        let table = &migration[migration
+            .find("CREATE TABLE threads.message_entry")
+            .expect("the entry table")..];
+        let check = &table[table.find("CHECK (kind IN (").expect("the kind CHECK")..];
+        let check = &check[..check.find("))").expect("the end of the kind CHECK")];
+        let admitted: BTreeSet<&str> = check.split('\'').skip(1).step_by(2).collect();
+        let library: BTreeSet<&str> = contract_threads::llm::TurnEntryKind::ALL
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        assert_eq!(admitted, library);
+    }
 }

@@ -1,4 +1,4 @@
-//! The conversation a scenario stores, built with `br-llm-messages` 2.0 itself
+//! The conversation a scenario stores, built with `br-llm-messages` 2.1 itself
 //! (re-exported by the contract as `contract_threads::llm`): turns of entries,
 //! entries of blocks, every id a caller-minted UUIDv7, and the response deltas
 //! a writer streams, folded by the library's own draft to know what Threads
@@ -16,9 +16,9 @@ use contract_threads::llm::{
     IncomingEntry, InputTurn, MediaType, ModelName, ModelResponse, OpaqueJson, PlainBlock,
     QueuePosition, RedactedThinkingBlock, ReplayFormat, ReplayMaterial, ReplayPayload,
     RequestAccepted, RequestId, RequestOrigin, ResponseDelta, ResponseDraft, ResponseEnding,
-    ResponseMetadata, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults, StructuredBlock,
-    TaskCompleted, TaskFailed, TaskId, TaskStarted, TextBlock, ThinkingBlock, ToolName, Turn,
-    TurnClosure, TurnEntry, TurnId,
+    ResponseMetadata, RuntimeNotice, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults,
+    StructuredBlock, TaskCompleted, TaskFailed, TaskId, TaskStarted, TextBlock, ThinkingBlock,
+    ToolName, Turn, TurnClosure, TurnEntry, TurnId,
 };
 use contract_threads::{
     Annotation, AnnotationBody, ArtifactRef, Chunk, LibraryJson, Notice, PlacedAnnotation,
@@ -297,6 +297,11 @@ pub fn request_accepted() -> TurnEntry {
         entry_id(),
         RequestId::from_uuid(Uuid::now_v7()).expect("a UUIDv7"),
     ))
+}
+
+/// A notice of the runtime, in an input turn or an AI turn.
+pub fn runtime_notice(text: &str) -> TurnEntry {
+    TurnEntry::from(RuntimeNotice::new(entry_id(), text).expect("a runtime notice"))
 }
 
 pub fn queue_position(position: u32) -> TurnEntry {

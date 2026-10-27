@@ -10,7 +10,7 @@
 //! - [`members`]: the `threads.members.{thread_id}` KV entries of the
 //!   `PUBLISHED_LANGUAGE` bucket;
 //! - [`library`]: the library's JSON a message carries — a message is a turn
-//!   of the conversation model of `br-llm-messages` 2.0 (schema
+//!   of the conversation model of `br-llm-messages` 2.1 (schema
 //!   [`llm::CONVERSATION_SCHEMA`]), re-exported as [`llm`];
 //! - [`annotation`]: Threads' own blocks, placed after an entry of a message;
 //! - [`invalid`]: the vocabulary of a `MESSAGE_INVALID` refusal's `error`

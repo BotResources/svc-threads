@@ -14,7 +14,7 @@ heading exists.
 ## 0.5.0 - 2026-10-27
 
 Threads 0.5 (registry patch 0.5.0): a message is a turn of the
-`br-llm-messages` 2.0 model (schema `br-llm-messages/5`), stored as the
+`br-llm-messages` 2.1 model (schema `br-llm-messages/5`), stored as the
 library's records (`br-llm-messages-records/1`) with Threads' own annotations;
 a runner receives the agent context Threads sorts for the agent it answers for.
 `contract-threads` 0.5.0 carries the new published language (see its
@@ -22,6 +22,21 @@ changelog).
 
 ### Added
 
+- **Built on `br-llm-messages` 2.1.0** (tag `br-llm-messages/v2.1.0`; the
+  schemas are unchanged). A 2.0 reader refuses what a 2.1 writer may write, so
+  Threads, the reader, reads 2.1 before any runner writes it: a
+  `runtime_notice` entry is stored and shown, in an input turn and in an AI
+  turn (an agent context keeps another agent's like its other incoming
+  entries); entries are taken in every order the library accepts — an incoming
+  entry or a model response at any point of an open turn — on `message.store`
+  v2 and on the stream; a tool name is up to 256 characters; a whole AI turn
+  may hold, after its closure, the results of a call the closure left
+  outstanding. Threads' own stream rules stay: one response is produced at a
+  time (`response_still_producing`), the closure is Threads'
+  (`closure_by_writer`), and a closed message takes no more chunks — a result
+  arriving after Threads closed a stream does not join it. The
+  `threads.message_entry.kind` CHECK of migration `9800000005` admits
+  `runtime_notice`.
 - **`message.store` v2** (`integration.cmd.threads.message.store.v2`): a user
   message is the input turn, under the message's id, holding one human message
   of a member (the library's plain blocks: text, image, structured content);
