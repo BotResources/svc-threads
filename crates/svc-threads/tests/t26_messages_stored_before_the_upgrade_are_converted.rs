@@ -72,8 +72,9 @@ use common::previous::{
 };
 use common::{M_SET_READ_MARK, Person, TestContext, store};
 use contract_threads::llm::{
-    BlockId, ContentBlock, ModelResponse, ReplayMaterial, ReplayPayload, ResponseEnding,
-    RuntimeToolCall, RuntimeToolResult, TextBlock, ThinkingBlock, ToolName, TurnEntry,
+    BlockId, ContentBlock, ExternalId, ModelResponse, ReplayMaterial, ReplayPayload,
+    ResponseEnding, RuntimeToolCall, RuntimeToolResult, TextBlock, ThinkingBlock, ToolName,
+    TurnEntry,
 };
 use contract_threads::{FailMessage, MessageStatus};
 use contract_threads_v0_4::llm::StopReason;
@@ -447,7 +448,8 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     );
     // The first response is the library's, block for block, from the step's
     // own inputs: the thinking and its signature, the text, the call of
-    // `search` with its arguments; AwaitingToolResults is tool_use.
+    // `search` with its arguments, keeping the previous call id as its external
+    // id; AwaitingToolResults is tool_use.
     let expected_first = vec![
         ContentBlock::from(
             ThinkingBlock::new(block(thought_id), THOUGHT)
@@ -460,7 +462,8 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         text_block(said_id, "let me look"),
         ContentBlock::from(
             RuntimeToolCall::new(block(called_id), search(), opaque(&json!({ "q": "q3" })))
-                .expect("a runtime tool call"),
+                .expect("a runtime tool call")
+                .with_external_id(ExternalId::new("c1").expect("the previous call id")),
         ),
     ];
     assert_eq!(
@@ -529,7 +532,8 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         to_json(&calling.blocks()),
         to_json(&vec![ContentBlock::from(
             RuntimeToolCall::new(block(m3_call), search(), opaque(&json!({})))
-                .expect("a runtime tool call"),
+                .expect("a runtime tool call")
+                .with_external_id(ExternalId::new("c9").expect("the previous call id")),
         )]),
         "M3's response: the call of `search`, its arguments `{{}}`: {v3}"
     );
