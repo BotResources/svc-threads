@@ -15,7 +15,11 @@
 //! > under the accumulator name of the previous version (message_content): it is
 //! > refused and M5 is FAILED. The thread is closed; opening M6 on it is refused
 //! > THREAD_NOT_OPEN, and the chunks pushed for M6 are never folded: no message,
-//! > no fact, nothing pushed.
+//! > no fact, nothing pushed. Chunks a writer may not push are refused
+//! > MESSAGE_INVALID naming Threads' own code, and the message fails: an ENTRY
+//! > chunk holding a model response (response_in_entry_chunk), an ENTRY chunk
+//! > pushed while a response is still producing (response_still_producing), and
+//! > a chunk holding a closure (closure_by_writer).
 //!
 //! A response M3 had started when its stream broke is, by the specification,
 //! "a model response still streaming when the message is failed": it is kept
@@ -23,13 +27,22 @@
 //! never folded. The library's code of the refusal is computed by the library
 //! on the very delta sent.
 //!
+//! Three chunks are the writer's to never push, whatever the library would
+//! accept of them: a model response as a whole ENTRY (a response streams as
+//! deltas), an ENTRY while a response is still produced, and a closure
+//! (closing the turn is Threads'). Each fails its message under Threads' own
+//! code, which its `Failed` fact names as `MESSAGE_INVALID`'s `error`; the
+//! writer's closure is never taken — the turn reads closed `failed`, by
+//! Threads.
+//!
 //! Channels: the live feed (3), the messages as a member reads them (2), the
 //! answers (4), the fact log, a runner's context.
 
 mod common;
 
 use common::content::{
-    Streamed, block_id, closure_kind, delta_chunk, draft_entry, draft_text, entries_of, kinds_of,
+    Streamed, block_id, closure, closure_kind, delta_chunk, draft_entry, draft_text, entries_of,
+    entry_chunk, kinds_of, mail, text,
 };
 use common::facts;
 use common::feed::{Live, upsert_of};
@@ -38,9 +51,10 @@ use common::flows::{
     message_refused, message_view, open_stream, say, streaming_message, thread_confirmed,
 };
 use common::{QUIET_WINDOW, SHORT_STREAM_IDLE, TestContext, Windows, stream};
-use contract_threads::llm::{DeltaOp, DraftPhase, TurnEntry};
-use contract_threads::{CloseThread, ClosingStatus, ReasonCode, seal_hash};
+use contract_threads::llm::{ClosureReason, DeltaOp, DraftPhase, ResponseEnding, TurnEntry};
+use contract_threads::{CloseThread, ClosingStatus, MessageInvalidError, ReasonCode, seal_hash};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// The one interrupted response of a failed message view, as the library's
 /// draft.
@@ -59,9 +73,41 @@ fn interrupted_response(view: &Value) -> contract_threads::llm::ResponseDraft {
     draft
 }
 
+/// `message` failed on a chunk the writer may not push: A sees it FAILED, its
+/// turn reads closed `failed` by Threads, holding `kinds`, and its `Failed`
+/// fact names Threads' own `code`.
+async fn failed_on_a_forbidden_chunk(
+    ctx: &TestContext,
+    a: &common::Person,
+    a_feed: &mut Live,
+    (thread, message): (Uuid, Uuid),
+    kinds: &[&str],
+    code: MessageInvalidError,
+) {
+    a_feed
+        .until(&format!("A sees the message FAILED on {code:?}"), |delta| {
+            upsert_of(delta, message).is_some_and(|view| view["status"] == "FAILED")
+        })
+        .await;
+    let view = message_view(ctx, &a.passport, thread, message).await;
+    assert_eq!(view["status"], "FAILED", "{code:?}: {view}");
+    assert_eq!(kinds_of(&view), kinds, "{code:?}: {view}");
+    assert_eq!(
+        closure_kind(&view).as_deref(),
+        Some("failed"),
+        "{code:?}: the turn is closed by Threads, never by the writer: {view}"
+    );
+    let failed = facts::of(&ctx.pool, "message", message).await;
+    assert_eq!(
+        facts::the(&failed, "Failed").payload["reason"],
+        code.as_str(),
+        "the Failed fact names Threads' own code"
+    );
+}
+
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or_dropped() {
+async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_for_members_only() {
     // Given Threads running with a short stream window; T with member A, A's
     // question M1, and A following T.
     let ctx = TestContext::setup_with(Windows {
@@ -220,6 +266,77 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     .await;
     assert_eq!(kinds_of(&view), vec!["turn_closure"], "{view}");
     assert_eq!(closure_kind(&view).as_deref(), Some("failed"));
+
+    // When a writer pushes a model response as a whole ENTRY.
+    let whole = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut response = Streamed::start(whole, None);
+    response.text(&["whole"], true);
+    response.complete(ResponseEnding::finished());
+    stream::push(
+        &nats,
+        whole,
+        0,
+        &[entry_chunk(&TurnEntry::from(response.response()))],
+    )
+    .await;
+    // Then it is refused MESSAGE_INVALID (response_in_entry_chunk) and the
+    // message fails, nothing of the response folded.
+    failed_on_a_forbidden_chunk(
+        &ctx,
+        &a,
+        &mut a_feed,
+        (t, whole),
+        &["turn_closure"],
+        MessageInvalidError::ResponseInEntryChunk,
+    )
+    .await;
+
+    // When a writer pushes an ENTRY while its response is still produced.
+    let mid = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut producing = Streamed::start(mid, None);
+    producing.text(&["mid"], false);
+    let mut mid_chunks = producing.chunks();
+    mid_chunks.push(entry_chunk(&mail(&ai("a2", "Critic"), t, vec![text("hi")])));
+    stream::push(&nats, mid, 0, &mid_chunks).await;
+    // Then it is refused MESSAGE_INVALID (response_still_producing) and the
+    // message fails, the response still produced kept interrupted.
+    failed_on_a_forbidden_chunk(
+        &ctx,
+        &a,
+        &mut a_feed,
+        (t, mid),
+        &["model_response", "turn_closure"],
+        MessageInvalidError::ResponseStillProducing,
+    )
+    .await;
+    assert_eq!(
+        draft_text(&interrupted_response(
+            &message_view(&ctx, &a.passport, t, mid).await
+        )),
+        draft_text(producing.draft()),
+        "the response still produced is kept interrupted, as the library folded it"
+    );
+
+    // When a writer pushes a closure.
+    let closing = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    stream::push(
+        &nats,
+        closing,
+        0,
+        &[entry_chunk(&closure(ClosureReason::completed()))],
+    )
+    .await;
+    // Then it is refused MESSAGE_INVALID (closure_by_writer) and the message
+    // fails: the writer's closure is never taken.
+    failed_on_a_forbidden_chunk(
+        &ctx,
+        &a,
+        &mut a_feed,
+        (t, closing),
+        &["turn_closure"],
+        MessageInvalidError::ClosureByWriter,
+    )
+    .await;
 
     // When T is closed and M6 is opened on it, its chunks pushed all the same.
     let closed = command(

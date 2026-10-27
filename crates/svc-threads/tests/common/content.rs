@@ -14,10 +14,11 @@ use contract_threads::llm::{
     CitationId, CitationSource, ClosureReason, ContentBlock, ConversationId, DeltaOp,
     DraftSnapshot, EntryId, Finalization, HumanId, HumanMessage, ImageBlock, ImageSource,
     IncomingEntry, InputTurn, MediaType, ModelName, ModelResponse, OpaqueJson, PlainBlock,
-    QueuePosition, RedactedThinkingBlock, ReplayFormat, ReplayMaterial, ReplayPayload, RequestId,
-    RequestOrigin, ResponseDelta, ResponseDraft, ResponseEnding, ResponseMetadata, RuntimeToolCall,
-    RuntimeToolResult, RuntimeToolResults, StructuredBlock, TaskCompleted, TaskId, TaskStarted,
-    TextBlock, ThinkingBlock, ToolName, Turn, TurnClosure, TurnEntry, TurnId,
+    QueuePosition, RedactedThinkingBlock, ReplayFormat, ReplayMaterial, ReplayPayload,
+    RequestAccepted, RequestId, RequestOrigin, ResponseDelta, ResponseDraft, ResponseEnding,
+    ResponseMetadata, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults, StructuredBlock,
+    TaskCompleted, TaskFailed, TaskId, TaskStarted, TextBlock, ThinkingBlock, ToolName, Turn,
+    TurnClosure, TurnEntry, TurnId,
 };
 use contract_threads::{
     Annotation, AnnotationBody, ArtifactRef, Chunk, LibraryJson, Notice, PlacedAnnotation,
@@ -283,6 +284,19 @@ pub fn task_completed(task: TaskId, summary: &str) -> TurnEntry {
             .with_summary(summary)
             .expect("a task summary"),
     )
+}
+
+/// The task `task` failed, for `reason`.
+pub fn task_failed(task: TaskId, reason: &str) -> TurnEntry {
+    TurnEntry::from(TaskFailed::new(entry_id(), task, reason).expect("a task failure"))
+}
+
+/// A request accepted.
+pub fn request_accepted() -> TurnEntry {
+    TurnEntry::from(RequestAccepted::new(
+        entry_id(),
+        RequestId::from_uuid(Uuid::now_v7()).expect("a UUIDv7"),
+    ))
 }
 
 pub fn queue_position(position: u32) -> TurnEntry {

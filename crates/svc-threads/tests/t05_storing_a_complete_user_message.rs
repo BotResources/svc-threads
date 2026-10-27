@@ -25,6 +25,11 @@
 //! The library's error code a refusal names is computed by the library itself
 //! on the very input sent (`common::content::entry_refusal`, `InputTurn::new`).
 //!
+//! "Nothing is stored" is read on three channels: no fact of the refused
+//! message, the active branch unchanged, and B's open feed of T silent across
+//! every refused store. "Never on the message" holds for the store too: the
+//! impersonator's id is in no row but the fact log's.
+//!
 //! Channels: the answers (4), M1 as each member reads it with its affordance
 //! (2), B's live feed of T (3), the fact log and the store, a runner's context.
 //! Adversarial: a non-member human, a foreign parent, a reused id, an
@@ -175,7 +180,9 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     );
 
     // When the agents service stores messages the library refuses: an empty
-    // text, an explicit null, an entry id equal to its turn's id.
+    // text, an explicit null, an entry id equal to its turn's id. (Whatever
+    // the stores before pushed, B has read it.)
+    b_feed.drain().await;
     let valid = to_json(&human(a.id, vec![text("hello")]));
     let mut empty_text = valid.clone();
     empty_text["content"][0]["text"] = json!("");
@@ -338,6 +345,10 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
         &stored_as,
         "M1 after a reuse of its id",
     );
+    // And no refused store reached B: its feed of T stayed silent throughout.
+    b_feed
+        .silence("a refused store pushes nothing to a member")
+        .await;
 
     // When A's message is stored through impersonation by I.
     let impersonator = Uuid::now_v7();
@@ -364,6 +375,13 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
         !view.to_string().contains(&impersonator.to_string()),
         "the impersonator is never on the message: {view}"
     );
+    store::assert_nowhere(
+        &ctx.pool,
+        &impersonator.to_string(),
+        &["fact"],
+        "the impersonator, outside the fact log",
+    )
+    .await;
 
     // When Identity renames A.
     ctx.rename(&a, "adele").await;

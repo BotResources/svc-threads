@@ -45,8 +45,9 @@ use std::collections::BTreeMap;
 use common::artifacts::{File, upload};
 use common::content::{
     Streamed, after, ai_turn, annotation_view, artifact, call, cited, closed, conversation_id,
-    entry_view, human, input_turn, mail, model_response, redacted_thinking, response_image,
-    result_of, results, said, text, thinking, to_json, turn_id, warning,
+    draft_entry, draft_text, entries_of, entry_view, human, input_turn, mail, model_response,
+    redacted_thinking, response_image, result_of, results, said, text, thinking, to_json, turn_id,
+    warning,
 };
 use common::flows::{
     ai, command, context, context_answer, conversation_of, create, creation, message_confirmed,
@@ -64,7 +65,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lightened_for_its_ai() {
+async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_conversation() {
     // Given T, with members A and B and resources {kms: [k1]}, whose active
     // branch holds, in order:
     let ctx = TestContext::setup().await;
@@ -230,8 +231,14 @@ async fn t11_a_runner_reads_the_active_branch_as_a_conversation_whole_or_lighten
         critic.id,
         critic.author(),
     )));
+    // The context is read only once Threads has folded every delta pushed: the
+    // half-produced draft's text is the library's draft's.
+    let half = draft_text(r8.draft());
     common::flows::await_message(&ctx, &a.passport, t, m8, "M8's draft folded", |view| {
-        view["entries"].as_array().map(Vec::len) == Some(1)
+        let entries = entries_of(view);
+        entries.len() == 1
+            && entries[0]["state"] == "PRODUCING"
+            && draft_text(&draft_entry(&entries[0])) == half
     })
     .await;
 

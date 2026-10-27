@@ -79,7 +79,22 @@ content }`.
 - Message facts are `Created`, `EntryAdded`, `Completed`, `Failed`, `Cancelled`,
   `Edited` and `Deleted`. The closure is the end fact (`Completed` / `Failed` /
   `Cancelled`), never an `EntryAdded`. A stream the library refuses records a
-  `Failed` fact whose `payload.reason` is the library's code.
+  `Failed` fact whose `payload.reason` is the library's code; a stream refused
+  on Threads' own rules (`response_in_entry_chunk`, `response_still_producing`,
+  `closure_by_writer`) records Threads' code there (T07).
+- An entry, block or annotation id that is not a UUIDv7 is refused
+  `ID_NOT_UUIDV7`, an id another message holds `KEY_REUSED` — judged before
+  the library is asked. A v1 store and an edit in the 0.4 form get 0.4's
+  answers: `ID_NOT_UUIDV7`, and `KEY_REUSED` for a block id used twice or held
+  by another message (T25, T28).
+- A whole AI turn closed otherwise than `completed` is accepted, its status
+  given by its closure: `completed` / `budget_exhausted` → `COMPLETED`,
+  `cancelled` → `CANCELLED`, `failed` / `interrupted` → `FAILED`. An AI
+  message whose turn is an input turn holding a `human_message` is refused
+  `MESSAGE_INVALID` / `human_message_in_ai_message` (T27).
+- A completion whose stream holds an `ANNOTATION` naming an artifact whose
+  bytes have not landed is refused `ARTIFACT_NOT_READY`, however close behind
+  the chunk it comes (T13).
 - The closure Threads appends on `complete`, `fail`, `cancel` or a silent writer
   has an id Threads mints: a UUIDv7, unique in the thread.
 - A conversation's and a projected thread's `ConversationId` is the thread's id.

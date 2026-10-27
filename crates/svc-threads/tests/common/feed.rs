@@ -104,7 +104,17 @@ impl Live {
         root: &'static str,
         document: &str,
     ) -> Self {
-        let ws = WsSubscription::open(&ctx.base_url, passport, document)
+        Self::ws_on(&ctx.base_url, passport, root, document).await
+    }
+
+    /// Opens `document` over WebSocket on the pod at `base_url`.
+    pub async fn ws_on(
+        base_url: &str,
+        passport: &Passport,
+        root: &'static str,
+        document: &str,
+    ) -> Self {
+        let ws = WsSubscription::open(base_url, passport, document)
             .await
             .expect("open the WebSocket subscription");
         Self::opened(root, Transport::Ws(Box::new(ws))).await

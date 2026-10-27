@@ -21,6 +21,12 @@
 //! The message naming X is an AI turn whose answer carries X in an ARTIFACT
 //! annotation after it.
 //!
+//! "Storing a message" is also a streamed message's completion: a writer that
+//! pushes the ANNOTATION naming an artifact whose bytes have not landed, and
+//! completes at once, back to back, is refused ARTIFACT_NOT_READY — the
+//! completion never seals the message without the annotation, and never
+//! attaches the artifact.
+//!
 //! The upload window is configured short for the one scenario that waits it
 //! out (`THREADS_UPLOAD_WINDOW_MS`, see `common::constants`); the main one runs
 //! on the service's default.
@@ -35,16 +41,17 @@ use common::artifacts::{
     File, download_answer, download_url, fetch, object_count, post, request_upload,
     request_upload_answer, upload,
 };
-use common::content::{after, ai_turn, artifact, closed, reply};
+use common::content::{Streamed, after, ai_turn, annotation_chunk, artifact, closed, reply};
 use common::facts;
 use common::flows::{
-    ai, command, create_thread, message_confirmed, message_refused, say, whole_message,
+    ai, command, completion, create_thread, message_confirmed, message_refused, message_view,
+    open_stream, say, whole_message,
 };
 use common::{
     KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
-    eventually, gql,
+    eventually, gql, stream,
 };
-use contract_threads::llm::Turn;
+use contract_threads::llm::{ResponseEnding, Turn};
 use contract_threads::{MessageStatus, ReasonCode, StoreMessageV2};
 use uuid::Uuid;
 
@@ -137,6 +144,46 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     )
     .await;
     assert!(facts::of(&ctx.pool, "message", m2).await.is_empty());
+
+    // When, before Z's bytes land, a writer streams an answer, pushes the
+    // ANNOTATION naming Z after it and completes the message back to back.
+    let z = Uuid::now_v7();
+    request_upload(
+        &ctx,
+        &runner.passport,
+        t,
+        z,
+        &File::csv(
+            "pending
+",
+        ),
+    )
+    .await;
+    let streamed = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let mut answer = Streamed::start(streamed, None);
+    answer.text(&["the report follows"], true);
+    answer.complete(ResponseEnding::finished());
+    let mut chunks = answer.chunks();
+    chunks.push(annotation_chunk(answer.entry, artifact(z)));
+    let (last_seq, hash) = stream::push(&ctx.nats.url(), streamed, 0, &chunks).await;
+    let completed = command(&ctx, &completion(t, streamed, last_seq, &hash)).await;
+    // Then the completion is refused ARTIFACT_NOT_READY — never a silent
+    // drop: the message is not sealed COMPLETED without its annotation, and Z
+    // is not attached.
+    message_refused(
+        &ctx,
+        completed,
+        ReasonCode::ArtifactNotReady,
+        "an ANNOTATION naming Z, completed before Z's bytes land",
+    )
+    .await;
+    let view = message_view(&ctx, &a.passport, t, streamed).await;
+    assert_ne!(view["status"], "COMPLETED", "{view}");
+    assert_eq!(
+        facts::types(&facts::of(&ctx.pool, "artifact", z).await),
+        vec!["Requested"],
+        "Z is not attached"
+    );
 
     // When the declared bytes land, and the same message is stored.
     let status = post(&access, &file.bytes).await;

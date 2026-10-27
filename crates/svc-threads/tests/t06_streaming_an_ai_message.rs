@@ -29,9 +29,15 @@
 //! (its id minted by Threads); a fact for each entry means R1, the tool
 //! results and R2 — the closure is the `Completed` fact itself.
 //!
-//! Channels: the answers (4); the live feed of a member over SSE and of a late
-//! joiner over WebSocket (3); the message as members read it, on two pods (2);
-//! the fact log; the artifact the annotation attaches.
+//! "On every pod" is read live too: a member follows T over WebSocket on the
+//! second pod from before M2 is opened, and sees there what A sees on the
+//! first — the draft growing, each entry completing, the seal — then nothing
+//! once M2 is sealed.
+//!
+//! Channels: the answers (4); the live feed of a member over SSE on the first
+//! pod, of a member over WebSocket on the second, and of a late joiner over
+//! WebSocket (3); the message as members read it, on two pods (2); the fact
+//! log; the artifact the annotation attaches.
 
 mod common;
 
@@ -72,7 +78,8 @@ fn complete_in(view: &Value, entry: Uuid) -> bool {
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_and_digest() {
     // Given T with members O, A and B, A's question M1, an artifact X a runner
-    // uploaded for T, a second pod of the deployment, and A following T.
+    // uploaded for T, a second pod of the deployment, A following T on the
+    // first pod and O on the second, over WebSocket.
     let mut ctx = TestContext::setup().await;
     let (o, a, b) = (
         ctx.enrol("olga").await,
@@ -86,6 +93,13 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     let x = upload(&ctx, &runner.passport, t, &file).await;
     let pod2 = ctx.spawn_pod().await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
+    let mut o_on_pod2 = Live::ws_on(
+        &pod2.base_url,
+        &o.passport,
+        THREAD_FEED,
+        &thread_feed(t, 20),
+    )
+    .await;
     let analyst = ai("a1", "Analyst");
 
     // When the agents service opens M2 STREAMING, by a1 "Analyst", for Job J.
@@ -105,9 +119,11 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     assert_eq!(view["jobId"], Value::String(job.to_string()));
     assert_eq!(view["parentMessageId"], Value::String(m1.to_string()));
     assert_eq!(view["entries"], json!([]));
-    // And (3) A's feed receives it.
-    a_feed
-        .until("M2 enters A's feed", |delta| upsert_of(delta, m2).is_some())
+    // And (3) A's feed receives it, and so does O's on the second pod.
+    let entered = |delta: &Value| upsert_of(delta, m2).is_some();
+    a_feed.until("M2 enters A's feed", entered).await;
+    o_on_pod2
+        .until("M2 enters O's feed on pod 2", entered)
         .await;
 
     // R1, by m-1: a text block growing, a runtime tool call, ending on tool use.
@@ -137,29 +153,38 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
 
     // When the runner pushes R1's opening, its text block and "Hel".
     stream::push(&nats, m2, 0, &chunks[0..3]).await;
-    // Then (3) A sees R1's draft hold "Hel".
+    // Then (3) A sees R1's draft hold "Hel", and O sees it on the second pod.
     let r1_entry = r1.entry.as_uuid();
+    let holds_hel = |delta: &Value| {
+        upsert_of(delta, m2)
+            .and_then(|view| producing_text(view, r1_entry))
+            .as_deref()
+            == Some("Hel")
+    };
     a_feed
-        .until("A sees R1's draft hold `Hel`", |delta| {
-            upsert_of(delta, m2)
-                .and_then(|view| producing_text(view, r1_entry))
-                .as_deref()
-                == Some("Hel")
-        })
+        .until("A sees R1's draft hold `Hel`", holds_hel)
+        .await;
+    o_on_pod2
+        .until("O sees R1's draft hold `Hel` on pod 2", holds_hel)
         .await;
 
     // When it pushes "lo".
     stream::push(&nats, m2, 3, &chunks[3..4]).await;
-    // Then (3) A sees the draft grow, as the library's draft folds it.
+    // Then (3) A sees the draft grow, as the library's draft folds it, and O
+    // sees it grow on the second pod.
     let grown = draft_text(&r1.draft_after(4));
     assert_eq!(grown, "Hello");
+    let holds_grown = |delta: &Value| {
+        upsert_of(delta, m2)
+            .and_then(|view| producing_text(view, r1_entry))
+            .as_deref()
+            == Some(grown.as_str())
+    };
     a_feed
-        .until("A sees R1's draft grow to `Hello`", |delta| {
-            upsert_of(delta, m2)
-                .and_then(|view| producing_text(view, r1_entry))
-                .as_deref()
-                == Some(grown.as_str())
-        })
+        .until("A sees R1's draft grow to `Hello`", holds_grown)
+        .await;
+    o_on_pod2
+        .until("O sees R1's draft grow to `Hello` on pod 2", holds_grown)
         .await;
 
     // When B joins mid-stream, over WebSocket.
@@ -171,12 +196,14 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
 
     // When the rest of R1 arrives.
     stream::push(&nats, m2, 4, &chunks[4..r1_chunks.len()]).await;
-    // Then (3) R1 completes on its own while M2 still streams.
-    a_feed
-        .until("R1 completes on its own", |delta| {
-            upsert_of(delta, m2)
-                .is_some_and(|view| view["status"] == "STREAMING" && complete_in(view, r1_entry))
-        })
+    // Then (3) R1 completes on its own while M2 still streams, on both pods.
+    let r1_complete = |delta: &Value| {
+        upsert_of(delta, m2)
+            .is_some_and(|view| view["status"] == "STREAMING" && complete_in(view, r1_entry))
+    };
+    a_feed.until("R1 completes on its own", r1_complete).await;
+    o_on_pod2
+        .until("R1 completes on its own, on pod 2", r1_complete)
         .await;
 
     // When the tool results, R2 and the annotation arrive.
@@ -187,22 +214,30 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         &chunks[r1_chunks.len()..],
     )
     .await;
-    // Then (3) each entry completes on its own, M2 still streaming.
+    // Then (3) each entry completes on its own, M2 still streaming, on both
+    // pods.
     let (results_entry, r2_entry) = (answered.id().as_uuid(), r2.entry.as_uuid());
+    let all_complete = |delta: &Value| {
+        upsert_of(delta, m2).is_some_and(|view| {
+            view["status"] == "STREAMING"
+                && complete_in(view, results_entry)
+                && complete_in(view, r2_entry)
+                && entry_view(view, r2.entry)["annotations"]
+                    .as_array()
+                    .map(Vec::len)
+                    == Some(1)
+        })
+    };
     a_feed
         .until(
             "the tool results, then R2, complete while M2 streams",
-            |delta| {
-                upsert_of(delta, m2).is_some_and(|view| {
-                    view["status"] == "STREAMING"
-                        && complete_in(view, results_entry)
-                        && complete_in(view, r2_entry)
-                        && entry_view(view, r2.entry)["annotations"]
-                            .as_array()
-                            .map(Vec::len)
-                            == Some(1)
-                })
-            },
+            all_complete,
+        )
+        .await;
+    o_on_pod2
+        .until(
+            "the tool results, then R2, complete while M2 streams, on pod 2",
+            all_complete,
         )
         .await;
 
@@ -298,11 +333,12 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         .await
         .expect("a member reads the attached artifact");
     assert_eq!(fetch(&url).await, (200, file.bytes.clone()));
-    // And (3) A's feed carries the completion.
-    a_feed
-        .until("A sees M2 COMPLETED", |delta| {
-            upsert_of(delta, m2).is_some_and(|view| view["status"] == "COMPLETED")
-        })
+    // And (3) A's feed carries the completion, and O's on the second pod.
+    let sealed_live =
+        |delta: &Value| upsert_of(delta, m2).is_some_and(|view| view["status"] == "COMPLETED");
+    a_feed.until("A sees M2 COMPLETED", sealed_live).await;
+    o_on_pod2
+        .until("O sees M2 COMPLETED on pod 2", sealed_live)
         .await;
 
     // And the facts recorded M2's opening, each entry, and its end — never a
@@ -341,6 +377,9 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     // Then it is ignored on every pod: M2 reads exactly as sealed on both, and
     // nothing is pushed.
     a_feed.silence("a chunk after the seal").await;
+    o_on_pod2
+        .silence("a chunk after the seal, on O's feed on pod 2")
+        .await;
     b_on_pod2.silence("a chunk after the seal, on pod 2").await;
     assert_eq!(message_view(&ctx, &a.passport, t, m2).await, sealed);
     let on_pod2 = pod2
