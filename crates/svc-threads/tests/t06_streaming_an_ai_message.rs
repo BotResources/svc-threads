@@ -1,57 +1,71 @@
-//! **T06 — Streaming an AI message: chunks folded live, sealed by count and
-//! hash.**
+//! **T06 — Streaming an AI message: deltas folded live, sealed by last chunk
+//! and hash.**
 //!
-//! > Playing the agents service, the harness stores AI message M2 (author
-//! > ai_id a1, ai_name "Analyst", job_id J) STREAMING, parent M1: confirmed
-//! > with status STREAMING, no content. Playing the runner, it publishes on
-//! > stream.threads.{M2} chunks seq 0..n: for item 0, a block_start text with a
-//! > block id and model "m-1", text deltas, block_end, a tool_call_start with a
-//! > block id, argument deltas, block_end and finish tool_use; for item 1, a
-//! > whole tool results item answering the call; for item 2, a step with text
-//! > and finish end_turn, then an ARTIFACT block. A member subscribed to T sees
-//! > the text grow and each item complete on its own; a member joining
-//! > mid-stream sees everything already folded. The harness completes M2 with
-//! > last_seq n and the SHA-256 of the chunks: confirmed COMPLETED; M2 reads as
-//! > a turn of three items, item 0 carrying model m-1, and never changes again.
-//! > ItemAdded facts were recorded per item, never per chunk. A completion with
-//! > a wrong hash, or with last_seq below a chunk that arrived, is refused
-//! > STREAM_MISMATCH and the message stays STREAMING; a corrected completion
-//! > then succeeds. A chunk published after the seal is ignored on every pod.
-//! > Completing M2 again is refused MESSAGE_NOT_STREAMING.
+//! > Playing the agents service, the harness stores AI message M2 (agent a1,
+//! > name "Analyst", job_id J) STREAMING, parent M1: confirmed with status
+//! > STREAMING, no content. Playing the runner, it publishes on
+//! > stream.threads.{M2} chunks seq 0..n: the response deltas of a first model
+//! > response R1 by model m-1, opening a text block and a runtime tool call,
+//! > growing them and ending R1 on tool use; a whole entry of runtime tool
+//! > results answering the call; the response deltas of a second response R2
+//! > holding a text, ending it; then an ARTIFACT annotation after R2 naming an
+//! > artifact a runner uploaded for the thread. A member following T sees R1's
+//! > draft grow and each entry complete on its own while M2 still streams; a
+//! > member joining mid-stream sees everything already folded, the current
+//! > draft included. A completion with a wrong hash, or with last_seq below a
+//! > chunk that arrived, is refused STREAM_MISMATCH and the message stays
+//! > STREAMING. The corrected completion, last_seq n and the SHA-256 of the
+//! > chunks, is confirmed COMPLETED: M2 reads as an AI turn of agent a1 holding
+//! > R1 with model m-1, the tool results, R2 and a completed closure, the
+//! > ARTIFACT annotation after R2, the artifact attached, and the library loads
+//! > the turn. The facts record M2's opening, each entry and its end, never a
+//! > chunk. A chunk published after the seal is ignored on every pod: M2 reads
+//! > exactly as sealed on two pods and nothing is pushed. Completing M2 again
+//! > is refused MESSAGE_NOT_STREAMING.
 //!
-//! One deliberate reading: the specification says "Blocks are added in order
-//! while their item streams and never change once it is complete", and an item
-//! completes on its `finish`. The ARTIFACT block of item 2 is therefore pushed
-//! before item 2's `finish`, not after it as the gesture's wording orders it.
+//! What Threads must show is what the library's own draft folds from the same
+//! deltas (`common::content::Streamed`): a draft while R1 is produced, the
+//! library's response once its draft completes it. The closure is Threads'
+//! (its id minted by Threads); a fact for each entry means R1, the tool
+//! results and R2 — the closure is the `Completed` fact itself.
 //!
 //! Channels: the answers (4); the live feed of a member over SSE and of a late
 //! joiner over WebSocket (3); the message as members read it, on two pods (2);
-//! the fact log; the artifact the stream attaches.
+//! the fact log; the artifact the annotation attaches.
 
 mod common;
 
 use common::artifacts::{File, download_url, fetch, upload};
 use common::content::{
-    arguments_delta, artifact_block, block_chunk, block_end, call_start, event, finish, opening,
-    results_chunk, text_content, text_delta, text_start, tool_result,
+    Streamed, annotation_chunk, annotation_view, artifact, closure_kind, complete_entry,
+    draft_entry, draft_text, entries_of, entry_chunk, entry_view, result_of, results, to_json,
+    turn_of,
 };
 use common::facts;
 use common::feed::{Live, THREAD_FEED, in_reset, thread_feed, upsert_of};
 use common::flows::{
     ai, command, completion, create_thread, message_confirmed, message_refused, message_view, say,
-    store, streaming_message,
+    store, streaming_message, uuid_of,
 };
 use common::{Q_MESSAGES, TestContext, gql, stream};
-use contract_threads::llm::{AssistantBlock, StopReason, ToolCall, ToolCallId, ToolName};
+use contract_threads::llm::{ResponseEnding, TurnEntry};
 use contract_threads::{MessageStatus, ReasonCode, seal_hash};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// The text of item `item`'s first block in a message view, if any.
-fn item_text(view: &Value, item: usize) -> Option<String> {
-    view["items"][item]["blocks"][0]["content"]["text"]
-        .as_str()
-        .map(str::to_string)
+/// The draft text of `entry` in a feed's view of M2, if it is still produced.
+fn producing_text(view: &Value, entry: Uuid) -> Option<String> {
+    entries_of(view)
+        .into_iter()
+        .find(|read| read["id"] == json!(entry) && read["state"] == "PRODUCING")
+        .map(|read| draft_text(&draft_entry(&read)))
+}
+
+/// Whether `entry` reads COMPLETE in a feed's view of M2.
+fn complete_in(view: &Value, entry: Uuid) -> bool {
+    entries_of(view)
+        .iter()
+        .any(|read| read["id"] == json!(entry) && read["state"] == "COMPLETE")
 }
 
 #[tokio::test]
@@ -72,106 +86,124 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     let x = upload(&ctx, &runner.passport, t, &file).await;
     let pod2 = ctx.spawn_pod().await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
+    let analyst = ai("a1", "Analyst");
 
     // When the agents service opens M2 STREAMING, by a1 "Analyst", for Job J.
     let job = Uuid::now_v7();
-    let mut open = streaming_message(t, Some(m1), ai("a1", "Analyst"));
+    let mut open = streaming_message(t, Some(m1), &analyst);
     open.job_id = Some(job);
     let m2 = store(&ctx, open, MessageStatus::Streaming).await;
 
-    // Then (2) M2 reads STREAMING, by the AI, for J, with no content yet.
+    // Then (2) M2 reads STREAMING, an AI turn of a1, for J, with no content.
     let view = message_view(&ctx, &a.passport, t, m2).await;
     assert_eq!(view["status"], "STREAMING");
+    assert_eq!(view["turnKind"], "AI_TURN");
     assert_eq!(
         view["author"],
-        json!({ "kind": "AI", "userId": null, "aiId": "a1", "name": "Analyst" })
+        json!({ "kind": "AI", "userId": null, "aiId": analyst.uuid(), "name": "Analyst" })
     );
     assert_eq!(view["jobId"], Value::String(job.to_string()));
     assert_eq!(view["parentMessageId"], Value::String(m1.to_string()));
-    assert_eq!(
-        (view["items"].clone(), view["blocks"].clone()),
-        (json!([]), json!([]))
-    );
+    assert_eq!(view["entries"], json!([]));
     // And (3) A's feed receives it.
     a_feed
         .until("M2 enters A's feed", |delta| upsert_of(delta, m2).is_some())
         .await;
 
-    // Item 0: a text block growing, a tool call, finish awaiting its result.
-    let (b0, b1) = (Uuid::now_v7(), Uuid::now_v7());
-    let item0 = vec![
-        opening(0, text_start(0), b0, Some("m-1")),
-        event(0, text_delta(0, "Hel")),
-        event(0, text_delta(0, "lo")),
-        event(0, block_end(0)),
-        opening(0, call_start(1, "c1", "search"), b1, None),
-        event(0, arguments_delta(1, "{\"q\":")),
-        event(0, arguments_delta(1, "\"rust\"}")),
-        event(0, block_end(1)),
-        event(0, finish(StopReason::AwaitingToolResults)),
-    ];
-    // Item 1: the whole tool results item answering c1.
-    let item1 = vec![results_chunk(1, vec![tool_result("c1", "search", "found")])];
-    // Item 2: a text step carrying the ARTIFACT block, ending the turn.
-    let item2 = vec![
-        opening(2, text_start(0), Uuid::now_v7(), Some("m-2")),
-        event(2, text_delta(0, "Done.")),
-        event(2, block_end(0)),
-        block_chunk(2, artifact_block(x)),
-        event(2, finish(StopReason::EndTurn)),
-    ];
-    let chunks: Vec<_> = [item0.clone(), item1.clone(), item2.clone()].concat();
+    // R1, by m-1: a text block growing, a runtime tool call, ending on tool use.
+    let mut r1 = Streamed::start(m2, Some("m-1"));
+    r1.text(&["Hel", "lo"], true);
+    let call = r1.call("search", &["{\"q\":", "\"rust\"}"]);
+    r1.complete(ResponseEnding::tool_use());
+    // The whole entry of runtime tool results answering the call.
+    let answered = results(vec![result_of(&r1.runtime_call(call), "found", false)]);
+    // R2: a text, ending the response.
+    let mut r2 = Streamed::start(m2, None);
+    r2.text(&["Done."], true);
+    r2.complete(ResponseEnding::finished());
+    // Then the ARTIFACT annotation after R2.
+    let attached = artifact(x);
+    let r1_chunks = r1.chunks();
+    let chunks: Vec<_> = [
+        r1_chunks.clone(),
+        vec![entry_chunk(&answered)],
+        r2.chunks(),
+        vec![annotation_chunk(r2.entry, attached.clone())],
+    ]
+    .concat();
     let n = (chunks.len() - 1) as u64;
     let hash = seal_hash(&chunks).expect("the chunks hash");
+    let nats = ctx.nats.url();
 
-    // When the runner pushes the opening and "Hel".
-    stream::push(&ctx.nats.url(), m2, 0, &chunks[0..2]).await;
-    // Then (3) A sees the text so far.
+    // When the runner pushes R1's opening, its text block and "Hel".
+    stream::push(&nats, m2, 0, &chunks[0..3]).await;
+    // Then (3) A sees R1's draft hold "Hel".
+    let r1_entry = r1.entry.as_uuid();
     a_feed
-        .until("A sees `Hel`", |delta| {
-            upsert_of(delta, m2).is_some_and(|view| item_text(view, 0).as_deref() == Some("Hel"))
+        .until("A sees R1's draft hold `Hel`", |delta| {
+            upsert_of(delta, m2)
+                .and_then(|view| producing_text(view, r1_entry))
+                .as_deref()
+                == Some("Hel")
         })
         .await;
 
     // When it pushes "lo".
-    stream::push(&ctx.nats.url(), m2, 2, &chunks[2..3]).await;
-    // Then (3) A sees the text grow.
+    stream::push(&nats, m2, 3, &chunks[3..4]).await;
+    // Then (3) A sees the draft grow, as the library's draft folds it.
+    let grown = draft_text(&r1.draft_after(4));
+    assert_eq!(grown, "Hello");
     a_feed
-        .until("A sees `Hello`", |delta| {
-            upsert_of(delta, m2).is_some_and(|view| item_text(view, 0).as_deref() == Some("Hello"))
+        .until("A sees R1's draft grow to `Hello`", |delta| {
+            upsert_of(delta, m2)
+                .and_then(|view| producing_text(view, r1_entry))
+                .as_deref()
+                == Some(grown.as_str())
         })
         .await;
 
     // When B joins mid-stream, over WebSocket.
     let b_feed = Live::ws(&ctx, &b.passport, THREAD_FEED, &thread_feed(t, 20)).await;
-    // Then B's Reset holds everything folded so far.
+    // Then B's Reset holds everything folded so far, the current draft included.
     let joined = in_reset(&b_feed.reset, m2).expect("M2 is in B's Reset");
     assert_eq!(joined["status"], "STREAMING");
-    assert_eq!(item_text(&joined, 0).as_deref(), Some("Hello"));
+    assert_eq!(producing_text(&joined, r1_entry).as_deref(), Some("Hello"));
 
-    // When the rest of item 0 arrives.
-    stream::push(&ctx.nats.url(), m2, 3, &chunks[3..item0.len()]).await;
-    // Then (3) item 0 completes on its own while M2 still streams.
+    // When the rest of R1 arrives.
+    stream::push(&nats, m2, 4, &chunks[4..r1_chunks.len()]).await;
+    // Then (3) R1 completes on its own while M2 still streams.
     a_feed
-        .until("item 0 completes on its own", |delta| {
-            upsert_of(delta, m2).is_some_and(|view| {
-                view["status"] == "STREAMING" && view["items"][0]["status"] == "COMPLETED"
-            })
+        .until("R1 completes on its own", |delta| {
+            upsert_of(delta, m2)
+                .is_some_and(|view| view["status"] == "STREAMING" && complete_in(view, r1_entry))
         })
         .await;
 
-    // When items 1 and 2 arrive.
+    // When the tool results, R2 and the annotation arrive.
     stream::push(
-        &ctx.nats.url(),
+        &nats,
         m2,
-        item0.len() as u64,
-        &chunks[item0.len()..],
+        r1_chunks.len() as u64,
+        &chunks[r1_chunks.len()..],
     )
     .await;
+    // Then (3) each entry completes on its own, M2 still streaming.
+    let (results_entry, r2_entry) = (answered.id().as_uuid(), r2.entry.as_uuid());
     a_feed
-        .until("item 2 completes", |delta| {
-            upsert_of(delta, m2).is_some_and(|view| view["items"][2]["status"] == "COMPLETED")
-        })
+        .until(
+            "the tool results, then R2, complete while M2 streams",
+            |delta| {
+                upsert_of(delta, m2).is_some_and(|view| {
+                    view["status"] == "STREAMING"
+                        && complete_in(view, results_entry)
+                        && complete_in(view, r2_entry)
+                        && entry_view(view, r2.entry)["annotations"]
+                            .as_array()
+                            .map(Vec::len)
+                            == Some(1)
+                })
+            },
+        )
         .await;
 
     // When the writer completes M2 with a wrong digest, then with a last_seq
@@ -210,48 +242,56 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         message_confirmed(&ctx, completed, MessageStatus::Completed, "the completion").await;
     assert_eq!(confirmed.message_id, m2);
 
-    // And (2) M2 reads as a turn of three items, every one COMPLETED.
+    // And (2) M2 reads as an AI turn of a1 holding R1 (model m-1), the tool
+    // results, R2 and a completed closure — each entry as the library gives it.
     let sealed = message_view(&ctx, &a.passport, t, m2).await;
     assert_eq!(sealed["status"], "COMPLETED");
-    let items = sealed["items"].as_array().expect("items");
-    assert_eq!(items.len(), 3, "{sealed}");
+    let read = entries_of(&sealed);
+    assert_eq!(read.len(), 4, "{sealed}");
     assert!(
-        items.iter().all(|item| item["status"] == "COMPLETED"),
+        read.iter().all(|entry| entry["state"] == "COMPLETE"),
         "{sealed}"
     );
-    // Item 0: a step by m-1, awaiting its tool's result, its text and its call.
-    assert_eq!(items[0]["kind"], "STEP");
-    assert_eq!(items[0]["model"], "m-1");
+    let r1_done = TurnEntry::from(r1.response());
     assert_eq!(
-        items[0]["stopReason"],
-        json!({ "type": "awaiting_tool_results" })
+        r1.response().model().map(|model| model.as_str()),
+        Some("m-1")
     );
-    let call = serde_json::to_value(AssistantBlock::ToolCall(ToolCall {
-        id: ToolCallId::new("c1").unwrap(),
-        name: ToolName::new("search").unwrap(),
-        arguments: json!({ "q": "rust" }),
-    }))
-    .unwrap();
+    for (index, expected) in [r1_done, answered.clone(), TurnEntry::from(r2.response())]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            to_json(&complete_entry(&read[index])),
+            to_json(expected),
+            "entry {index} of M2 is the library's"
+        );
+    }
     assert_eq!(
-        items[0]["blocks"],
-        json!([
-            { "id": b0, "index": 0, "kind": "TEXT", "content": text_content("Hello") },
-            { "id": b1, "index": 1, "kind": "TOOL_CALL", "content": call },
-        ])
+        closure_kind(&sealed).as_deref(),
+        Some("completed"),
+        "{sealed}"
     );
-    // Item 1: the tool results item.
-    assert_eq!(items[1]["kind"], "TOOL_RESULTS");
-    assert_eq!(common::content::tool_results_of(&sealed).len(), 1);
-    // Item 2: the text, then the ARTIFACT block at the next index.
-    assert_eq!(items[2]["kind"], "STEP");
-    assert_eq!(items[2]["stopReason"], json!({ "type": "end_turn" }));
-    assert_eq!(items[2]["model"], "m-2", "each step carries its own model");
-    assert_eq!(items[2]["blocks"][0]["content"], text_content("Done."));
-    assert_eq!(items[2]["blocks"][1]["kind"], "ARTIFACT");
-    assert_eq!(items[2]["blocks"][1]["index"], 1);
+    let closure_id = uuid_of(&read[3]["id"]);
     assert_eq!(
-        items[2]["blocks"][1]["content"],
-        json!({ "artifact_id": x })
+        closure_id.get_version_num(),
+        7,
+        "the closure's id is a UUIDv7"
+    );
+    // And the library loads the turn.
+    let turn = turn_of(&sealed);
+    let ai_turn = turn.as_ai().expect("an AI turn");
+    assert_eq!(ai_turn.agent(), analyst.id);
+    assert!(ai_turn.is_closed());
+    // And the ARTIFACT annotation reads after R2.
+    assert_eq!(
+        entry_view(&sealed, r2.entry)["annotations"],
+        json!([{
+            "index": 0,
+            "id": annotation_view(&attached)["id"],
+            "kind": "ARTIFACT",
+            "content": { "artifact_id": x },
+        }])
     );
     // And the artifact it names is attached: members read its bytes.
     let url = download_url(&ctx, &b.passport, t, x)
@@ -265,19 +305,19 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         })
         .await;
 
-    // And the facts recorded M2's opening, each item, and its end — never a
+    // And the facts recorded M2's opening, each entry, and its end — never a
     // chunk.
     let m2_facts = facts::of(&ctx.pool, "message", m2).await;
     assert_eq!(
         facts::types(&m2_facts),
         vec![
             "Created",
-            "ItemAdded",
-            "ItemAdded",
-            "ItemAdded",
+            "EntryAdded",
+            "EntryAdded",
+            "EntryAdded",
             "Completed"
         ],
-        "one ItemAdded per item, none per chunk"
+        "one EntryAdded per entry, none per chunk"
     );
     facts::assert_no_fact_carries(&ctx.pool, "Hello", "a streamed text").await;
 
@@ -294,9 +334,9 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         "COMPLETED"
     );
 
-    // When a chunk is published after the seal.
-    let late = event(2, text_delta(0, " Or not."));
-    stream::push(&ctx.nats.url(), m2, n + 1, &[late]).await;
+    // When a chunk is published after the seal: the opening of a response R3.
+    let r3 = Streamed::start(m2, None);
+    stream::push(&nats, m2, n + 1, &r3.chunks()).await;
 
     // Then it is ignored on every pod: M2 reads exactly as sealed on both, and
     // nothing is pushed.

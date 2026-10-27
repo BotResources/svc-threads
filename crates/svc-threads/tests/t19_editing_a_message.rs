@@ -4,15 +4,17 @@
 //! > M1, by user A, has an AI answer M2 written on M1's text and a fork M2b.
 //! > The harness sends message.edit for M1 with acting user B, also a member:
 //! > refused NOT_THE_AUTHOR, nothing changes. With acting user A and M1's
-//! > current version, new blocks keeping the id of M1's first block and adding
-//! > a new one: confirmed; M1 reads with the new content, an edited_at and a
+//! > current version, new content keeping the id of M1's first text block and
+//! > adding an image block: confirmed; M1 reads with the new content, an
+//! > edited_at and a
 //! > version raised by one, still the parent of M2 and M2b, which stay readable
 //! > under it; a runner's context carries the new content. An Edited fact
 //! > records it; no fact, before or after, carries the old or the new text, and
 //! > no block of the old content is left in the store. A new block reusing the
 //! > id of a block of another message is refused KEY_REUSED; a list naming one
-//! > id twice is refused KEY_REUSED; a list without text, or with an ARTIFACT
-//! > block, is refused MESSAGE_INVALID; a block id that is not a UUIDv7 is
+//! > id twice is refused KEY_REUSED; an empty list, or one holding an annotation
+//! > or a block the library does not allow in a human message, is refused
+//! > MESSAGE_INVALID; a block id that is not a UUIDv7 is
 //! > refused ID_NOT_UUIDV7; nothing changes. Editing M2, the AI's message, with
 //! > acting user A is refused MESSAGE_NOT_EDITABLE. A streaming, a failed and a
 //! > cancelled AI message, and a deleted user message of A, are refused
@@ -30,29 +32,30 @@
 //! author and its version decides it. The closing comes last, since a closed
 //! thread never reopens.
 //!
+//! "No block of the old content is left in the store" is read over every
+//! table of the store (`common::store`).
+//!
 //! Channels: the answers (4), the messages as members read them (2), the fact
-//! log and the stored blocks, a runner's context.
+//! log and the store, a runner's context.
 
 mod common;
 
-use common::content::{ai_text, artifact_block, step, user_text, warning_block};
+use common::content::{
+    entries_of, image, reply, text, text_as, texts_of, thinking, to_json, warning,
+};
 use common::facts;
 use common::flows::{
     ai, answer, branch, command, context, conversation_of, create_thread, deletion_of, edit_of,
-    message_confirmed, message_refused, message_version, message_view, open_stream, reopening_of,
-    resolution_of, say, thread_confirmed, uuid_of,
+    message_confirmed, message_refused, message_version, message_view, open_stream, raw_edit_of,
+    reopening_of, resolution_of, say, thread_confirmed, uuid_of,
 };
-use common::{Person, TestContext};
-use contract_threads::llm::StopReason;
+use common::{Person, TestContext, store};
+use contract_threads::llm::{IncomingEntry, PlainBlock};
 use contract_threads::{
-    Block, CancelMessage, CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode,
+    CancelMessage, CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode,
 };
+use serde_json::Value;
 use uuid::Uuid;
-
-/// A text block under a chosen id.
-fn text_as(id: Uuid, text: &str) -> Block {
-    Block::new(id, user_text(text).body)
-}
 
 /// Sends `edit` and asserts it refused with `code`, M1 and the fact log left
 /// exactly as they were.
@@ -79,17 +82,6 @@ async fn refused_changing_nothing(
         facts_before,
         "{what}: no fact"
     );
-}
-
-async fn stored_blocks(ctx: &TestContext, message: Uuid) -> Vec<(Uuid, String)> {
-    sqlx::query_as(
-        "SELECT id, content->>'text' FROM threads.message_block \
-         WHERE message_id = $1 ORDER BY index",
-    )
-    .bind(message)
-    .fetch_all(&ctx.pool)
-    .await
-    .expect("read M1's stored blocks")
 }
 
 #[tokio::test]
@@ -120,11 +112,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         t,
         Some(m1),
         ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("an answer to the old wording")],
-        )],
+        reply("an answer to the old wording"),
     )
     .await;
     let m2b = answer(
@@ -132,13 +120,14 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         t,
         Some(m1),
         ai("a1", "Analyst"),
-        common::content::answer("another answer"),
+        reply("another answer"),
     )
     .await;
     let runner = ctx.service_account(true);
     let v = message_version(&ctx, &a.passport, t, m1).await;
     let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
-    let new_blocks = vec![text_as(first_block, NEW), user_text(ADDED)];
+    let added = image();
+    let new_content: Vec<PlainBlock> = vec![text_as(first_block, NEW), added.clone()];
 
     // When the harness edits M1 with acting user B.
     // Then refused NOT_THE_AUTHOR, and nothing changes.
@@ -147,15 +136,15 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         &a,
         t,
         m1,
-        &edit_of(t, m1, b.id, v, new_blocks.clone()),
+        &edit_of(t, m1, b.id, v, new_content.clone()),
         ReasonCode::NotTheAuthor,
         "B editing A's message",
     )
     .await;
 
     // When the harness edits M1 with acting user A, from its current version,
-    // keeping its first block's id and adding a new block.
-    let edited = command(&ctx, &edit_of(t, m1, a.id, v, new_blocks.clone())).await;
+    // keeping its first text block's id and adding an image block.
+    let edited = command(&ctx, &edit_of(t, m1, a.id, v, new_content.clone())).await;
 
     // Then (4) confirmed: M1 is a COMPLETED message, not deleted.
     let confirmed = message_confirmed(&ctx, edited, MessageStatus::Completed, "A editing M1").await;
@@ -163,11 +152,15 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     assert!(!confirmed.deleted);
     // And (2) M1 reads with the new content, an edited_at, its version + 1.
     let view = message_view(&ctx, &o.passport, t, m1).await;
+    let read = &entries_of(&view)[0];
+    assert_eq!(read["kind"], "human_message", "{view}");
     assert_eq!(
-        common::content::texts_of(&view),
-        vec![NEW.to_string(), ADDED.to_string()]
+        read["content"]["content"],
+        Value::Array(new_content.iter().map(to_json).collect()),
+        "the human message's content, replaced whole"
     );
-    assert_eq!(uuid_of(&view["blocks"][0]["id"]), first_block);
+    assert_eq!(texts_of(&view), vec![NEW.to_string()]);
+    assert_eq!(uuid_of(&read["content"]["content"][0]["id"]), first_block);
     assert!(view["editedAt"].is_string(), "{view}");
     assert_eq!(view["version"].as_u64(), Some(v + 1));
     assert_eq!(
@@ -188,65 +181,69 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         );
     }
     // And a runner's context carries the new content, not the old.
-    let conversation = format!(
-        "{:?}",
-        conversation_of(&context(&ctx, &runner.passport, t, None).await)
-    );
-    assert!(
-        conversation.contains(NEW) && conversation.contains(ADDED),
-        "{conversation}"
-    );
-    assert!(!conversation.contains(OLD), "{conversation}");
+    let read_context = context(&ctx, &runner.passport, t, None).await;
+    let conversation = conversation_of(&read_context);
+    let first = conversation.turns()[0]
+        .as_input()
+        .expect("M1, an input turn");
+    let IncomingEntry::HumanMessage(edited) = &first.entries()[0] else {
+        panic!("M1 holds A's human message: {conversation:?}");
+    };
+    assert_eq!(edited.content(), new_content.as_slice());
+    assert!(!read_context["conversation"].to_string().contains(OLD));
     // And an Edited fact records it; no fact carries the old or the new text.
     let m1_facts = facts::of(&ctx.pool, "message", m1).await;
     let edited_fact = facts::the(&m1_facts, "Edited");
     assert_eq!(edited_fact.acting_user_id, Some(a.id));
     assert_eq!(edited_fact.version as u64, v + 1);
-    for text in [OLD, NEW, ADDED] {
+    for text in [OLD, NEW] {
         facts::assert_no_fact_carries(&ctx.pool, text, "after the edit").await;
     }
     // And no block of the old content is left in the store.
-    let blocks = stored_blocks(&ctx, m1).await;
-    assert_eq!(blocks.len(), 2, "{blocks:?}");
-    assert_eq!(blocks[0], (first_block, NEW.to_string()));
-    let old_left: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM threads.message_block WHERE content->>'text' = $1",
-    )
-    .bind(OLD)
-    .fetch_one(&ctx.pool)
-    .await
-    .expect("search the stored blocks");
-    assert_eq!(old_left, 0, "the old content is kept nowhere");
+    store::assert_nowhere(&ctx.pool, OLD, &[], "the old content").await;
 
     // When edits carry content the rules refuse — then each is refused and
     // nothing changes.
     let v = v + 1;
-    let m2_block =
-        uuid_of(&message_view(&ctx, &a.passport, t, m2).await["items"][0]["blocks"][0]["id"]);
+    let m2_block = uuid_of(
+        &entries_of(&message_view(&ctx, &a.passport, t, m2).await)[0]["content"]["content"][0]["id"],
+    );
     let twice = Uuid::now_v7();
-    for (blocks, code, what) in [
+    let mut not_v7 = to_json(&text(NEW));
+    not_v7["id"] = Value::String(Uuid::new_v4().to_string());
+    for (content, code, what) in [
         (
-            vec![text_as(m2_block, NEW)],
+            vec![to_json(&text_as(m2_block, NEW))],
             ReasonCode::KeyReused,
             "a block id held by another message",
         ),
         (
-            vec![text_as(twice, NEW), text_as(twice, ADDED)],
+            vec![
+                to_json(&text_as(twice, NEW)),
+                to_json(&text_as(twice, ADDED)),
+            ],
             ReasonCode::KeyReused,
             "one id named twice",
         ),
+        (Vec::new(), ReasonCode::MessageInvalid, "an empty list"),
         (
-            vec![warning_block("note", "no text here")],
+            vec![
+                to_json(&text(NEW)),
+                to_json(&warning("NOTE", "an annotation")),
+            ],
             ReasonCode::MessageInvalid,
-            "a list without text",
+            "a list holding an annotation",
         ),
         (
-            vec![user_text(NEW), artifact_block(Uuid::now_v7())],
+            vec![
+                to_json(&text(NEW)),
+                to_json(&thinking("not a human's", "c2ln")),
+            ],
             ReasonCode::MessageInvalid,
-            "a list with an ARTIFACT block",
+            "a block the library does not allow in a human message",
         ),
         (
-            vec![text_as(Uuid::new_v4(), NEW)],
+            vec![not_v7],
             ReasonCode::IdNotUuidV7,
             "a block id that is not a UUIDv7",
         ),
@@ -256,7 +253,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
             &a,
             t,
             m1,
-            &edit_of(t, m1, a.id, v, blocks),
+            &raw_edit_of(t, m1, a.id, v, content),
             code,
             what,
         )
@@ -266,11 +263,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     // When the harness edits M2, the AI's message, with acting user A — then
     // refused MESSAGE_NOT_EDITABLE.
     let m2_version = message_version(&ctx, &a.passport, t, m2).await;
-    let sent = command(
-        &ctx,
-        &edit_of(t, m2, a.id, m2_version, vec![user_text(NEW)]),
-    )
-    .await;
+    let sent = command(&ctx, &edit_of(t, m2, a.id, m2_version, vec![text(NEW)])).await;
     message_refused(
         &ctx,
         sent,
@@ -322,20 +315,12 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         (gone, "a deleted user message of A"),
     ] {
         let version = message_version(&ctx, &a.passport, t, message).await;
-        let sent = command(
-            &ctx,
-            &edit_of(t, message, a.id, version, vec![user_text(NEW)]),
-        )
-        .await;
+        let sent = command(&ctx, &edit_of(t, message, a.id, version, vec![text(NEW)])).await;
         message_refused(&ctx, sent, ReasonCode::MessageNotEditable, what).await;
     }
 
     // When an unknown message is edited — then refused MESSAGE_NOT_FOUND.
-    let sent = command(
-        &ctx,
-        &edit_of(t, Uuid::now_v7(), a.id, 1, vec![user_text(NEW)]),
-    )
-    .await;
+    let sent = command(&ctx, &edit_of(t, Uuid::now_v7(), a.id, 1, vec![text(NEW)])).await;
     message_refused(
         &ctx,
         sent,
@@ -352,7 +337,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         &a,
         t,
         m1,
-        &edit_of(t, m1, a.id, v, vec![user_text(NEW)]),
+        &edit_of(t, m1, a.id, v, vec![text(NEW)]),
         ReasonCode::ThreadResolved,
         "editing on a resolved thread",
     )
@@ -370,7 +355,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     .await;
     message_confirmed(&ctx, late, MessageStatus::Completed, "the late edit").await;
     let view = message_view(&ctx, &a.passport, t, m1).await;
-    assert_eq!(common::content::texts_of(&view), vec![LATE.to_string()]);
+    assert_eq!(texts_of(&view), vec![LATE.to_string()]);
     assert_eq!(view["version"].as_u64(), Some(v + 1));
 
     // When the thread is closed, editing M1 — then refused THREAD_NOT_OPEN.
@@ -389,7 +374,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         &a,
         t,
         m1,
-        &edit_of(t, m1, a.id, v + 1, vec![user_text(NEW)]),
+        &edit_of(t, m1, a.id, v + 1, vec![text(NEW)]),
         ReasonCode::ThreadNotOpen,
         "editing on a closed thread",
     )

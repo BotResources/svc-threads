@@ -13,21 +13,26 @@
 //! > is never deleted, it is regenerated; M2 and its artifact X stay, X's read
 //! > access still returns its bytes (an artifact goes with its thread — T17).
 //!
+//! M2 carries X as an ARTIFACT annotation after its answer. "No block of M1 is
+//! left in the store" is read over every table of the store, whatever the
+//! implementation names them (`common::store`).
+//!
 //! Channels: the answers (4), the messages as members read them (2), B's live
-//! feed (3), the fact log, a runner's context, the artifact's read access.
+//! feed (3), the fact log and the store, a runner's context, the artifact's
+//! read access.
 
 mod common;
 
 use common::artifacts::{File, download_url, fetch, upload};
-use common::content::{ai_text, artifact_block, step, user_text};
+use common::content::{after, ai_turn, artifact, closed, human, reply, text};
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
     ai, answer, branch, command, context, conversation_of, create_thread, message_confirmed,
-    message_refused, message_view, store, user_message,
+    message_refused, message_view, store, turn_ids, user_entry_message, whole_message,
 };
-use common::{TestContext, flows::uuid_of};
-use contract_threads::llm::{Entry, StopReason};
+use common::{TestContext, flows::uuid_of, store as stored};
+use contract_threads::llm::{Turn, TurnEntry};
 use contract_threads::{DeleteMessage, MessageStatus, ReasonCode};
 use serde_json::json;
 use uuid::Uuid;
@@ -54,35 +59,36 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     );
     let t = create_thread(&ctx, Some(&o), &[&a, &b]).await;
     const SECRET: &str = "my salary is in this message";
+    let secret_block = text(SECRET);
+    let m1_block = secret_block.id().as_uuid();
+    let m1_entry = human(a.id, vec![secret_block]);
     let m1 = store(
         &ctx,
-        user_message(t, None, a.id, vec![user_text(SECRET)]),
+        user_entry_message(t, None, a.id, &m1_entry),
         MessageStatus::Completed,
     )
     .await;
     let runner = ctx.service_account(true);
     let file = File::csv("salary\n1\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
-    let m2 = answer(
+    let analyst = ai("a1", "Analyst");
+    let noted: Vec<TurnEntry> = reply("noted");
+    let m2_id = Uuid::now_v7();
+    let m2_turn = Turn::from(ai_turn(m2_id, &analyst, closed(noted.clone())));
+    let m2 = store(
         &ctx,
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("noted"), artifact_block(x)],
-        )],
+        whole_message(
+            t,
+            Some(m1),
+            m2_id,
+            &analyst,
+            &m2_turn,
+            vec![after(&noted[0], artifact(x))],
+        ),
+        MessageStatus::Completed,
     )
     .await;
-    let m2b = answer(
-        &ctx,
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        common::content::answer("noted, again"),
-    )
-    .await;
+    let m2b = answer(&ctx, t, Some(m1), analyst.clone(), reply("noted, again")).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "before the deletion").await;
 
@@ -113,10 +119,7 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     // And (2) M1 reads as deleted, without content, still in the tree.
     let gone = message_view(&ctx, &o.passport, t, m1).await;
     assert_eq!(gone["deleted"], true, "{gone}");
-    assert_eq!(
-        (gone["blocks"].clone(), gone["items"].clone()),
-        (json!([]), json!([]))
-    );
+    assert_eq!(gone["entries"], json!([]), "no entry, block or annotation");
     // And M2 and M2b stay readable under it.
     for answer in [m2, m2b] {
         let page: Vec<_> = branch(&ctx, &b.passport, t, 10, Some(answer))
@@ -132,7 +135,7 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
             upsert_of(delta, m1).is_some_and(|view| view["deleted"] == true)
         })
         .await;
-    assert_eq!(upsert_of(&pushed, m1).unwrap()["blocks"], json!([]));
+    assert_eq!(upsert_of(&pushed, m1).unwrap()["entries"], json!([]));
     let rest = b_feed.drain().await;
     assert!(
         rest.iter().all(|delta| upsert_of(delta, m1).is_none()),
@@ -141,24 +144,27 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     // And a Deleted fact records it — no fact, before or after, carries the text.
     assert!(facts::types(&facts::of(&ctx.pool, "message", m1).await).contains(&"Deleted"));
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "after the deletion").await;
-    // And its content is gone from the store: no block of M1 is left.
-    let blocks: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM threads.message_block WHERE message_id = $1")
-            .bind(m1)
-            .fetch_one(&ctx.pool)
-            .await
-            .expect("count M1's blocks");
-    assert_eq!(blocks, 0, "a deleted message keeps no content anywhere");
+    // And its content is gone from the store: no block of M1 is left — no row
+    // of any table holds its text, nor names its block or its entry but the
+    // facts that recorded them.
+    stored::assert_nowhere(&ctx.pool, SECRET, &[], "a deleted message's text").await;
+    for id in [m1_block, m1_entry.id().as_uuid()] {
+        stored::assert_nowhere(
+            &ctx.pool,
+            &id.to_string(),
+            &["fact"],
+            "a deleted message's content",
+        )
+        .await;
+    }
     // And a runner's context no longer contains M1.
-    let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
+    let read = context(&ctx, &runner.passport, t, None).await;
+    let conversation = conversation_of(&read);
     assert!(
-        conversation
-            .entries()
-            .iter()
-            .all(|entry| !matches!(entry, Entry::UserInput(_))),
+        !turn_ids(&conversation).contains(&m1),
         "the deleted user message is left out: {conversation:?}"
     );
-    assert!(!format!("{conversation:?}").contains(SECRET));
+    assert!(!read["conversation"].to_string().contains(SECRET));
 
     // When M1 is deleted again.
     let facts_before = facts::count(&ctx.pool).await;
