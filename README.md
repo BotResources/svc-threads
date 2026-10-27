@@ -4,7 +4,7 @@ Threads is the shared, passive conversation store of the BotResources platform.
 It keeps conversations between people and AIs — threads, their members and
 resources, messages in the conversation model of
 [`br-llm-messages`](https://github.com/BotResources/br-llm-messages-rs)
-(schema `br-llm-messages/3`), the artifacts runners attach to them, and each
+(2.0, schema `br-llm-messages/5`: each message is a turn), the artifacts runners attach to them, and each
 member's read mark — and serves them, live, to their members.
 
 - Threads never decides who may write: every write reaches it as a command from
@@ -16,7 +16,7 @@ member's read mark — and serves them, live, to their members.
 - Threads runs no AI logic; to name a new conversation it asks a runner through
   Jobs.
 
-**Status: 0.3.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.5.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -31,7 +31,9 @@ member's read mark — and serves them, live, to their members.
 (the engine README's *Ops contract v1*):
 
 - `migrate`: `DATABASE_URL_OWNER`, `APP_ROLE`;
-- `serve`: `DATABASE_URL`, `APP_ROLE`, `NATS_URL`, `ENGINE_CHANNEL`, `HOSTNAME`,
+- `serve`: converts, once and before the pod is ready, the messages an
+  earlier Threads stored (under a Postgres advisory lock: one pod converts,
+  the others wait); then serves. `DATABASE_URL`, `APP_ROLE`, `NATS_URL`, `ENGINE_CHANNEL`, `HOSTNAME`,
   `PORT`, and the object-storage group `S3_ENDPOINT`, `S3_BUCKET`,
   `S3_ACCESS_KEY`, `S3_SECRET_KEY` (`S3_REGION`, `S3_PUBLIC_ENDPOINT`
   optional) — Threads refuses to serve without object storage;
