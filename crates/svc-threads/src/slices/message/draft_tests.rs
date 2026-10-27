@@ -198,8 +198,8 @@ fn a_tool_call_answered_by_a_whole_results_entry_then_an_answer_completes() {
 fn a_runtime_notice_while_a_call_is_outstanding_folds_and_the_turn_completes() {
     let mut writer = Writer::new();
     let call = writer.calling_response();
-    let notice = RuntimeNotice::new(EntryId::from_uuid(v7()).unwrap(), "the search is slow")
-        .unwrap();
+    let notice =
+        RuntimeNotice::new(EntryId::from_uuid(v7()).unwrap(), "the search is slow").unwrap();
     writer.entry(notice.into());
     writer.results(call);
     writer.text_response(&["done"], Some(ResponseEnding::finished()));

@@ -940,8 +940,7 @@ mod tests {
     #[test]
     fn a_whole_ai_turn_holding_results_after_its_closure_is_stored_under_its_closure() {
         use contract_threads::llm::{
-            OpaqueJson, RecordSet, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults,
-            ToolName,
+            OpaqueJson, RecordSet, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults, ToolName,
         };
 
         let message = v7();
