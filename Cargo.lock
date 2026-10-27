@@ -473,6 +473,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "br-llm-messages"
+version = "2.1.0"
+source = "git+https://github.com/BotResources/br-llm-messages-rs?tag=br-llm-messages%2Fv2.1.0#639e011b5b925a86195a69dc52fe1f07e50da154"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "br-scope-declaration-contract"
 version = "0.1.0"
 source = "git+https://github.com/BotResources/br-rust-common?tag=br-scope-declaration-contract%2Fv0.1.0#cb9bbb3c5da89718f78719c9ca4f9b3d02972c8a"
@@ -807,9 +817,23 @@ dependencies = [
 [[package]]
 name = "contract-threads"
 version = "0.4.0"
+source = "git+https://github.com/BotResources/svc-threads?tag=contract-threads%2Fv0.4.0#da831c72504b2a62f497236f441970fa63442585"
 dependencies = [
  "br-core-integration",
- "br-llm-messages",
+ "br-llm-messages 0.5.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "contract-threads"
+version = "0.5.0"
+dependencies = [
+ "br-core-integration",
+ "br-llm-messages 2.1.0",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -3656,7 +3680,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svc-threads"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-graphql",
  "br-core-auth",
@@ -3670,7 +3694,8 @@ dependencies = [
  "conformance-directory",
  "conformance-scope",
  "contract-jobs",
- "contract-threads",
+ "contract-threads 0.4.0",
+ "contract-threads 0.5.0",
  "dotenvy",
  "futures-util",
  "reqwest",

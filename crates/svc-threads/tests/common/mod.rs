@@ -33,6 +33,9 @@
 //! boot it again on the same database and bus ([`TestContext::stop`] /
 //! [`TestContext::start_again`]), and start further pods of the same deployment
 //! beside it ([`TestContext::spawn_pod`]) — the service is declared multi-pod.
+//! It can also run the previous release first and upgrade to this one on the
+//! same database ([`TestContext::setup_previous`] / [`TestContext::upgrade`],
+//! [`previous`]).
 //!
 //! State is built **only** through the service's own surfaces and the published
 //! language it consumes: the suite never writes a row of the service. Its SQL
@@ -57,9 +60,12 @@ pub mod identity;
 pub mod infra;
 pub mod jobs;
 pub mod port;
+pub mod previous;
+pub mod store;
 pub mod stream;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use br_core_auth::{AuthMethod, Passport, PassportClaims, SCOPES_CLAIM_KEY};
@@ -146,6 +152,9 @@ pub struct TestContext {
     pub pool: PgPool,
     pub minio: infra::Minio,
     db: E2eDatabase,
+    /// The binary this deployment runs: this version's, or the previous
+    /// release's until [`TestContext::upgrade`].
+    binary: PathBuf,
     service: Option<SpawnedProcess>,
     /// The further pods [`TestContext::spawn_pod`] started beside the first.
     pods: Vec<SpawnedProcess>,
@@ -188,6 +197,21 @@ impl TestContext {
     }
 
     pub async fn boot_with(handshake: Handshake, windows: Windows) -> Self {
+        Self::boot_on(
+            PathBuf::from(env!("CARGO_BIN_EXE_svc-threads")),
+            handshake,
+            windows,
+        )
+        .await
+    }
+
+    /// The nominal boot of the previous release (`svc-threads` 0.4.0): what a
+    /// deployment ran, and stored with, before the upgrade.
+    pub async fn setup_previous() -> Self {
+        Self::boot_on(previous::binary(), Handshake::Accept, Windows::default()).await
+    }
+
+    async fn boot_on(binary: PathBuf, handshake: Handshake, windows: Windows) -> Self {
         let _ = dotenvy::dotenv();
 
         let suffix = Uuid::now_v7().simple().to_string();
@@ -216,7 +240,7 @@ impl TestContext {
         let minio = infra::Minio::start().await;
 
         let migrated = run_once(
-            env!("CARGO_BIN_EXE_svc-threads"),
+            binary.to_str().expect("a UTF-8 binary path"),
             &[MIGRATE_ARG],
             &[
                 (ENV_DATABASE_URL_OWNER, db.owner_migration_url().as_str()),
@@ -248,6 +272,7 @@ impl TestContext {
             pool,
             minio,
             db,
+            binary,
             service: None,
             pods: Vec::new(),
             pod: 0,
@@ -327,8 +352,12 @@ impl TestContext {
         let declared_before = self.scopes.count();
         let env = self.service_env(port);
         let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let mut service =
-            SpawnedProcess::spawn(env!("CARGO_BIN_EXE_svc-threads"), &[SERVE_ARG], &env);
+        let binary = self
+            .binary
+            .to_str()
+            .expect("a UTF-8 binary path")
+            .to_string();
+        let mut service = SpawnedProcess::spawn(&binary, &[SERVE_ARG], &env);
 
         let port_taken =
             |service: &SpawnedProcess| service.logs().contains("Address already in use");
@@ -381,6 +410,92 @@ impl TestContext {
     pub async fn start_again(&mut self, handshake: Handshake) {
         assert!(self.service.is_none(), "stop the running instance first");
         self.spawn(handshake).await;
+    }
+
+    /// The upgrade: the running pod (the previous release) is stopped, then
+    /// this version starts on the same database, bus and bucket as a
+    /// deployment starts it — `migrate`, then `serve`, its scope declaration
+    /// accepted. A `migrate` that fails keeps `serve` from ever starting. The
+    /// outcome says whether this version became ready, with what it said.
+    pub async fn upgrade(&mut self) -> Upgrade {
+        self.stop().await;
+        self.binary = PathBuf::from(env!("CARGO_BIN_EXE_svc-threads"));
+        self.start_current().await
+    }
+
+    /// This version started again on the same database, as after a restart:
+    /// `migrate`, then `serve`.
+    pub async fn restart_current(&mut self) -> Upgrade {
+        self.stop().await;
+        self.start_current().await
+    }
+
+    async fn start_current(&mut self) -> Upgrade {
+        let migrated = run_once(
+            self.binary.to_str().expect("a UTF-8 binary path"),
+            &[MIGRATE_ARG],
+            &[
+                (
+                    ENV_DATABASE_URL_OWNER,
+                    self.db.owner_migration_url().as_str(),
+                ),
+                (ENV_APP_ROLE, APP_ROLE),
+                (ENV_TRUSTED_NETWORK_HOSTS, "127.0.0.1,localhost"),
+            ],
+            READY_TIMEOUT,
+        )
+        .await
+        .expect("svc-threads migrate runs to completion");
+        let migrate_output = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&migrated.stdout),
+            String::from_utf8_lossy(&migrated.stderr)
+        );
+        if !migrated.status.success() {
+            return Upgrade {
+                migrated: false,
+                ready: false,
+                output: migrate_output,
+            };
+        }
+
+        self.pod += 1;
+        let port = free_port();
+        let base_url = format!("http://127.0.0.1:{port}");
+        let declared_before = self.scopes.count();
+        let env = self.service_env(port);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let binary = self
+            .binary
+            .to_str()
+            .expect("a UTF-8 binary path")
+            .to_string();
+        let mut service = SpawnedProcess::spawn(&binary, &[SERVE_ARG], &env);
+        // Identity accepts the declaration whenever this boot publishes it.
+        if wait_until(READY_TIMEOUT, || async {
+            self.scopes.count() > declared_before
+        })
+        .await
+        {
+            let correlation = self
+                .scopes
+                .await_declare(declared_before + 1, "the upgraded boot's scope declaration")
+                .await;
+            self.scopes.accept(&self.nats, correlation).await;
+        }
+        let boot = service
+            .await_boot(&format!("{base_url}{READYZ_PATH}"), UPGRADE_READY_TIMEOUT)
+            .await;
+        let ready = boot.is_ready();
+        let output = format!("{migrate_output}\n{}", service.logs());
+        self.gql_client = GraphqlClient::new(&base_url);
+        self.base_url = base_url;
+        self.service = Some(service);
+        Upgrade {
+            migrated: true,
+            ready,
+            output,
+        }
     }
 
     pub async fn teardown(mut self) {
@@ -694,6 +809,21 @@ impl TestContext {
             .map(|bytes| serde_json::from_slice(&bytes).expect("a JSON manifest"))
     }
 }
+
+/// How this version started on a database the previous release stored in.
+#[derive(Debug)]
+pub struct Upgrade {
+    /// `migrate` ran to success.
+    pub migrated: bool,
+    /// `serve` reached readiness.
+    pub ready: bool,
+    /// What `migrate`, then `serve`, said.
+    pub output: String,
+}
+
+/// How long an upgraded boot is given to become ready — the conversion runs
+/// in it — and how long a boot that must not become ready is watched.
+pub const UPGRADE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Polls `check` until it holds, failing the scenario with `what` past
 /// `timeout`.

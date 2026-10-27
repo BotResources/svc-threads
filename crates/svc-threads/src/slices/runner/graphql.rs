@@ -2,86 +2,57 @@
 //! super user included — and a service account without `threads:runner` are
 //! refused with its code.
 
-use async_graphql::{Context, InputObject, Object, Result, SimpleObject};
-use contract_threads::llm::Author;
+use async_graphql::{Context, Object, Result};
+use contract_threads::llm::AgentId;
 use service_engine::gate::Reason;
-use service_engine::{JsonScalar, MutationAck, Query};
+use service_engine::session::WindowParams;
+use service_engine::{MutationAck, OrInternal, Query};
 use uuid::Uuid;
 
-use super::context::{self, RunnerThreads};
+use super::context::{ContextView, ContextWindow, ThreadContext};
 use crate::access;
 use crate::principal::ThreadsPrincipal;
 use crate::slices::thread::title_job::{RunnerFailTitleJob, RunnerSetTitle};
-use crate::slices::thread::view::{MemberView, ResourceView};
 
-/// An AI perspective whose id or name is blank.
+/// An agent id that is not a UUIDv7: the library's agent id is one.
 pub const AI_PERSPECTIVE_INVALID: Reason = Reason::new("AI_PERSPECTIVE_INVALID");
-
-/// The AI a runner answers for: the context is then lightened for it by the
-/// library's rule, so that its render is the same as from the whole one.
-#[derive(Debug, Clone, InputObject)]
-pub struct AiPerspective {
-    pub id: String,
-    pub name: String,
-}
-
-/// What a runner reads of a thread.
-#[derive(Debug, Clone, SimpleObject)]
-pub struct ThreadContext {
-    pub thread_id: Uuid,
-    /// The active branch as a `br-llm-messages/3` conversation (its JSON).
-    pub conversation: JsonScalar,
-    pub members: Vec<MemberView>,
-    pub resources: Vec<ResourceView>,
-}
 
 #[derive(Default)]
 pub struct RunnerQuery;
 
 #[Object]
 impl RunnerQuery {
-    /// A thread's context, whole or lightened for the AI named; `null` for a
-    /// thread that does not exist.
+    /// A thread's context: the agent context of the agent `agentId` names —
+    /// the library's projected thread for it, built by Threads — or, naming
+    /// none, the whole active branch as a `br-llm-messages/5` conversation;
+    /// with the thread's members and resources. `null` for a thread that does
+    /// not exist. An agent id that is not a UUIDv7 is refused
+    /// `AI_PERSPECTIVE_INVALID`.
     async fn threads_context(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
-        ai: Option<AiPerspective>,
+        agent_id: Option<String>,
     ) -> Result<Option<ThreadContext>> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        let ai = match ai {
-            Some(ai) => Some(Author::new(ai.id, ai.name).map_err(|_| AI_PERSPECTIVE_INVALID)?),
+        let agent = match agent_id {
+            Some(agent) => Some(
+                AgentId::parse(&agent)
+                    .map_err(|_| AI_PERSPECTIVE_INVALID)?
+                    .as_uuid(),
+            ),
             None => None,
         };
-        Query::<ThreadsPrincipal>::new(ctx)?
-            .behind::<RunnerThreads>(&thread_id)
-            .read(|thread, conn| {
-                Box::pin(async move {
-                    let conversation = context::read(conn, thread.id, ai).await?;
-                    Ok(ThreadContext {
-                        thread_id: thread.id,
-                        conversation: async_graphql::Json(conversation),
-                        members: thread
-                            .members
-                            .iter()
-                            .map(|(user_id, member)| MemberView {
-                                user_id: *user_id,
-                                display_name: member.display_name.clone(),
-                                in_roster: member.in_roster,
-                            })
-                            .collect(),
-                        resources: thread
-                            .resources
-                            .iter()
-                            .map(|(key, ids)| ResourceView {
-                                key: key.clone(),
-                                ids: ids.clone(),
-                            })
-                            .collect(),
-                    })
-                })
-            })
-            .await
+        let window = ContextWindow {
+            thread: Some(thread_id),
+            agent,
+        };
+        let mut contexts = Query::<ThreadsPrincipal>::new(ctx)?
+            .fetch_window::<ContextView>(
+                WindowParams::encode(&window).or_internal("encode the context window")?,
+            )
+            .await?;
+        Ok(contexts.pop())
     }
 }
 

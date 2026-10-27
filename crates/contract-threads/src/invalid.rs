@@ -1,12 +1,13 @@
-//! The vocabulary of a `MESSAGE_INVALID` refusal's `error` param: why Threads
-//! refused a message's content. Most codes are the conversation model's own
-//! refusals ([`MessageInvalidError::of_library`]), one per `MessageError` of
-//! `br-llm-messages`; the others are Threads' rules on its decomposition of a
-//! message (a block kind its place does not admit, a parent of another thread,
-//! …). Structured detail rides beside it in the refusal's `params`
-//! (`block_id`, `item_index`, `tool_call_id`, `entry_id`, `field`).
+//! The vocabulary of a `MESSAGE_INVALID` refusal's `error` param, and of the
+//! reason a stream failed: why Threads refused a message's content.
+//!
+//! Most codes are the conversation model's own (`br-llm-messages` 2.1
+//! [`ErrorCode`]), published under the library's name: the refusal then also
+//! names the library's `object_id` and `location` when the library gives them.
+//! The others are Threads' rules on a message (a user message holding an
+//! annotation, a parent of another thread, …) and on its stream.
 
-use br_llm_messages::MessageError;
+use br_llm_messages::ErrorCode;
 
 use crate::wire::wire_enum;
 
@@ -15,113 +16,95 @@ wire_enum! {
     /// library: a consumer matching it keeps a fallback arm.
     #[non_exhaustive]
     pub enum MessageInvalidError {
-        // ── the conversation model's refusals ───────────────────────────────
-        Blank => "blank",
-        InvalidToolName => "invalid_tool_name",
-        InvalidBase64 => "invalid_base64",
-        EmptyStep => "empty_step",
-        ToolCallNotAtTail => "tool_call_not_at_tail",
-        AwaitingToolResultsWithoutCalls => "awaiting_tool_results_without_calls",
-        ToolCallsWithoutAwaiting => "tool_calls_without_awaiting",
-        DuplicateToolCallId => "duplicate_tool_call_id",
-        DuplicateToolCallIdInTurn => "duplicate_tool_call_id_in_turn",
-        DuplicateToolCallIdInConversation => "duplicate_tool_call_id_in_conversation",
-        EmptyUserContent => "empty_user_content",
-        DuplicateToolResultId => "duplicate_tool_result_id",
-        ToolResultNotPending => "tool_result_not_pending",
-        ToolNameMismatch => "tool_name_mismatch",
-        EmptyToolResults => "empty_tool_results",
-        TurnNotAwaitingResults => "turn_not_awaiting_results",
-        TurnNotAwaitingStep => "turn_not_awaiting_step",
-        TurnMustStartWithStep => "turn_must_start_with_step",
-        DuplicateEntryId => "duplicate_entry_id",
-        TurnNotFound => "turn_not_found",
+        // ── the conversation model's refusals (br-llm-messages 2.1) ─────────
+        InvalidIdentity => "invalid_identity",
+        ReusedIdentity => "reused_identity",
+        InvalidAuthor => "invalid_author",
+        AuthorForbidden => "author_forbidden",
+        InvalidContent => "invalid_content",
+        DisallowedKind => "disallowed_kind",
+        UnknownReference => "unknown_reference",
+        DuplicateResult => "duplicate_result",
+        MismatchedResult => "mismatched_result",
+        EntryOutOfOrder => "entry_out_of_order",
+        ClosedTurn => "closed_turn",
+        UnresolvedExecution => "unresolved_execution",
+        InvalidRecordStructure => "invalid_record_structure",
+        MalformedJson => "malformed_json",
         SchemaMismatch => "schema_mismatch",
-        TurnAwaitingResults => "turn_awaiting_results",
-        RenderStartsWithAssistant => "render_starts_with_assistant",
-        EmptyRender => "empty_render",
-        NoOpenBlock => "no_open_block",
-        BlockStillOpen => "block_still_open",
-        UnexpectedBlockIndex => "unexpected_block_index",
-        BlockKindMismatch => "block_kind_mismatch",
-        ToolCallNeedsStart => "tool_call_needs_start",
-        EventAfterFinish => "event_after_finish",
-        MissingFinish => "missing_finish",
-        InvalidJson => "invalid_json",
-        WireListEmpty => "wire_list_empty",
-        WireListNotStartingWithUser => "wire_list_not_starting_with_user",
-        WireToolCallUnanswered => "wire_tool_call_unanswered",
-        WireToolCallAnsweredTwice => "wire_tool_call_answered_twice",
-        WireToolResultUnmatched => "wire_tool_result_unmatched",
-        WireToolCallIdRepeated => "wire_tool_call_id_repeated",
+        VariantMismatch => "variant_mismatch",
+        StreamTargetError => "stream_target_error",
+        StreamPhaseError => "stream_phase_error",
+        InconsistentFinalization => "inconsistent_finalization",
         /// A refusal of a later library version, not named here yet.
         LibraryRefusal => "library_refusal",
-        // ── Threads' own rules ──────────────────────────────────────────────
-        /// A block of a kind its place does not admit (a tool result in a user
-        /// input, a thinking in a tool results item, …).
-        BlockKindNotAllowed => "block_kind_not_allowed",
-        /// A library block whose content is not the library's JSON for its
-        /// kind, nor a value the library names a refusal for.
-        BlockContentInvalid => "block_content_invalid",
-        /// An `ARTIFACT` block in a user message: only runners and AIs produce
-        /// artifacts.
-        ArtifactInUserMessage => "artifact_in_user_message",
-        /// An AI turn given whole left awaiting tool results.
-        TurnAwaitingToolResults => "turn_awaiting_tool_results",
-        /// An AI author whose id or name is blank.
-        AuthorInvalid => "author_invalid",
+        // ── Threads' own rules on a message ─────────────────────────────────
+        /// The turn's id is not the message's.
+        TurnIdMismatch => "turn_id_mismatch",
+        /// A user message whose turn is not an input turn holding one human
+        /// message.
+        NotAUserTurn => "not_a_user_turn",
+        /// A user message holding an annotation.
+        AnnotationInUserMessage => "annotation_in_user_message",
+        /// An annotation after an entry the message does not hold.
+        AnnotationEntryUnknown => "annotation_entry_unknown",
+        /// An AI turn whose agent or author is not the one the command names.
+        AuthorMismatch => "author_mismatch",
+        /// An AI message whose turn is an input turn holding a human message:
+        /// a human message travels in a user message only, whose author is a
+        /// member.
+        HumanMessageInAiMessage => "human_message_in_ai_message",
+        /// A string holding U+0000, which the store cannot keep (Postgres
+        /// refuses it in `text` and `jsonb`).
+        NulCharacter => "nul_character",
         /// The parent is not a message of the thread.
         ParentNotInThread => "parent_not_in_thread",
+        // ── Threads' own rules on a stream ──────────────────────────────────
+        /// A chunk the contract cannot read.
+        ChunkUnreadable => "chunk_unreadable",
+        /// A model response pushed as a whole entry: a response streams as
+        /// deltas.
+        ResponseInEntryChunk => "response_in_entry_chunk",
+        /// An entry, or another response, pushed while a response is still
+        /// produced.
+        ResponseStillProducing => "response_still_producing",
+        /// A closure pushed on the stream: closing the turn is Threads'.
+        ClosureByWriter => "closure_by_writer",
+        // ── the deprecated v1 forms ─────────────────────────────────────────
+        /// A `STREAMING` opening by `message.store` v1: stream with v2.
+        StreamingV1 => "streaming_v1",
+        /// Content of the 0.4 form the 2.0 model has no place for, or JSON
+        /// that is not 0.4's.
+        V1NotConvertible => "v1_not_convertible",
     }
 }
 
 impl MessageInvalidError {
-    /// The code of a refusal of the conversation model. A refusal a later
-    /// library adds is [`Self::LibraryRefusal`] until it is named here: on
-    /// every library upgrade, its changelog's new `MessageError` variants get
-    /// a code.
-    pub fn of_library(error: &MessageError) -> Self {
-        match error {
-            MessageError::Blank { .. } => Self::Blank,
-            MessageError::InvalidToolName => Self::InvalidToolName,
-            MessageError::InvalidBase64 => Self::InvalidBase64,
-            MessageError::EmptyStep => Self::EmptyStep,
-            MessageError::ToolCallNotAtTail => Self::ToolCallNotAtTail,
-            MessageError::AwaitingToolResultsWithoutCalls => Self::AwaitingToolResultsWithoutCalls,
-            MessageError::ToolCallsWithoutAwaiting => Self::ToolCallsWithoutAwaiting,
-            MessageError::DuplicateToolCallId { .. } => Self::DuplicateToolCallId,
-            MessageError::DuplicateToolCallIdInTurn { .. } => Self::DuplicateToolCallIdInTurn,
-            MessageError::DuplicateToolCallIdInConversation { .. } => {
-                Self::DuplicateToolCallIdInConversation
-            }
-            MessageError::EmptyUserContent => Self::EmptyUserContent,
-            MessageError::DuplicateToolResultId { .. } => Self::DuplicateToolResultId,
-            MessageError::ToolResultNotPending { .. } => Self::ToolResultNotPending,
-            MessageError::ToolNameMismatch { .. } => Self::ToolNameMismatch,
-            MessageError::EmptyToolResults => Self::EmptyToolResults,
-            MessageError::TurnNotAwaitingResults { .. } => Self::TurnNotAwaitingResults,
-            MessageError::TurnNotAwaitingStep { .. } => Self::TurnNotAwaitingStep,
-            MessageError::TurnMustStartWithStep => Self::TurnMustStartWithStep,
-            MessageError::DuplicateEntryId { .. } => Self::DuplicateEntryId,
-            MessageError::TurnNotFound { .. } => Self::TurnNotFound,
-            MessageError::SchemaMismatch { .. } => Self::SchemaMismatch,
-            MessageError::TurnAwaitingResults => Self::TurnAwaitingResults,
-            MessageError::RenderStartsWithAssistant => Self::RenderStartsWithAssistant,
-            MessageError::EmptyRender => Self::EmptyRender,
-            MessageError::NoOpenBlock { .. } => Self::NoOpenBlock,
-            MessageError::BlockStillOpen { .. } => Self::BlockStillOpen,
-            MessageError::UnexpectedBlockIndex { .. } => Self::UnexpectedBlockIndex,
-            MessageError::BlockKindMismatch { .. } => Self::BlockKindMismatch,
-            MessageError::ToolCallNeedsStart => Self::ToolCallNeedsStart,
-            MessageError::EventAfterFinish => Self::EventAfterFinish,
-            MessageError::MissingFinish => Self::MissingFinish,
-            MessageError::InvalidJson { .. } => Self::InvalidJson,
-            MessageError::WireListEmpty => Self::WireListEmpty,
-            MessageError::WireListNotStartingWithUser { .. } => Self::WireListNotStartingWithUser,
-            MessageError::WireToolCallUnanswered { .. } => Self::WireToolCallUnanswered,
-            MessageError::WireToolCallAnsweredTwice { .. } => Self::WireToolCallAnsweredTwice,
-            MessageError::WireToolResultUnmatched { .. } => Self::WireToolResultUnmatched,
-            MessageError::WireToolCallIdRepeated { .. } => Self::WireToolCallIdRepeated,
+    /// The code of a refusal of the conversation model. A code a later library
+    /// adds is [`Self::LibraryRefusal`] until it is named here: on every
+    /// library upgrade, its changelog's new `ErrorCode` variants get a code.
+    pub fn of_library(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::InvalidIdentity => Self::InvalidIdentity,
+            ErrorCode::ReusedIdentity => Self::ReusedIdentity,
+            ErrorCode::InvalidAuthor => Self::InvalidAuthor,
+            ErrorCode::AuthorForbidden => Self::AuthorForbidden,
+            ErrorCode::InvalidContent => Self::InvalidContent,
+            ErrorCode::DisallowedKind => Self::DisallowedKind,
+            ErrorCode::UnknownReference => Self::UnknownReference,
+            ErrorCode::DuplicateResult => Self::DuplicateResult,
+            ErrorCode::MismatchedResult => Self::MismatchedResult,
+            ErrorCode::EntryOutOfOrder => Self::EntryOutOfOrder,
+            ErrorCode::ClosedTurn => Self::ClosedTurn,
+            ErrorCode::UnresolvedExecution => Self::UnresolvedExecution,
+            ErrorCode::InvalidRecordStructure => Self::InvalidRecordStructure,
+            ErrorCode::MalformedJson => Self::MalformedJson,
+            ErrorCode::SchemaMismatch => Self::SchemaMismatch,
+            ErrorCode::VariantMismatch => Self::VariantMismatch,
+            ErrorCode::StreamTargetError => Self::StreamTargetError,
+            ErrorCode::StreamPhaseError => Self::StreamPhaseError,
+            ErrorCode::InconsistentFinalization => Self::InconsistentFinalization,
+            // `ErrorCode` is non-exhaustive: a code of a later library.
             _ => Self::LibraryRefusal,
         }
     }
@@ -129,172 +112,22 @@ impl MessageInvalidError {
 
 #[cfg(test)]
 mod tests {
-    use br_llm_messages::{ToolCallId, ToolName, TurnId, TurnStateLabel};
-
     use super::*;
 
-    /// Every refusal of `br-llm-messages` v0.5.0, each with the code it
-    /// publishes: the table is the contract.
+    /// Every error code of `br-llm-messages` v2.1.0 is published under the
+    /// library's own name: the table is the contract.
     #[test]
-    fn every_refusal_of_the_library_has_its_published_code() {
-        let id = || ToolCallId::new("c1").unwrap();
-        let name = |name: &str| ToolName::new(name).unwrap();
-        let table: Vec<(MessageError, &str)> = vec![
-            (MessageError::Blank { field: "text" }, "blank"),
-            (MessageError::InvalidToolName, "invalid_tool_name"),
-            (MessageError::InvalidBase64, "invalid_base64"),
-            (MessageError::EmptyStep, "empty_step"),
-            (MessageError::ToolCallNotAtTail, "tool_call_not_at_tail"),
-            (
-                MessageError::AwaitingToolResultsWithoutCalls,
-                "awaiting_tool_results_without_calls",
-            ),
-            (
-                MessageError::ToolCallsWithoutAwaiting,
-                "tool_calls_without_awaiting",
-            ),
-            (
-                MessageError::DuplicateToolCallId { id: id() },
-                "duplicate_tool_call_id",
-            ),
-            (
-                MessageError::DuplicateToolCallIdInTurn { id: id() },
-                "duplicate_tool_call_id_in_turn",
-            ),
-            (
-                MessageError::DuplicateToolCallIdInConversation { id: id() },
-                "duplicate_tool_call_id_in_conversation",
-            ),
-            (MessageError::EmptyUserContent, "empty_user_content"),
-            (
-                MessageError::DuplicateToolResultId { id: id() },
-                "duplicate_tool_result_id",
-            ),
-            (
-                MessageError::ToolResultNotPending {
-                    given: id(),
-                    pending: Vec::new(),
-                },
-                "tool_result_not_pending",
-            ),
-            (
-                MessageError::ToolNameMismatch {
-                    id: id(),
-                    call: name("search"),
-                    result: name("fetch"),
-                },
-                "tool_name_mismatch",
-            ),
-            (MessageError::EmptyToolResults, "empty_tool_results"),
-            (
-                MessageError::TurnNotAwaitingResults {
-                    state: TurnStateLabel::Finished,
-                },
-                "turn_not_awaiting_results",
-            ),
-            (
-                MessageError::TurnNotAwaitingStep {
-                    state: TurnStateLabel::Finished,
-                },
-                "turn_not_awaiting_step",
-            ),
-            (
-                MessageError::TurnMustStartWithStep,
-                "turn_must_start_with_step",
-            ),
-            (
-                MessageError::DuplicateEntryId { id: "m1".into() },
-                "duplicate_entry_id",
-            ),
-            (
-                MessageError::TurnNotFound {
-                    id: TurnId::new("t1").unwrap(),
-                },
-                "turn_not_found",
-            ),
-            (
-                MessageError::SchemaMismatch {
-                    found: "br-llm-messages/2".into(),
-                },
-                "schema_mismatch",
-            ),
-            (MessageError::TurnAwaitingResults, "turn_awaiting_results"),
-            (
-                MessageError::RenderStartsWithAssistant,
-                "render_starts_with_assistant",
-            ),
-            (MessageError::EmptyRender, "empty_render"),
-            (MessageError::NoOpenBlock { index: 0 }, "no_open_block"),
-            (
-                MessageError::BlockStillOpen { index: 0 },
-                "block_still_open",
-            ),
-            (
-                MessageError::UnexpectedBlockIndex {
-                    expected: 0,
-                    given: 1,
-                },
-                "unexpected_block_index",
-            ),
-            (
-                MessageError::BlockKindMismatch { index: 0 },
-                "block_kind_mismatch",
-            ),
-            (MessageError::ToolCallNeedsStart, "tool_call_needs_start"),
-            (MessageError::EventAfterFinish, "event_after_finish"),
-            (MessageError::MissingFinish, "missing_finish"),
-            (
-                MessageError::InvalidJson {
-                    field: "structured",
-                    message: "eof".into(),
-                },
-                "invalid_json",
-            ),
-            (MessageError::WireListEmpty, "wire_list_empty"),
-            (
-                MessageError::WireListNotStartingWithUser { message: 0 },
-                "wire_list_not_starting_with_user",
-            ),
-            (
-                MessageError::WireToolCallUnanswered {
-                    message: 1,
-                    block: 0,
-                    id: id(),
-                },
-                "wire_tool_call_unanswered",
-            ),
-            (
-                MessageError::WireToolCallAnsweredTwice {
-                    message: 2,
-                    block: 1,
-                    id: id(),
-                },
-                "wire_tool_call_answered_twice",
-            ),
-            (
-                MessageError::WireToolResultUnmatched {
-                    message: 2,
-                    block: 0,
-                    id: id(),
-                },
-                "wire_tool_result_unmatched",
-            ),
-            (
-                MessageError::WireToolCallIdRepeated {
-                    message: 3,
-                    block: 0,
-                    id: id(),
-                },
-                "wire_tool_call_id_repeated",
-            ),
-        ];
-        assert_eq!(table.len(), 38, "the 38 refusals of br-llm-messages v0.5.0");
+    fn every_code_of_the_library_is_published_under_its_own_name() {
+        assert_eq!(
+            ErrorCode::ALL.len(),
+            19,
+            "the 19 codes of br-llm-messages v2.1.0 (2.1 adds none)"
+        );
         let mut codes = std::collections::BTreeSet::new();
-        for (error, code) in &table {
-            let published = MessageInvalidError::of_library(error);
-            assert_eq!(published.as_str(), *code, "{error:?}");
-            assert_ne!(published, MessageInvalidError::LibraryRefusal, "{error:?}");
-            assert!(codes.insert(*code), "{code} is published once");
+        for code in ErrorCode::ALL {
+            let published = MessageInvalidError::of_library(*code);
+            assert_eq!(published.as_str(), code.as_str(), "{code:?}");
+            assert!(codes.insert(published), "{code:?} is published once");
         }
     }
 

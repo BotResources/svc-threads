@@ -1,33 +1,35 @@
 use contract_threads::llm::{
-    AssistantBlock, BlockKind as StreamKind, StopReason, StreamEvent, ToolCallId, ToolName,
-    ToolResult, ToolResultBlock,
+    BlockStart, ClosureReason, ContentBlock, DeltaOp, Finalization, HumanId, HumanMessage,
+    PlainBlock, ResponseEnding, ResponseMetadata, RuntimeNotice, RuntimeToolResult,
+    RuntimeToolResults, TextBlock, ToolName, TurnEntry,
 };
-use contract_threads::{
-    ArtifactRef, Block, BlockBody, Chunk, ChunkPart, LibraryEvent, MessageInvalidError,
-    MessageStatus,
-};
+use contract_threads::{Annotation, AnnotationBody, ArtifactRef, LibraryJson};
+
+use contract_threads::llm::ModelResponse;
 
 use super::*;
 
-fn lib(event: StreamEvent) -> LibraryEvent {
-    LibraryEvent::of(&event).unwrap()
+fn v7() -> Uuid {
+    Uuid::now_v7()
 }
 
-/// Closes a stream alone on its branch.
-fn close_alone(draft: &MessageDraft, kind: CloseKind) -> Closed {
-    close(draft, kind, &UsedCallIds::new())
-}
-
-/// A writer pushing chunks, numbered from 0.
-#[derive(Default)]
+/// A writer pushing chunks on one message's stream, numbered from 0.
 struct Writer {
-    draft: MessageDraft,
+    draft: TurnDraft,
     seq: u64,
+    turn: TurnId,
 }
 
 impl Writer {
-    fn push(&mut self, item_index: u32, part: ChunkPart) -> &mut Self {
-        let chunk = Chunk { item_index, part };
+    fn new() -> Self {
+        Self {
+            draft: TurnDraft::default(),
+            seq: 0,
+            turn: TurnId::from_uuid(v7()).unwrap(),
+        }
+    }
+
+    fn push(&mut self, chunk: Chunk) -> &mut Self {
         fold(
             &mut self.draft,
             self.seq,
@@ -37,841 +39,482 @@ impl Writer {
         self
     }
 
-    fn event(&mut self, item: u32, event: StreamEvent) -> &mut Self {
-        let block_id = matches!(
-            event,
-            StreamEvent::BlockStart { .. } | StreamEvent::ToolCallStart { .. }
-        )
-        .then(Uuid::now_v7);
-        self.push(
-            item,
-            ChunkPart::StepEvent {
-                event: lib(event),
-                block_id,
-                model: None,
-            },
-        )
+    fn delta(&mut self, entry: EntryId, op: DeltaOp) -> &mut Self {
+        let chunk = Chunk::delta(&ResponseDelta::new(self.turn, entry, op)).unwrap();
+        self.push(chunk)
     }
 
-    fn text_block(&mut self, item: u32, index: usize, parts: &[&str]) -> &mut Self {
-        self.event(
-            item,
-            StreamEvent::BlockStart {
-                index,
-                kind: StreamKind::Text,
-            },
-        );
+    fn entry(&mut self, entry: TurnEntry) -> &mut Self {
+        self.push(Chunk::entry(&entry).unwrap())
+    }
+
+    /// A response whose one text block grows from `parts`, completed when
+    /// `ending` is given.
+    fn text_response(&mut self, parts: &[&str], ending: Option<ResponseEnding>) -> EntryId {
+        let entry = EntryId::from_uuid(v7()).unwrap();
+        let block = BlockId::from_uuid(v7()).unwrap();
+        self.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+        self.delta(entry, DeltaOp::block_started(block, BlockStart::text()));
         for part in parts {
-            self.event(
-                item,
-                StreamEvent::TextDelta {
-                    index,
-                    text: part.to_string(),
-                },
-            );
+            self.delta(entry, DeltaOp::text_appended(block, *part));
         }
-        self.event(item, StreamEvent::BlockEnd { index })
+        if let Some(ending) = ending {
+            self.delta(
+                entry,
+                DeltaOp::block_finalized(block, Finalization::accumulated()),
+            );
+            self.delta(entry, DeltaOp::response_completed(ending));
+        }
+        entry
     }
 
-    fn tool_call(&mut self, item: u32, index: usize, id: &str, arguments: &str) -> &mut Self {
-        self.event(
-            item,
-            StreamEvent::ToolCallStart {
-                index,
-                id: ToolCallId::new(id).unwrap(),
-                name: ToolName::new("search").unwrap(),
-            },
+    /// A response ending on a runtime call of `search`; answers the call's id.
+    fn calling_response(&mut self) -> BlockId {
+        let entry = EntryId::from_uuid(v7()).unwrap();
+        let call = BlockId::from_uuid(v7()).unwrap();
+        self.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+        self.delta(
+            entry,
+            DeltaOp::block_started(
+                call,
+                BlockStart::runtime_tool_call(Some(ToolName::new("search").unwrap()), None),
+            ),
         );
-        self.event(
-            item,
-            StreamEvent::ToolCallArgumentsDelta {
-                index,
-                json_fragment: arguments.to_string(),
-            },
+        self.delta(entry, DeltaOp::json_appended(call, r#"{"q":"rust"}"#));
+        self.delta(
+            entry,
+            DeltaOp::block_finalized(call, Finalization::accumulated()),
         );
-        self.event(item, StreamEvent::BlockEnd { index })
+        self.delta(
+            entry,
+            DeltaOp::response_completed(ResponseEnding::tool_use()),
+        );
+        call
     }
 
-    fn finish(&mut self, item: u32, stop_reason: StopReason) -> &mut Self {
-        self.event(
-            item,
-            StreamEvent::Finish {
-                stop_reason,
-                usage: None,
-            },
-        )
-    }
-
-    fn results(&mut self, item: u32, answered: &[&str]) -> &mut Self {
-        let blocks = answered
-            .iter()
-            .map(|id| {
-                Block::new(
-                    Uuid::now_v7(),
-                    BlockBody::tool_result(&ToolResult::new(
-                        ToolCallId::new(*id).unwrap(),
-                        ToolName::new("search").unwrap(),
-                        vec![ToolResultBlock::text(Text::new("found").unwrap())],
-                        false,
-                    ))
-                    .unwrap(),
+    fn results(&mut self, call: BlockId) -> &mut Self {
+        let result = RuntimeToolResult::new(
+            BlockId::from_uuid(v7()).unwrap(),
+            call,
+            ToolName::new("search").unwrap(),
+            false,
+            vec![
+                PlainBlock::try_from(
+                    TextBlock::new(BlockId::from_uuid(v7()).unwrap(), "found").unwrap(),
                 )
-            })
-            .collect();
-        self.push(item, ChunkPart::ToolResults { blocks })
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let entry =
+            RuntimeToolResults::new(EntryId::from_uuid(v7()).unwrap(), vec![result]).unwrap();
+        self.entry(entry.into())
     }
 
-    fn artifact(&mut self, item: u32) -> &mut Self {
-        self.push(
-            item,
-            ChunkPart::Block {
-                block: Block::new(
-                    Uuid::now_v7(),
-                    BlockBody::Artifact(ArtifactRef {
-                        artifact_id: Uuid::now_v7(),
-                    }),
-                ),
-            },
-        )
+    fn judged(&self) -> Judged {
+        self.judged_holding(&HashSet::new())
+    }
+
+    fn judged_holding(&self, held: &HashSet<Uuid>) -> Judged {
+        self.draft
+            .judge(
+                self.turn,
+                AgentId::from_uuid(v7()).unwrap(),
+                &Author::new("Analyst").unwrap(),
+                held,
+            )
+            .unwrap()
+    }
+
+    fn closed(&self, kind: CloseKind) -> Closed {
+        close(self.judged(), kind).unwrap()
     }
 }
 
-fn library_blocks(item: &StoredItem) -> Vec<AssistantBlock> {
-    item.blocks
+fn kinds(content: &Content) -> Vec<(&'static str, &'static str)> {
+    content
+        .entries
         .iter()
-        .filter(|block| block.kind.is_library())
-        .map(|block| serde_json::from_value(block.content.clone()).unwrap())
+        .map(|entry| (entry.kind().as_str(), entry.state().as_str()))
         .collect()
 }
 
+fn closure_of(content: &Content) -> serde_json::Value {
+    let closure = content
+        .entries
+        .last()
+        .expect("a closed turn holds its closure");
+    serde_json::to_value(closure.payload()).unwrap()["reason"]["type"].clone()
+}
+
 #[test]
-fn a_step_folds_as_it_streams_and_completes_on_its_finish() {
-    let mut writer = Writer::default();
-    writer
-        .event(
-            0,
-            StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamKind::Text,
-            },
-        )
-        .event(
-            0,
-            StreamEvent::TextDelta {
-                index: 0,
-                text: "Hel".into(),
-            },
-        );
-    let preview = writer.draft.preview();
-    assert_eq!(preview.len(), 1);
-    assert_eq!(preview[0].status, MessageStatus::Streaming);
-    assert_eq!(preview[0].blocks[0].content["text"], "Hel");
-
-    writer
-        .event(
-            0,
-            StreamEvent::TextDelta {
-                index: 0,
-                text: "lo".into(),
-            },
-        )
-        .event(0, StreamEvent::BlockEnd { index: 0 })
-        .finish(0, StopReason::EndTurn);
+fn a_streamed_response_folds_into_the_turn_and_a_completion_closes_it_completed() {
+    let mut writer = Writer::new();
+    writer.text_response(&["Hel", "lo"], Some(ResponseEnding::finished()));
     assert_eq!(writer.draft.refusal(), None);
-    let preview = writer.draft.preview();
-    assert_eq!(preview[0].status, MessageStatus::Completed);
-    assert_eq!(
-        library_blocks(&preview[0]),
-        vec![AssistantBlock::Text {
-            text: Text::new("Hello").unwrap()
-        }]
-    );
-
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
+    let judged = writer.judged();
+    assert_eq!(judged.turn.entries().len(), 1);
+    assert_eq!(judged.producing(), None);
+    let closed = writer.closed(CloseKind::Complete);
     assert_eq!(closed.status, MessageStatus::Completed);
-    assert_eq!(closed.failure, None);
+    assert_eq!(closed.reason, None);
     assert_eq!(
-        closed.items[0].stop_reason,
-        Some(serde_json::json!({ "type": "end_turn" }))
+        kinds(&closed.content),
+        [("model_response", "complete"), ("turn_closure", "complete")]
+    );
+    assert_eq!(closure_of(&closed.content), "completed");
+    let closure = closed.content.entries.last().unwrap();
+    assert_eq!(
+        closure.id().as_uuid().get_version_num(),
+        7,
+        "a UUIDv7 Threads mints"
     );
 }
 
 #[test]
-fn a_turn_of_steps_and_tool_results_completes_with_threads_blocks_in_place() {
-    let mut writer = Writer::default();
-    writer
-        .push(
-            0,
-            ChunkPart::StepEvent {
-                event: lib(StreamEvent::BlockStart {
-                    index: 0,
-                    kind: StreamKind::Text,
-                }),
-                block_id: Some(Uuid::now_v7()),
-                model: Some("m-1".into()),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::TextDelta {
-                index: 0,
-                text: "Let me look".into(),
-            },
-        )
-        .event(0, StreamEvent::BlockEnd { index: 0 })
-        .tool_call(0, 1, "c1", r#"{"q":"rust"}"#)
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c1"])
-        .text_block(2, 0, &["Found ", "it"])
-        .finish(2, StopReason::EndTurn)
-        .artifact(2);
+fn a_tool_call_answered_by_a_whole_results_entry_then_an_answer_completes() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    writer.results(call);
+    writer.text_response(&["done"], Some(ResponseEnding::finished()));
     assert_eq!(writer.draft.refusal(), None);
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
+    let closed = writer.closed(CloseKind::Complete);
     assert_eq!(closed.status, MessageStatus::Completed);
-    assert_eq!(closed.items.len(), 3);
-    assert_eq!(closed.items[0].model.as_deref(), Some("m-1"));
-    assert_eq!(closed.items[1].kind, ItemKind::ToolResults);
-    let last = &closed.items[2];
-    assert_eq!(last.blocks.len(), 2);
-    assert_eq!(last.blocks[1].kind, BlockKind::Artifact);
     assert_eq!(
-        last.blocks[1].index, 1,
-        "a Threads block takes the next index"
+        kinds(&closed.content),
+        [
+            ("model_response", "complete"),
+            ("runtime_tool_results", "complete"),
+            ("model_response", "complete"),
+            ("turn_closure", "complete")
+        ]
+    );
+}
+
+/// The library's 2.1 order: an incoming entry at any point of an open turn —
+/// here a runtime notice while a call waits for its results, which 2.0
+/// refused `entry_out_of_order`.
+#[test]
+fn a_runtime_notice_while_a_call_is_outstanding_folds_and_the_turn_completes() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    let notice =
+        RuntimeNotice::new(EntryId::from_uuid(v7()).unwrap(), "the search is slow").unwrap();
+    writer.entry(notice.into());
+    writer.results(call);
+    writer.text_response(&["done"], Some(ResponseEnding::finished()));
+    assert_eq!(writer.draft.refusal(), None);
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Completed);
+    assert_eq!(
+        kinds(&closed.content),
+        [
+            ("model_response", "complete"),
+            ("runtime_notice", "complete"),
+            ("runtime_tool_results", "complete"),
+            ("model_response", "complete"),
+            ("turn_closure", "complete")
+        ]
     );
 }
 
 #[test]
-fn a_chunk_the_library_refuses_fails_the_stream_and_freezes_it() {
-    let mut writer = Writer::default();
-    writer.event(
-        0,
-        StreamEvent::TextDelta {
-            index: 0,
-            text: "orphan".into(),
-        },
-    );
-    let refusal = writer.draft.refusal().cloned().expect("refused");
-    assert_eq!(refusal.seq, 0);
-    assert_eq!(refusal.code, "no_open_block");
-    assert_eq!(refusal.item_index, Some(0));
-    writer
-        .text_block(0, 0, &["late"])
-        .finish(0, StopReason::EndTurn);
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
+fn a_response_still_produced_is_shown_and_kept_interrupted_when_the_message_fails() {
+    let mut writer = Writer::new();
+    writer.text_response(&["half an ans"], None);
+    let judged = writer.judged();
+    assert!(judged.producing().is_some(), "members see the draft");
+    let shown = judged.content().unwrap();
+    assert_eq!(kinds(&shown), [("model_response", "producing")]);
+    let closed = writer.closed(CloseKind::Fail);
     assert_eq!(closed.status, MessageStatus::Failed);
-    assert_eq!(closed.failure, Some("no_open_block"));
-    assert!(closed.items.is_empty());
+    assert_eq!(closed.reason, Some(reason::FAILED_BY_WRITER));
+    assert_eq!(
+        kinds(&closed.content),
+        [
+            ("model_response", "interrupted"),
+            ("turn_closure", "complete")
+        ]
+    );
+    assert_eq!(closure_of(&closed.content), "failed");
+    let (entries, blocks) = closed.content.complete_rows();
+    assert_eq!(
+        entries.len(),
+        1,
+        "a runner never receives the interrupted response"
+    );
+    assert!(blocks.is_empty());
 }
 
 #[test]
-fn the_chunk_format_has_its_own_rules() {
-    let mut missing_id = Writer::default();
-    missing_id.push(
-        0,
-        ChunkPart::StepEvent {
-            event: lib(StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamKind::Text,
-            }),
-            block_id: None,
-            model: None,
-        },
+fn a_silent_writer_closes_its_turn_interrupted() {
+    let mut writer = Writer::new();
+    writer.text_response(&["so"], None);
+    let closed = writer.closed(CloseKind::Watch);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert_eq!(closed.reason, Some(reason::STREAM_IDLE));
+    assert_eq!(closure_of(&closed.content), "interrupted");
+}
+
+#[test]
+fn a_delta_its_response_refuses_fails_the_stream_and_nothing_after_it_folds() {
+    let mut writer = Writer::new();
+    let entry = writer.text_response(&["a"], None);
+    writer.delta(
+        entry,
+        DeltaOp::text_appended(BlockId::from_uuid(v7()).unwrap(), "never opened"),
     );
+    let refusal = writer
+        .draft
+        .refusal()
+        .cloned()
+        .expect("the library refuses it");
+    assert_eq!(refusal.code, "stream_target_error");
+    assert_eq!(refusal.seq, Some(3));
+    let before = writer.draft.clone();
+    writer.text_response(&["more"], Some(ResponseEnding::finished()));
+    assert_eq!(writer.draft, before);
+    let closed = writer.closed(CloseKind::Watch);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert_eq!(closed.reason, Some("stream_target_error"));
+    assert_eq!(closure_of(&closed.content), "failed");
+}
+
+#[test]
+fn a_completion_with_a_call_unanswered_fails_and_no_result_is_fabricated() {
+    let mut writer = Writer::new();
+    writer.calling_response();
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert_eq!(closed.reason, Some("unresolved_execution"));
     assert_eq!(
-        missing_id.draft.refusal().map(|r| r.code),
-        Some(chunk_error::BLOCK_ID_REQUIRED)
+        kinds(&closed.content),
+        [("model_response", "complete"), ("turn_closure", "complete")]
+    );
+    let cancelled = writer.closed(CloseKind::Cancel);
+    assert_eq!(cancelled.status, MessageStatus::Cancelled);
+    assert_eq!(closure_of(&cancelled.content), "cancelled");
+}
+
+#[test]
+fn a_completion_while_a_response_is_produced_fails() {
+    let mut writer = Writer::new();
+    writer.text_response(&["not yet"], None);
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert_eq!(closed.reason, Some(reason::RESPONSE_STILL_PRODUCING));
+    assert_eq!(closed.content.entries[0].state().as_str(), "interrupted");
+}
+
+#[test]
+fn a_response_a_closure_or_an_entry_pushed_mid_response_are_refused() {
+    let response = ModelResponse::new(
+        EntryId::from_uuid(v7()).unwrap(),
+        vec![ContentBlock::Text(
+            TextBlock::new(BlockId::from_uuid(v7()).unwrap(), "whole").unwrap(),
+        )],
+        ResponseEnding::finished(),
+        ResponseMetadata::new(),
+    )
+    .unwrap();
+    let mut writer = Writer::new();
+    writer.entry(response.into());
+    assert_eq!(
+        writer.draft.refusal().unwrap().code,
+        "response_in_entry_chunk"
     );
 
-    let mut late_model = Writer::default();
-    late_model.text_block(0, 0, &["a"]).push(
-        0,
-        ChunkPart::StepEvent {
-            event: lib(StreamEvent::Finish {
-                stop_reason: StopReason::EndTurn,
-                usage: None,
-            }),
-            block_id: None,
-            model: Some("m-2".into()),
-        },
+    let mut writer = Writer::new();
+    writer.entry(
+        TurnClosure::new(
+            EntryId::from_uuid(v7()).unwrap(),
+            ClosureReason::completed(),
+        )
+        .into(),
     );
-    assert_eq!(
-        late_model.draft.refusal().map(|r| r.code),
-        Some(chunk_error::MODEL_NOT_FIRST)
-    );
+    assert_eq!(writer.draft.refusal().unwrap().code, "closure_by_writer");
 
-    let mut skipping = Writer::default();
-    skipping.text_block(1, 0, &["a"]);
+    let mut writer = Writer::new();
+    writer.text_response(&["mid"], None);
+    let human = HumanMessage::new(
+        EntryId::from_uuid(v7()).unwrap(),
+        HumanId::from_uuid(v7()).unwrap(),
+        vec![
+            PlainBlock::try_from(TextBlock::new(BlockId::from_uuid(v7()).unwrap(), "hey").unwrap())
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    writer.entry(human.into());
     assert_eq!(
-        skipping.draft.refusal().map(|r| r.code),
-        Some(chunk_error::ITEM_OUT_OF_ORDER)
-    );
-
-    let mut before_finish = Writer::default();
-    before_finish
-        .text_block(0, 0, &["a"])
-        .text_block(1, 0, &["b"]);
-    assert_eq!(
-        before_finish.draft.refusal().map(|r| r.code),
-        Some(chunk_error::ITEM_OUT_OF_ORDER),
-        "an item opens only once the previous one is complete"
-    );
-
-    let mut results_first = Writer::default();
-    results_first.results(0, &["c1"]);
-    assert_eq!(
-        results_first.draft.refusal().map(|r| r.code),
-        Some("turn_must_start_with_step")
-    );
-
-    let mut not_v7 = Writer::default();
-    not_v7.push(
-        0,
-        ChunkPart::StepEvent {
-            event: lib(StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamKind::Text,
-            }),
-            block_id: Some(Uuid::new_v4()),
-            model: None,
-        },
-    );
-    assert_eq!(
-        not_v7.draft.refusal().map(|r| r.code),
-        Some(chunk_error::BLOCK_ID_NOT_UUIDV7)
-    );
-
-    let mut reused = Writer::default();
-    let id = Uuid::now_v7();
-    for index in 0..2 {
-        reused.push(
-            0,
-            ChunkPart::StepEvent {
-                event: lib(StreamEvent::BlockStart {
-                    index,
-                    kind: StreamKind::Text,
-                }),
-                block_id: Some(id),
-                model: None,
-            },
-        );
-        if index == 0 {
-            reused.event(
-                0,
-                StreamEvent::TextDelta {
-                    index: 0,
-                    text: "a".into(),
-                },
-            );
-            reused.event(0, StreamEvent::BlockEnd { index: 0 });
-        }
-    }
-    assert_eq!(
-        reused.draft.refusal().map(|r| r.code),
-        Some(chunk_error::BLOCK_ID_REUSED)
+        writer.draft.refusal().unwrap().code,
+        "response_still_producing"
     );
 }
 
 #[test]
-fn an_unreadable_chunk_is_refused_without_a_decode_error_reaching_the_engine() {
-    let mut draft = MessageDraft::default();
-    fold(&mut draft, 0, serde_json::json!({ "item_index": "zero" }));
-    assert_eq!(
-        draft.refusal().map(|r| r.code),
-        Some(chunk_error::UNREADABLE)
+fn an_annotation_follows_an_entry_the_stream_holds() {
+    let mut writer = Writer::new();
+    let answer = writer.text_response(&["see the file"], Some(ResponseEnding::finished()));
+    let artifact = Annotation::new(
+        v7(),
+        AnnotationBody::Artifact(ArtifactRef { artifact_id: v7() }),
     );
-}
+    writer.push(Chunk::annotation(answer.as_uuid(), artifact.clone()));
+    assert_eq!(writer.draft.refusal(), None);
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(
+        closed.content.annotations,
+        vec![PlacedAnnotation::new(answer.as_uuid(), artifact.clone())]
+    );
+    assert_eq!(
+        closed.content.artifacts(),
+        vec![artifact.body.artifact().unwrap()]
+    );
 
-#[test]
-fn a_cancel_answers_every_open_tool_call_with_an_interrupted_error() {
-    let mut writer = Writer::default();
-    writer
-        .tool_call(0, 0, "c1", "{}")
-        .tool_call(0, 1, "c2", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c1"]);
-    let closed = close_alone(&writer.draft, CloseKind::Cancel);
-    assert_eq!(closed.status, MessageStatus::Cancelled);
-    assert_eq!(closed.items.len(), 2);
-    let results = &closed.items[1];
-    assert_eq!(results.kind, ItemKind::ToolResults);
-    assert_eq!(results.blocks.len(), 2);
-    let interrupted: ToolResult =
-        serde_json::from_value(results.blocks[1].content.clone()).unwrap();
-    assert_eq!(interrupted.tool_call_id.as_str(), "c2");
-    assert!(interrupted.is_error);
-    assert_eq!(
-        interrupted.content,
-        vec![ToolResultBlock::text(Text::new(INTERRUPTED).unwrap())]
-    );
-    let turn = content::turn_of(Uuid::now_v7(), None, &closed.items).expect("the turn loads");
-    assert!(!matches!(
-        turn.state(),
-        TurnState::AwaitingToolResults { .. }
+    let mut writer = Writer::new();
+    writer.push(Chunk::annotation(
+        v7(),
+        Annotation::new(
+            v7(),
+            AnnotationBody::Artifact(ArtifactRef { artifact_id: v7() }),
+        ),
     ));
-}
-
-#[test]
-fn a_failure_with_no_tool_results_yet_opens_the_results_item() {
-    let mut writer = Writer::default();
-    writer
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults);
-    let closed = close_alone(&writer.draft, CloseKind::Fail);
-    assert_eq!(closed.status, MessageStatus::Failed);
-    assert_eq!(closed.items.len(), 2);
-    assert_eq!(closed.items[1].status, MessageStatus::Failed);
-}
-
-#[test]
-fn an_unfinished_step_is_kept_when_the_library_can_finish_it() {
-    let mut writer = Writer::default();
-    writer
-        .event(
-            0,
-            StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamKind::Text,
-            },
-        )
-        .event(
-            0,
-            StreamEvent::TextDelta {
-                index: 0,
-                text: "half an ".into(),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::TextDelta {
-                index: 0,
-                text: "answer".into(),
-            },
-        );
-    let closed = close_alone(&writer.draft, CloseKind::Fail);
-    assert_eq!(closed.status, MessageStatus::Failed);
-    assert_eq!(closed.items.len(), 1);
-    assert_eq!(closed.items[0].status, MessageStatus::Failed);
     assert_eq!(
-        closed.items[0].stop_reason,
-        Some(serde_json::json!({ "type": "other", "reason": INTERRUPTED }))
-    );
-    assert_eq!(
-        library_blocks(&closed.items[0]),
-        vec![AssistantBlock::Text {
-            text: Text::new("half an answer").unwrap()
-        }]
+        writer.draft.refusal().unwrap().code,
+        "annotation_entry_unknown"
     );
 }
 
 #[test]
-fn an_unfinished_step_the_library_cannot_finish_is_dropped() {
-    let mut writer = Writer::default();
-    writer.event(
-        0,
-        StreamEvent::BlockStart {
-            index: 0,
-            kind: StreamKind::Text,
-        },
-    );
-    let closed = close_alone(&writer.draft, CloseKind::Fail);
-    assert_eq!(closed.status, MessageStatus::Failed);
-    assert!(closed.items.is_empty());
-    assert!(!has_a_step(&closed.items));
-
-    let mut broken_call = Writer::default();
-    broken_call
-        .text_block(0, 0, &["calling"])
-        .event(
-            0,
-            StreamEvent::ToolCallStart {
-                index: 1,
-                id: ToolCallId::new("c1").unwrap(),
-                name: ToolName::new("search").unwrap(),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::ToolCallArgumentsDelta {
-                index: 1,
-                json_fragment: "{\"q\":".into(),
-            },
-        );
-    assert!(
-        close_alone(&broken_call.draft, CloseKind::Cancel)
-            .items
-            .is_empty()
-    );
-}
-
-#[test]
-fn a_completion_of_an_unfinished_stream_fails_it_instead() {
-    let mut writer = Writer::default();
-    writer.text_block(0, 0, &["almost"]);
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
-    assert_eq!(closed.status, MessageStatus::Failed);
-    assert_eq!(closed.failure, Some("missing_finish"));
-    assert_eq!(
-        closed.items.len(),
-        1,
-        "the step the library can finish is kept"
-    );
-
-    let empty = close_alone(&MessageDraft::default(), CloseKind::Complete);
-    assert_eq!(empty.status, MessageStatus::Failed);
-    assert!(empty.items.is_empty());
-
-    let mut pending = Writer::default();
-    pending
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults);
-    let awaiting = close_alone(&pending.draft, CloseKind::Complete);
-    assert_eq!(awaiting.status, MessageStatus::Failed);
-    assert_eq!(
-        awaiting.failure,
-        Some(MessageInvalidError::TurnAwaitingToolResults.as_str())
-    );
-    assert_eq!(awaiting.items.len(), 2, "its open call is answered");
-}
-
-#[test]
-fn a_cancel_of_a_refused_stream_is_a_failure() {
-    let mut writer = Writer::default();
-    writer.event(0, StreamEvent::BlockEnd { index: 0 });
-    assert_eq!(
-        close_alone(&writer.draft, CloseKind::Cancel).status,
-        MessageStatus::Failed
-    );
-}
-
-#[test]
-fn a_thinking_and_its_signature_fold_byte_for_byte() {
-    let mut writer = Writer::default();
-    writer
-        .event(
-            0,
-            StreamEvent::BlockStart {
-                index: 0,
-                kind: StreamKind::Thinking,
-            },
-        )
-        .event(
-            0,
-            StreamEvent::ThinkingDelta {
-                index: 0,
-                text: "  let me\n".into(),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::ThinkingDelta {
-                index: 0,
-                text: "\tthink ".into(),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::SignatureDelta {
-                index: 0,
-                signature: "c2ln".into(),
-            },
-        )
-        .event(
-            0,
-            StreamEvent::SignatureDelta {
-                index: 0,
-                signature: "PT0=".into(),
-            },
-        )
-        .event(0, StreamEvent::BlockEnd { index: 0 })
-        .text_block(0, 1, &["answer"])
-        .finish(0, StopReason::EndTurn);
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
-    assert_eq!(closed.status, MessageStatus::Completed);
-    match &library_blocks(&closed.items[0])[0] {
-        AssistantBlock::Thinking(thinking) => {
-            assert_eq!(thinking.text, "  let me\n\tthink ");
-            assert_eq!(thinking.signature.as_ref().unwrap().as_str(), "c2lnPT0=");
-        }
-        other => panic!("a thinking block, not {other:?}"),
-    }
-}
-
-#[test]
-fn a_threads_block_needs_an_item_and_is_never_a_library_block() {
-    let mut first = Writer::default();
-    first.artifact(0);
-    assert_eq!(
-        first.draft.refusal().map(|r| r.code),
-        Some(chunk_error::ITEM_OUT_OF_ORDER)
-    );
-}
-
-fn used(ids: &[&str]) -> UsedCallIds {
-    ids.iter().map(|id| ToolCallId::new(*id).unwrap()).collect()
-}
-
-#[test]
-fn a_blank_text_the_library_drops_is_not_stored_with_the_finished_step() {
-    let mut writer = Writer::default();
-    writer
-        .text_block(0, 0, &["  "])
-        .tool_call(0, 1, "c1", "{}")
-        .text_block(0, 2, &["\n"])
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c1"])
-        .text_block(2, 0, &[""])
-        .text_block(2, 1, &["Found it"])
-        .finish(2, StopReason::EndTurn);
+fn the_judgement_under_the_message_cuts_at_an_id_another_message_holds() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    writer.results(call);
+    let answer = writer.text_response(&["second"], Some(ResponseEnding::finished()));
     assert_eq!(writer.draft.refusal(), None);
-    let streaming = writer.draft.preview();
-    assert_eq!(
-        streaming[0].blocks.len(),
-        1,
-        "a finished step shows what it keeps"
-    );
-
-    let closed = close_alone(&writer.draft, CloseKind::Complete);
-    assert_eq!(closed.status, MessageStatus::Completed);
-    let calling = &closed.items[0];
-    assert_eq!(calling.blocks.len(), 1);
-    assert_eq!(calling.blocks[0].kind, BlockKind::ToolCall);
-    assert_eq!(calling.blocks[0].index, 0);
-    let answer = &closed.items[2];
-    assert_eq!(
-        library_blocks(answer),
-        vec![AssistantBlock::Text {
-            text: Text::new("Found it").unwrap()
-        }]
-    );
-    assert_eq!(answer.blocks[0].kind, BlockKind::Text);
-    content::turn_of(Uuid::now_v7(), None, &closed.items).expect("what is stored loads");
-}
-
-#[test]
-fn a_step_still_streaming_shows_its_blank_text() {
-    let mut writer = Writer::default();
-    writer.event(
-        0,
-        StreamEvent::BlockStart {
-            index: 0,
-            kind: StreamKind::Text,
-        },
-    );
-    let preview = writer.draft.preview();
-    assert_eq!(preview[0].blocks.len(), 1);
-    assert_eq!(preview[0].blocks[0].content["text"], "");
-}
-
-#[test]
-fn a_tool_call_id_used_on_the_branch_fails_the_completion_at_its_step() {
-    let mut writer = Writer::default();
-    writer
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c1"])
-        .tool_call(2, 0, "c2", "{}")
-        .finish(2, StopReason::AwaitingToolResults)
-        .results(3, &["c2"])
-        .text_block(4, 0, &["done"])
-        .finish(4, StopReason::EndTurn);
-    assert_eq!(writer.draft.refusal(), None, "a fold cannot see the branch");
-
-    let alone = close_alone(&writer.draft, CloseKind::Complete);
-    assert_eq!(alone.status, MessageStatus::Completed);
-
-    let closed = close(&writer.draft, CloseKind::Complete, &used(&["c2"]));
+    let held = HashSet::from([answer.as_uuid()]);
+    let judged = writer.judged_holding(&held);
+    assert_eq!(judged.turn.entries().len(), 2);
+    let refusal = judged.refusal.clone().unwrap();
+    assert_eq!(refusal.code, "reused_identity");
+    assert_eq!(refusal.object_id, Some(answer.as_uuid()));
+    let closed = close(judged, CloseKind::Complete).unwrap();
     assert_eq!(closed.status, MessageStatus::Failed);
-    assert_eq!(
-        closed.failure,
-        Some("duplicate_tool_call_id_in_conversation")
-    );
-    assert_eq!(
-        closed.items.len(),
-        2,
-        "the steps before the reused call are kept, the rest dropped"
-    );
-    assert!(content::check_calls_unused(&closed.items, &used(&["c2"])).is_ok());
-
-    let failed = close(&writer.draft, CloseKind::Fail, &used(&["c1"]));
-    assert_eq!(failed.status, MessageStatus::Failed);
-    assert!(failed.items.is_empty(), "its first step reuses c1");
 }
 
 #[test]
-fn the_stricter_rules_of_the_library_refuse_a_chunk_with_its_codes() {
-    let mut dotted = Writer::default();
-    dotted.push(
-        0,
-        ChunkPart::StepEvent {
-            event: LibraryEvent::from_json(serde_json::json!({
-                "type": "tool_call_start", "index": 0, "id": "c1", "name": "web.search"
-            })),
-            block_id: Some(Uuid::now_v7()),
-            model: None,
-        },
-    );
-    let refusal = dotted.draft.refusal().cloned().expect("refused");
-    assert_eq!(refusal.code, "invalid_tool_name");
-    assert_eq!(refusal.item_index, Some(0));
-    assert!(dotted.draft.preview().is_empty(), "nothing folds from it");
-
-    let mut unknown = Writer::default();
-    unknown.push(
-        0,
-        ChunkPart::StepEvent {
-            event: LibraryEvent::from_json(serde_json::json!({ "type": "audio_delta" })),
-            block_id: None,
-            model: None,
-        },
-    );
-    assert_eq!(
-        unknown.draft.refusal().map(|r| r.code),
-        Some(chunk_error::UNREADABLE)
-    );
-
-    let mut mismatch = Writer::default();
-    mismatch
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .push(
-            1,
-            ChunkPart::ToolResults {
-                blocks: vec![Block::new(
-                    Uuid::now_v7(),
-                    BlockBody::tool_result(&ToolResult::new(
-                        ToolCallId::new("c1").unwrap(),
-                        ToolName::new("fetch").unwrap(),
-                        Vec::new(),
-                        false,
-                    ))
-                    .unwrap(),
-                )],
-            },
-        );
-    assert_eq!(
-        mismatch.draft.refusal().map(|r| r.code),
-        Some("tool_name_mismatch")
-    );
-
-    let mut reused = Writer::default();
-    reused
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c1"])
-        .tool_call(2, 0, "c1", "{}")
-        .finish(2, StopReason::AwaitingToolResults);
-    assert_eq!(
-        reused.draft.refusal().map(|r| r.code),
-        Some("duplicate_tool_call_id_in_turn")
-    );
-
-    let mut no_result = Writer::default();
-    no_result
-        .tool_call(0, 0, "c1", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .push(
-            1,
-            ChunkPart::ToolResults {
-                blocks: vec![Block::new(
-                    Uuid::now_v7(),
-                    BlockBody::Artifact(ArtifactRef {
-                        artifact_id: Uuid::now_v7(),
-                    }),
-                )],
-            },
-        );
-    assert_eq!(
-        no_result.draft.refusal().map(|r| r.code),
-        Some("empty_tool_results")
-    );
+fn deltas_naming_another_turn_than_the_message_are_cut_by_the_judgement() {
+    let mut writer = Writer::new();
+    writer.text_response(&["elsewhere"], Some(ResponseEnding::finished()));
+    let judged = writer
+        .draft
+        .judge(
+            TurnId::from_uuid(v7()).unwrap(),
+            AgentId::from_uuid(v7()).unwrap(),
+            &Author::new("Analyst").unwrap(),
+            &HashSet::new(),
+        )
+        .unwrap();
+    assert!(judged.turn.entries().is_empty());
+    assert!(judged.refusal.is_some());
 }
 
 #[test]
-fn a_cancel_is_sealed_as_received_whatever_the_branch_uses() {
-    let mut writer = Writer::default();
-    writer
-        .tool_call(0, 0, "c-used", "{}")
-        .finish(0, StopReason::AwaitingToolResults)
-        .results(1, &["c-used"])
-        .text_block(2, 0, &["answered"])
-        .finish(2, StopReason::EndTurn);
-    let cancelled = close(&writer.draft, CloseKind::Cancel, &used(&["c-used"]));
-    assert_eq!(cancelled.status, MessageStatus::Cancelled);
-    assert_eq!(
-        cancelled.items.len(),
-        3,
-        "a cancelled message is no conversation's"
-    );
-    assert_eq!((cancelled.failure, cancelled.cut), (None, None));
-}
-
-#[test]
-fn a_failure_names_the_cut_its_close_made() {
-    let mut answered = Writer::default();
-    answered
-        .text_block(0, 0, &["first"])
-        .finish(0, StopReason::EndTurn);
-    let mut calling = Writer::default();
-    calling
-        .tool_call(0, 0, "c-used", "{}")
-        .finish(0, StopReason::AwaitingToolResults);
-    let failed = close(&calling.draft, CloseKind::Fail, &used(&["c-used"]));
-    assert_eq!(failed.status, MessageStatus::Failed);
-    assert_eq!(failed.failure, None, "the stream gave no reason of its own");
-    assert_eq!(failed.cut, Some("duplicate_tool_call_id_in_conversation"));
-    assert!(failed.items.is_empty());
-
-    let mut opened = Writer::default();
-    opened.event(
-        0,
-        StreamEvent::BlockStart {
-            index: 0,
-            kind: StreamKind::Text,
-        },
-    );
-    let failed = close_alone(&opened.draft, CloseKind::Fail);
-    assert_eq!(failed.cut, Some(UNFINISHABLE_STEP));
-
-    let whole = close_alone(&answered.draft, CloseKind::Fail);
-    assert_eq!(whole.cut, None, "nothing was cut");
-}
-
-#[test]
-fn a_completion_whose_content_is_dropped_whole_fails() {
-    let mut writer = Writer::default();
-    writer
-        .text_block(0, 0, &["done"])
-        .finish(0, StopReason::EndTurn);
-    let completed = close_alone(&writer.draft, CloseKind::Complete);
-    assert_eq!(completed.status, MessageStatus::Completed);
-    let dropped = completed.without_content();
-    assert_eq!(dropped.status, MessageStatus::Failed);
-    assert_eq!(dropped.failure, Some(chunk_error::BLOCK_ID_REUSED));
-    assert!(dropped.items.is_empty());
-
-    let failed = close_alone(&writer.draft, CloseKind::Fail).without_content();
-    assert_eq!(failed.status, MessageStatus::Failed);
-    assert_eq!(failed.cut, Some(chunk_error::BLOCK_ID_REUSED));
-    let cancelled = close_alone(&writer.draft, CloseKind::Cancel).without_content();
-    assert_eq!(cancelled.status, MessageStatus::Cancelled);
-}
-
-#[test]
-fn a_finished_step_must_line_up_with_what_streamed() {
-    let mut step = DraftStep::default();
-    step.library.push(LibraryBlock::Text { text: " ".into() });
-    step.library.push(LibraryBlock::Text {
-        text: "kept".into(),
-    });
-    let text = |text: &str| AssistantBlock::Text {
-        text: Text::new(text).unwrap(),
+fn an_unreadable_chunk_is_refused() {
+    let mut draft = TurnDraft::default();
+    fold(&mut draft, 0, serde_json::json!({ "kind": "STEP_EVENT" }));
+    assert_eq!(draft.refusal().unwrap().code, "chunk_unreadable");
+    let mut draft = TurnDraft::default();
+    let chunk = Chunk::Entry {
+        entry: LibraryJson::from_json(serde_json::json!({ "type": "task_started" })),
     };
-    let finished = |blocks| Step::new(blocks, StopReason::EndTurn, None, None).unwrap();
-    assert!(step.aligned(&finished(vec![text("kept")])));
-    assert!(!step.aligned(&finished(vec![text("kept"), text("more")])));
-    let thinking = AssistantBlock::Thinking(contract_threads::llm::Thinking {
-        text: "x".into(),
-        signature: None,
-    });
-    assert!(!step.aligned(&finished(vec![thinking])));
+    fold(&mut draft, 0, serde_json::to_value(chunk).unwrap());
+    assert_eq!(draft.refusal().unwrap().code, "invalid_content");
+}
+
+#[test]
+fn a_cancel_keeps_the_results_of_one_call_of_two_and_answers_none_for_the_other() {
+    let mut writer = Writer::new();
+    let entry = EntryId::from_uuid(v7()).unwrap();
+    writer.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+    let mut calls = Vec::new();
+    for query in [r#"{"q":"one"}"#, r#"{"q":"two"}"#] {
+        let call = BlockId::from_uuid(v7()).unwrap();
+        writer.delta(
+            entry,
+            DeltaOp::block_started(
+                call,
+                BlockStart::runtime_tool_call(Some(ToolName::new("search").unwrap()), None),
+            ),
+        );
+        writer.delta(entry, DeltaOp::json_appended(call, query));
+        writer.delta(
+            entry,
+            DeltaOp::block_finalized(call, Finalization::accumulated()),
+        );
+        calls.push(call);
+    }
+    writer.delta(
+        entry,
+        DeltaOp::response_completed(ResponseEnding::tool_use()),
+    );
+    writer.results(calls[0]);
+    assert_eq!(writer.draft.refusal(), None);
+    let closed = writer.closed(CloseKind::Cancel);
+    assert_eq!(closed.status, MessageStatus::Cancelled);
+    assert_eq!(
+        kinds(&closed.content),
+        [
+            ("model_response", "complete"),
+            ("runtime_tool_results", "complete"),
+            ("turn_closure", "complete")
+        ]
+    );
+    assert_eq!(closure_of(&closed.content), "cancelled");
+}
+
+#[test]
+fn an_id_a_whole_entry_declares_deep_in_its_blocks_is_read_off_its_records() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    let child = BlockId::from_uuid(v7()).unwrap();
+    let result = RuntimeToolResult::new(
+        BlockId::from_uuid(v7()).unwrap(),
+        call,
+        ToolName::new("search").unwrap(),
+        false,
+        vec![PlainBlock::try_from(TextBlock::new(child, "found").unwrap()).unwrap()],
+    )
+    .unwrap();
+    let results = RuntimeToolResults::new(EntryId::from_uuid(v7()).unwrap(), vec![result]).unwrap();
+    writer.entry(results.into());
+    assert_eq!(writer.draft.refusal(), None);
+    let judged = writer.judged_holding(&HashSet::from([child.as_uuid()]));
+    assert_eq!(judged.turn.entries().len(), 1, "cut at the results entry");
+    let refusal = judged.refusal.unwrap();
+    assert_eq!(refusal.code, "reused_identity");
+    assert_eq!(refusal.object_id, Some(child.as_uuid()));
+}
+
+#[test]
+fn a_chunk_holding_nul_is_refused_and_nothing_after_it_folds() {
+    let mut writer = Writer::new();
+    writer.text_response(&["fine"], Some(ResponseEnding::finished()));
+    let entry = EntryId::from_uuid(v7()).unwrap();
+    let block = BlockId::from_uuid(v7()).unwrap();
+    writer.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+    writer.delta(entry, DeltaOp::block_started(block, BlockStart::text()));
+    writer.delta(entry, DeltaOp::text_appended(block, "a\u{0}b"));
+    let refusal = writer.draft.refusal().cloned().unwrap();
+    assert_eq!(refusal.code, "nul_character");
+    assert_eq!(refusal.seq, Some(7), "the eighth chunk");
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert!(
+        !serde_json::to_string(&closed.content.blocks)
+            .unwrap()
+            .contains("\\u0000"),
+        "what the close stores holds no U+0000"
+    );
 }

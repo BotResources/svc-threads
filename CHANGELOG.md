@@ -11,12 +11,174 @@ heading exists.
 
 ## Unreleased
 
+## 0.5.0 - 2026-10-27
+
+Threads 0.5 (registry patch 0.5.0): a message is a turn of the
+`br-llm-messages` 2.1 model (schema `br-llm-messages/5`), stored as the
+library's records (`br-llm-messages-records/1`) with Threads' own annotations;
+a runner receives the agent context Threads sorts for the agent it answers for.
+`contract-threads` 0.5.0 carries the new published language (see its
+changelog).
+
+### Added
+
+- **Built on `br-llm-messages` 2.1.0** (tag `br-llm-messages/v2.1.0`; the
+  schemas are unchanged). A 2.0 reader refuses what a 2.1 writer may write, so
+  Threads, the reader, reads 2.1 before any runner writes it: a
+  `runtime_notice` entry is stored and shown, in an input turn and in an AI
+  turn (an agent context keeps another agent's like its other incoming
+  entries); entries are taken in every order the library accepts — an incoming
+  entry or a model response at any point of an open turn — on `message.store`
+  v2 and on the stream; a tool name is up to 256 characters; a whole AI turn
+  may hold, after its closure, the results of a call the closure left
+  outstanding. Threads' own stream rules stay: one response is produced at a
+  time (`response_still_producing`), the closure is Threads'
+  (`closure_by_writer`), and a closed message takes no more chunks — a result
+  arriving after Threads closed a stream does not join it. The
+  `threads.message_entry.kind` CHECK of migration `9800000005` admits
+  `runtime_notice`.
+- **`message.store` v2** (`integration.cmd.threads.message.store.v2`): a user
+  message is the input turn, under the message's id, holding one human message
+  of a member (the library's plain blocks: text, image, structured content);
+  an AI message is a whole `/5` turn — an AI turn of its agent (the library's
+  agent id, a UUIDv7, and its name), stored as the library accepts it: its
+  writer's closure gives the message's status (`completed`, `budget_exhausted`
+  → `COMPLETED`; `cancelled` → `CANCELLED`; `failed`, `interrupted` →
+  `FAILED`), and Threads closes it completed when it holds none — or an input
+  turn of incoming entries (requests, mail, task notices; a human message is
+  refused `MESSAGE_INVALID`, `human_message_in_ai_message`: it travels in a user
+  message only) — or an AI turn opened `STREAMING`. Every entry the library
+  accepts is stored and shown, with no behaviour of Threads'. Annotations
+  (`ARTIFACT`, `THREAD_REFERENCE`, `JOB_REFERENCE`, `ERROR`, `WARNING`) follow
+  an entry of an AI message; a user message holds none. What the library
+  refuses is `MESSAGE_INVALID` naming the library's error code (`object_id`,
+  `location`), but an id the caller supplies for a new object — an entry's, a
+  block's, a citation's, an annotation's — that is no UUIDv7 is
+  `ID_NOT_UUIDV7` (a reference that is none — an agent, a human, the call a
+  result answers — stays `MESSAGE_INVALID`); every id of a message, its
+  entries, blocks, citations and annotations is used once (`KEY_REUSED`,
+  through `threads.message_identity`). A string holding U+0000, which the
+  library accepts and Postgres cannot store, is refused `MESSAGE_INVALID`
+  (`nul_character`) — in a stored message, an edit, or a chunk (which fails its
+  stream).
+- **The message stream folds the library's response deltas** with the
+  library's `ResponseDraft` (`DELTA` chunks), whole entries (`ENTRY`) and
+  annotations (`ANNOTATION`) into the library's `AITurn`, on the accumulator
+  `turn_content`. Members see a response being produced live, as the library's
+  draft snapshot. Completing, failing or cancelling closes the turn with the
+  library's closure (under a UUIDv7 Threads mints); a response still produced is
+  kept interrupted (members see it, a runner never); a tool call without its
+  result stays unanswered; a completion the library cannot close (a response
+  still produced, a call unanswered) fails the message; a silent writer closes
+  it interrupted. A frame under the 0.4 accumulator name (`message_content`)
+  is refused: its message fails, closed failed. A completion is refused, in
+  order, `MESSAGE_NOT_FOUND`, `MESSAGE_NOT_STREAMING`, `ARTIFACT_NOT_READY`
+  (judged on the stream before its seal) and `STREAM_MISMATCH`; it never drops
+  an `ARTIFACT` annotation — one its seal reaches that the stream did not hold
+  yet when it was judged rolls the completion back, seal included, and its
+  redelivery judges it again. A fail, a cancel or the watch, which nobody can
+  refuse, drops an `ARTIFACT` annotation whose artifact is not ready. Members
+  and runners see a stream judged as its close judges it, the ids other
+  messages hold included.
+- **The agent context**: `threadsContext(threadId, agentId)` answers, for the
+  agent named (a UUIDv7, else `AI_PERSPECTIVE_INVALID`), the library's
+  projected thread (`projectedThread`, `br-llm-messages-projected-thread/1`)
+  built by `RecordSet::into_projected_thread_pending` from one statement over
+  the active branch — the input turns and the agent's own turns whole, another
+  agent's turns reduced to their responses' root text, image and structured
+  blocks (payload not read) and their incoming entries, another agent's
+  response still produced given as pending — and, naming none, the whole branch
+  as a `br-llm-messages/5` conversation (`conversation`).
+- **The upgrade**: the messages Threads 0.4 or earlier stored are converted
+  once at boot, before the service is ready, under a Postgres advisory lock
+  (multi-pod): judged all first — every message converted in memory, every id
+  checked once across them and against the messages already in the 2.0 form —
+  then one transaction per batch of 256, resumable
+  (`threads.message.content_schema`); the reads are batched (three statements
+  per batch). Measured: 50 000 messages in 28 s on a release build against a
+  local PostgreSQL; see the README's *Deploy* section for the startup probe it
+  needs. A store fault while writing is logged with its SQLSTATE and
+  constraint. Message ids (= turn ids) and block ids are
+  kept; entry and closure ids are derived (`derive(source, role)`: the
+  source's 48-bit timestamp, `SHA-256(source ‖ role)`); a step becomes a model
+  response (stop reason → ending, usage under the 2.0 names, a thinking's
+  signature → replay material `anthropic.signature`, a redacted thinking →
+  `anthropic.redacted_thinking`, a tool call → a runtime tool call whose 0.4 id
+  is its external id), a tool result answers its call's block, a status becomes
+  the turn's closure, Threads blocks become annotations; a `STREAMING` message
+  becomes `FAILED`, closed interrupted. No fact is added, no version raised. A
+  message that cannot be converted (an AI author id that is no UUIDv7, a 0.4
+  `CITATION` block, …) is logged by its id and keeps the service from becoming
+  ready; nothing is converted then.
+- Migration `9800000005_llm_messages_2_records`: `threads.message_entry`,
+  `threads.entry_block` (the library's records), `threads.message_annotation`,
+  `threads.message_identity`; `threads.message` gains `content_schema`,
+  `turn_kind`, `author_agent_id`, `observed_at`. The 0.4 tables
+  (`message_item`, `message_block`) are kept as they are, read by the upgrade
+  only; deleting or editing a message removes its rows there too.
+
+### Changed
+
+- **`message.store` v1 is deprecated**: still accepted, converted to the 2.0
+  model and answered on the same events — with the answers 0.4 gave: a user
+  author outside the thread is `NOT_A_MEMBER` before anything of the content,
+  and the block ids are judged as 0.4 judged them before the conversion (each a
+  UUIDv7, else `ID_NOT_UUIDV7`; each named once, else `KEY_REUSED`). A v1 AI
+  message opened `STREAMING` is refused `MESSAGE_INVALID` (`streaming_v1`), and
+  its author id must be a UUIDv7 (`MESSAGE_INVALID`).
+- **`message.edit`** carries `content`, the human message's new plain blocks;
+  the 0.4 `blocks` are still accepted, judged as 0.4 judged their ids, and
+  converted. A block id that is not a UUIDv7 is `ID_NOT_UUIDV7`.
+- A command that loses a race for a key (two stores of one message, two
+  contents declaring one id: the database's unique violation) is retried
+  instead of dead-lettered, so that its redelivery is answered `KEY_REUSED`.
+- GraphQL: `MessageView` loses `blocks` and `items`, gains `turnKind` and
+  `entries { id index kind state content annotations { id index kind content } }`
+  — a complete entry's `content` is the library's entry JSON, a response being
+  produced or interrupted the library's draft snapshot; `AuthorView.aiId` is
+  the agent id. `threadsContext` takes `agentId: String` instead of `ai:
+  AiPerspective` and answers `conversation` or `projectedThread`. The
+  `ItemView`, `ItemKind`, `BlockView` types and the 0.4 `BlockKind` enum are
+  gone; `EntryState`, `TurnKind`, `AnnotationKind`, `EntryView`,
+  `AnnotationView` are new.
+- The message facts are `Created` (author, parent, job, status, turn kind, and
+  the kinds and positions of the entries of a message given whole, their blocks
+  and annotations — never their content), `EntryAdded` (one per entry a stream
+  adds, but the closure), `Completed` / `Failed` (its `reason`, the library's
+  code for a refused stream) / `Cancelled`, `Edited`, `Deleted`.
+
 ### Security
 
 - `Cargo.lock` only: `ctutils` 0.4.3 → 0.4.6 (RUSTSEC-2026-0385, non-constant-time
   mask generation and `u128` comparisons), which failed `cargo audit` and
-  `cargo deny` on every PR. No code, contract or version change: the fix ships
-  with the next release.
+  `cargo deny` on every PR.
+
+### Compatibility
+
+- **Not a rolling upgrade.** 0.4 pods cannot read what 0.5 writes: stop them
+  before 0.5 serves — the chart's `Recreate` strategy, which the rollout needs.
+  `migrate` only adds tables and columns; the conversion runs at the first 0.5
+  `serve`, before the listener is bound: raise the startup probe to cover it
+  (README, *Deploy*).
+- **Rollback.** `threads.message.content_schema` keeps its default
+  `br-llm-messages/3`: a 0.4 pod brought back keeps storing, and its messages
+  are converted at the next 0.5 boot. 0.4 cannot read the AI messages 0.5 wrote
+  or converted, and its edits and deletions of messages already in the 2.0 form
+  do not reach their 2.0 records (README, *Deploy*).
+- **NATS permissions.** The commanding services' publish permissions must allow
+  `integration.cmd.threads.message.store.v2`.
+- A 0.4 writer's chunks (`message_content`, the 0.4 chunk format) fail their
+  message: writers move to the `turn_content` chunks of `contract-threads` 0.5.
+
+### Engine gaps (br-service-engine v0.4.2)
+
+- No asynchronous boot step between the migration check and readiness, nor a
+  service readiness input: the upgrade runs inside the synchronous `register`
+  (`block_in_place`), with `/livez` and `/readyz` both down meanwhile. A boot
+  step could keep `/livez` up and `/readyz` down instead.
+- `ChunkReader` reads one stream per call: the members' view and the agent
+  context read the streams of their `STREAMING` messages concurrently, one
+  read each; a batched `ChunkReader::states(&[key])` would make it one.
 
 ### Added
 

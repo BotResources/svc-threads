@@ -2,7 +2,11 @@
 //! idle window before closing its stream has its message failed, and a stream
 //! whose chunk the library refused has its failure stored.
 //!
-//! ENGINE GAP (br-service-engine v0.4.1): the accumulated lane keeps no
+//! A message the watch fails because its writer went silent has its turn
+//! closed interrupted; one whose stream the library refused, closed failed
+//! ([`super::draft::close`]).
+//!
+//! ENGINE GAP (br-service-engine v0.4.2): the accumulated lane keeps no
 //! last-chunk time a service may read, and a fold can neither fail its message
 //! nor trigger work after it commits. The watch therefore runs on Threads' own
 //! scheduled message, every quarter of the idle window while the message
@@ -27,15 +31,11 @@ use super::closing;
 use super::draft::CloseKind;
 use super::state::MessageState;
 use super::store;
-use super::stream::MessageContent;
+use super::stream::{LegacyContent, TurnContent};
 use crate::facts::FactMeta;
 use crate::fault::Fault;
 use crate::principal::ThreadsPrincipal;
 use crate::slices::thread::state::ThreadState;
-
-/// Why the watch failed a message, as its `Failed` fact says when the stream
-/// itself was not refused.
-pub const STREAM_IDLE: &str = "stream_idle";
 
 /// Threads' own scheduled message: time to look at a streaming message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,13 +179,16 @@ pub fn due<'r>(
             return Ok(());
         }
         let now = cx.now().as_datetime();
-        let held = cx.accumulated::<MessageContent>(&state.id).await?;
+        let held = cx.accumulated::<TurnContent>(&state.id).await?;
         let through = held.contiguous_to.map(|seq| seq.get());
+        // A frame a 0.4 writer pushed under the 0.4 accumulator name refuses
+        // the stream as a refused chunk does.
+        let legacy = cx.accumulated::<LegacyContent>(&state.id).await?.state;
         match decide(
             seen.map(|seq| seq as u64),
             since,
             through,
-            held.state.refusal().is_some(),
+            held.state.refusal().is_some() || legacy.first.is_some(),
             now,
         ) {
             Verdict::Moved => {
@@ -202,7 +205,7 @@ pub fn due<'r>(
             }
             Verdict::Wait { next } => schedule(cx, state.id, next).await,
             Verdict::Fail => {
-                let sealed = match cx.seal_current::<MessageContent>(&state.id).await {
+                let sealed = match cx.seal_current::<TurnContent>(&state.id).await {
                     Ok(sealed) => sealed,
                     Err(EngineError::Accumulator(AccumulatorError::AlreadySealed { .. })) => {
                         return Ok(());
@@ -217,17 +220,9 @@ pub fn due<'r>(
                     causation_id: Some(cx.message_id()),
                     occurred_at: now,
                 };
-                closing::store_closed(
-                    cx,
-                    state,
-                    &sealed,
-                    CloseKind::Fail,
-                    closing::Prior::default(),
-                    Some(STREAM_IDLE),
-                    &meta,
-                )
-                .await
-                .map(|_| ())
+                closing::store_closed(cx, state, &sealed, CloseKind::Watch, Vec::new(), &meta)
+                    .await
+                    .map(|_| ())
             }
         }
     })

@@ -1,6 +1,6 @@
 [package]
 name = "svc-threads"
-version = "0.4.0"
+version = "0.5.0"
 description = "Threads — the shared conversation store: threads, members, messages in the br-llm-messages model, artifacts and read marks, served live to their members (fatty manner on br-service-engine)"
 edition.workspace = true
 rust-version.workspace = true
@@ -29,6 +29,7 @@ futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 service-engine.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -59,6 +60,10 @@ conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness"
 contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.1", version = "0.5.1", features = [
     "integration",
 ] }
+# The previous published language, by its own tag: what a consumer still on
+# `message.store` v1 sends (T25), and how the previous version of Threads is
+# commanded before the upgrade converts what it stored (T26).
+contract-threads-v0-4 = { git = "https://github.com/BotResources/svc-threads", package = "contract-threads", tag = "contract-threads/v0.4.0", version = "0.4.0" }
 dotenvy = "0.15"
 # The kubelet's half of readiness (`GET /readyz`), the object store's POST (a
 # multipart form carrying the presigned fields, the file last) and the GET of

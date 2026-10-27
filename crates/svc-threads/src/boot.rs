@@ -43,10 +43,62 @@ pub async fn run() -> Result<(), EngineError> {
         mutation: MutationRoot::default(),
         subscription: SubscriptionRoot::default(),
         declare_scopes: true,
-        register: |engine: &mut Engine<ThreadsPrincipal>| crate::register::all(engine),
+        register: |engine: &mut Engine<ThreadsPrincipal>| {
+            upgrade_before_ready()?;
+            crate::register::all(engine)
+        },
     })
     .await
 }
+
+/// Converts the messages an earlier Threads stored to the library's 2.0 model
+/// before the service is ready ([`crate::slices::message::upgrade`]): `serve`
+/// runs it once the migrations are applied and before anything is served, so
+/// `/readyz` answers only once every message is converted, and a message that
+/// cannot be converted ends the boot — the pod never becomes ready — after its
+/// id was logged.
+///
+/// ENGINE GAP (br-service-engine v0.4.2): the boot kit offers a service no
+/// asynchronous step between its migration check and readiness, and no
+/// readiness gate of its own (the engine's assembly recomputes readiness from
+/// its own inputs on every beat). The upgrade therefore runs inside the
+/// synchronous `register`, on the boot task (`block_in_place`), on its own
+/// pool of the app role. The engine would need a `BootPlan` step the boot awaits
+/// before it serves, or a service readiness input.
+///
+/// While it runs, nothing listens: `/livez` and `/readyz` both fail, so the
+/// rollout's startup probe must cover the upgrade (README, *Deploy*). With an
+/// asynchronous boot step the engine could keep `/livez` up and `/readyz` down
+/// for the duration instead.
+///
+/// `block_in_place` needs the multi-threaded Tokio runtime (`#[tokio::main]`'s
+/// default, which `main` uses): on a current-thread runtime it panics. The
+/// flavour is checked first, so that a runtime built otherwise fails the boot
+/// with a configuration error instead.
+fn upgrade_before_ready() -> Result<(), EngineError> {
+    let url = std::env::var(DATABASE_URL)
+        .map_err(|_| EngineError::Config(format!("{DATABASE_URL} must be set for serve")))?;
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|_| EngineError::Config("serve runs on a Tokio runtime".into()))?;
+    if runtime.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        return Err(EngineError::Config(
+            "serve needs the multi-threaded Tokio runtime: the upgrade blocks the boot task \
+             in place"
+                .into(),
+        ));
+    }
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let pool = service_engine::connect_pool(&url).await?;
+            let upgraded = crate::slices::message::upgrade::run(&pool).await;
+            pool.close().await;
+            upgraded.map(drop)
+        })
+    })
+}
+
+/// The app role's database URL, as the engine's ops contract names it.
+const DATABASE_URL: &str = "DATABASE_URL";
 
 /// The engine configuration Threads runs on: the engine's own from the
 /// environment, with the service's identity and its object storage.

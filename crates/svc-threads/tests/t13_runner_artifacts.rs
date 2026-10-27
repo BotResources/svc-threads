@@ -2,21 +2,30 @@
 //!
 //! > A threads:runner service account requests an upload for thread T:
 //! > artifact X under a minted id, report.csv, text/csv, a size and a SHA-256:
-//! > X is PENDING with a time-bounded upload access; bytes of another size or
-//! > digest are refused by object storage. Before the bytes land, storing a
-//! > message with an ARTIFACT block naming X is refused ARTIFACT_NOT_READY.
-//! > After the upload, the same message is stored: X is ATTACHED to it and a
-//! > member obtains a time-bounded read access returning the bytes; a
-//! > non-member is answered not found. A message of thread T2 naming X is
-//! > refused ARTIFACT_NOT_READY. Requesting an upload under a held id is
-//! > refused KEY_REUSED. A user and a service account without threads:runner
-//! > are refused the upload request. An upload never attached is removed after
-//! > the upload window. Deleting X's message removes X with its bytes.
+//! > it receives a time-bounded upload access and a Requested fact is recorded
+//! > by the runner; bytes of another size or another digest are refused by the
+//! > object store. A declared size above 256 MiB is refused ARTIFACT_TOO_LARGE.
+//! > Before the bytes land, storing a message with an ARTIFACT annotation
+//! > naming X is refused ARTIFACT_NOT_READY and nothing is stored. After the
+//! > upload, the same message is stored: confirmed, X is ATTACHED to it, and
+//! > member A obtains a time-bounded read access returning the bytes;
+//! > non-member U is answered exactly as for an artifact nobody created, and so
+//! > is A reaching X through another thread T2. A message of T2 naming X is
+//! > refused ARTIFACT_NOT_READY. Requesting an upload under X's id again is
+//! > refused KEY_REUSED. A member and a service account without threads:runner
+//! > are refused the upload request with RUNNER_SCOPE_REQUIRED. With a short
+//! > upload window (THREADS_UPLOAD_WINDOW_MS), artifact Y uploaded and never
+//! > attached is removed with its bytes once the window elapses, a message
+//! > naming Y is then refused ARTIFACT_NOT_READY, and X, attached, is untouched.
 //!
-//! "Deleting X's message" cannot be reached: X is attached by an AI message,
-//! and "An AI message is never deleted" (specification, § Message). The
-//! removal of an attached artifact with its bytes is asserted where it is
-//! reachable, at the thread's deletion (T17); the gap is the operator's.
+//! The message naming X is an AI turn whose answer carries X in an ARTIFACT
+//! annotation after it.
+//!
+//! "Storing a message" is also a streamed message's completion: a writer that
+//! pushes the ANNOTATION naming an artifact whose bytes have not landed, and
+//! completes at once, back to back, is refused ARTIFACT_NOT_READY — the
+//! completion never seals the message without the annotation, and never
+//! attaches the artifact.
 //!
 //! The upload window is configured short for the one scenario that waits it
 //! out (`THREADS_UPLOAD_WINDOW_MS`, see `common::constants`); the main one runs
@@ -32,30 +41,34 @@ use common::artifacts::{
     File, download_answer, download_url, fetch, object_count, post, request_upload,
     request_upload_answer, upload,
 };
-use common::content::{ai_text, artifact_block, step};
+use common::content::{Streamed, after, ai_turn, annotation_chunk, artifact, closed, reply};
 use common::facts;
 use common::flows::{
-    ai, ai_message, command, create_thread, message_confirmed, message_refused, say,
+    ai, command, completion, create_thread, message_confirmed, message_refused, message_view,
+    open_stream, say, whole_message,
 };
 use common::{
     KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
-    eventually, gql,
+    eventually, gql, stream,
 };
-use contract_threads::llm::StopReason;
-use contract_threads::{MessageStatus, ReasonCode, StoreMessage};
+use contract_threads::llm::{ResponseEnding, Turn};
+use contract_threads::{MessageStatus, ReasonCode, StoreMessageV2};
 use uuid::Uuid;
 
-/// An AI answer on `thread` naming `artifact` in an ARTIFACT block.
-fn naming(thread: Uuid, parent: Uuid, artifact: Uuid) -> StoreMessage {
-    ai_message(
+/// An AI answer on `thread` naming `attached` in an ARTIFACT annotation after
+/// its answer.
+fn naming(thread: Uuid, parent: Uuid, attached: Uuid) -> StoreMessageV2 {
+    let analyst = ai("a1", "Analyst");
+    let answer = reply("the report is attached");
+    let message = Uuid::now_v7();
+    let turn = Turn::from(ai_turn(message, &analyst, closed(answer.clone())));
+    whole_message(
         thread,
         Some(parent),
-        ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("the report is attached"), artifact_block(artifact)],
-        )],
+        message,
+        &analyst,
+        &turn,
+        vec![after(&answer[0], artifact(attached))],
     )
 }
 
@@ -98,6 +111,26 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
         );
     }
 
+    // When the runner declares an artifact above 256 MiB.
+    let huge = Uuid::now_v7();
+    let too_large = ctx
+        .run(
+            &runner.passport,
+            common::M_REQUEST_UPLOAD,
+            serde_json::json!({
+                "thread": t,
+                "artifact": huge,
+                "name": file.name,
+                "mediaType": file.media_type,
+                "size": 256 * 1024 * 1024 + 1,
+                "sha256": file.sha256(),
+            }),
+        )
+        .await;
+    // Then refused ARTIFACT_TOO_LARGE, and nothing is requested.
+    gql::assert_refused(&too_large, "ARTIFACT_TOO_LARGE");
+    assert!(facts::of(&ctx.pool, "artifact", huge).await.is_empty());
+
     // When, before the bytes land, a message naming X is stored.
     let early = naming(t, m1, x);
     let m2 = early.message_id;
@@ -111,6 +144,46 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     )
     .await;
     assert!(facts::of(&ctx.pool, "message", m2).await.is_empty());
+
+    // When, before Z's bytes land, a writer streams an answer, pushes the
+    // ANNOTATION naming Z after it and completes the message back to back.
+    let z = Uuid::now_v7();
+    request_upload(
+        &ctx,
+        &runner.passport,
+        t,
+        z,
+        &File::csv(
+            "pending
+",
+        ),
+    )
+    .await;
+    let streamed = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let mut answer = Streamed::start(streamed, None);
+    answer.text(&["the report follows"], true);
+    answer.complete(ResponseEnding::finished());
+    let mut chunks = answer.chunks();
+    chunks.push(annotation_chunk(answer.entry, artifact(z)));
+    let (last_seq, hash) = stream::push(&ctx.nats.url(), streamed, 0, &chunks).await;
+    let completed = command(&ctx, &completion(t, streamed, last_seq, &hash)).await;
+    // Then the completion is refused ARTIFACT_NOT_READY — never a silent
+    // drop: the message is not sealed COMPLETED without its annotation, and Z
+    // is not attached.
+    message_refused(
+        &ctx,
+        completed,
+        ReasonCode::ArtifactNotReady,
+        "an ANNOTATION naming Z, completed before Z's bytes land",
+    )
+    .await;
+    let view = message_view(&ctx, &a.passport, t, streamed).await;
+    assert_ne!(view["status"], "COMPLETED", "{view}");
+    assert_eq!(
+        facts::types(&facts::of(&ctx.pool, "artifact", z).await),
+        vec!["Requested"],
+        "Z is not attached"
+    );
 
     // When the declared bytes land, and the same message is stored.
     let status = post(&access, &file.bytes).await;

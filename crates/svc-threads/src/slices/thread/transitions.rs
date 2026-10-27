@@ -479,7 +479,7 @@ impl ThreadState {
     }
 
     /// The `Deleted` fact of a thread, at the version after its last change.
-    /// The fact covers its members, resources, messages, items, blocks,
+    /// The fact covers its members, resources, messages, entries, blocks, annotations,
     /// artifacts and read marks.
     pub fn deleted_fact(
         &self,

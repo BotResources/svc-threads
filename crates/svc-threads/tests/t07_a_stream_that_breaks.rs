@@ -1,56 +1,113 @@
-//! **T07 — A stream that breaks: invalid step, silent writer, refused chunk.**
+//! **T07 — A stream that breaks: refused delta, silent writer, refused chunk.**
 //!
-//! > The harness opens M3 STREAMING and pushes, for item 0, a text_delta before
-//! > any block_start: the library refuses it, M3 becomes FAILED and a
-//! > subscriber sees it. It opens M4 STREAMING, pushes a block_start and two
-//! > text deltas, then nothing: once the stream window elapses M4 is FAILED with
-//! > its unfinished step kept as the library finishes it, and later chunks or a
-//! > completion for M4 are refused MESSAGE_NOT_STREAMING. It opens M5, pushes
-//! > only a block_start and nothing the library can finish, then fails it: M5
-//! > is FAILED without that step. Opening M6 on a closed thread is refused
-//! > THREAD_NOT_OPEN and its chunks are never folded.
+//! > Threads runs with a short stream window (THREADS_STREAM_IDLE_MS, a
+//! > configuration value). The harness opens M3 STREAMING and pushes a response
+//! > delta naming a block its response never opened: the library refuses it, M3
+//! > becomes FAILED with its turn closed failed, and a member following T sees
+//! > it. It opens M4 STREAMING and pushes three response deltas of a text, each
+//! > within the window of the previous one though the three span more than a
+//! > window: M4 still streams, the window running from the last chunk. Nothing
+//! > more arrives for longer than the window: M4 is FAILED with its turn closed
+//! > interrupted, and the response is kept as the library's interrupted
+//! > response holding the text received: members read it, a runner's context
+//! > holds M4's turn without it. A later chunk for M4 is never folded and a
+//! > completion is refused MESSAGE_NOT_STREAMING. It opens M5 and pushes a frame
+//! > under the accumulator name of the previous version (message_content): it is
+//! > refused and M5 is FAILED. The thread is closed; opening M6 on it is refused
+//! > THREAD_NOT_OPEN, and the chunks pushed for M6 are never folded: no message,
+//! > no fact, nothing pushed. Chunks a writer may not push are refused
+//! > MESSAGE_INVALID naming Threads' own code, and the message fails: an ENTRY
+//! > chunk holding a model response (response_in_entry_chunk), an ENTRY chunk
+//! > pushed while a response is still producing (response_still_producing), and
+//! > a chunk holding a closure (closure_by_writer).
 //!
-//! The rules of `br-llm-messages` 0.5 a stream meets: a tool name every
-//! provider accepts, judged as the chunk folds (M7); a tool call id used once
-//! in the conversation, judged when the stream closes against the messages of
-//! its branch, before it (M8) and after it — a message stored under it while
-//! it streamed (M9) — on a completion or a failure (M10), never on a cancel,
-//! sealed as received (M11), and a cancelled message holds no call of a
-//! conversation (M12). Each failure names the library's code in its `Failed`
-//! fact's reason.
+//! A response M3 had started when its stream broke is, by the specification,
+//! "a model response still streaming when the message is failed": it is kept
+//! as the library's interrupted response, empty — the refused delta itself is
+//! never folded. The library's code of the refusal is computed by the library
+//! on the very delta sent.
 //!
-//! The stream window is the specification's 10 minutes; this scenario — and
-//! only this one — runs the binary with it configured short (`THREADS_STREAM_IDLE_MS`, see
-//! `common::constants`) — a configuration value, never a test seam.
+//! Three chunks are the writer's to never push, whatever the library would
+//! accept of them: a model response as a whole ENTRY (a response streams as
+//! deltas), an ENTRY while a response is still produced, and a closure
+//! (closing the turn is Threads'). Each fails its message under Threads' own
+//! code, which its `Failed` fact names as `MESSAGE_INVALID`'s `error`; the
+//! writer's closure is never taken — the turn reads closed `failed`, by
+//! Threads.
 //!
 //! Channels: the live feed (3), the messages as a member reads them (2), the
-//! answers (4), the fact log.
+//! answers (4), the fact log, a runner's context.
 
 mod common;
 
 use common::content::{
-    ai_text, calling_step, event, opening, raw_event, results_chunk, step, text_delta, text_start,
-    text_step, tool_call, tool_result, tool_results,
+    Streamed, block_id, closure, closure_kind, delta_chunk, draft_entry, draft_text, entries_of,
+    entry_chunk, kinds_of, mail, text,
 };
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    ai, ai_message, await_message, command, completion, context, conversation_of, create_thread,
-    message_confirmed, message_refused, message_view, open_stream, say, store, streaming_message,
-    thread_confirmed,
+    active_branch, ai, await_message, command, completion, context, conversation_of, create_thread,
+    message_refused, message_view, open_stream, say, streaming_message, thread_confirmed,
 };
 use common::{QUIET_WINDOW, SHORT_STREAM_IDLE, TestContext, Windows, stream};
-use contract_threads::llm::StopReason;
-use contract_threads::{
-    CancelMessage, CloseThread, ClosingStatus, FailMessage, MessageStatus, ReasonCode, StreamSeal,
-    seal_hash,
-};
-use serde_json::json;
+use contract_threads::llm::{ClosureReason, DeltaOp, DraftPhase, ResponseEnding, TurnEntry};
+use contract_threads::{CloseThread, ClosingStatus, MessageInvalidError, ReasonCode, seal_hash};
+use serde_json::Value;
 use uuid::Uuid;
+
+/// The one interrupted response of a failed message view, as the library's
+/// draft.
+fn interrupted_response(view: &Value) -> contract_threads::llm::ResponseDraft {
+    let responses: Vec<Value> = entries_of(view)
+        .into_iter()
+        .filter(|entry| entry["kind"] == "model_response")
+        .collect();
+    assert_eq!(responses.len(), 1, "one response kept: {view}");
+    assert_eq!(responses[0]["state"], "INTERRUPTED", "{view}");
+    let draft = draft_entry(&responses[0]);
+    assert!(
+        matches!(draft.phase(), DraftPhase::Interrupted { .. }),
+        "the library's interrupted response: {view}"
+    );
+    draft
+}
+
+/// `message` failed on a chunk the writer may not push: A sees it FAILED, its
+/// turn reads closed `failed` by Threads, holding `kinds`, and its `Failed`
+/// fact names Threads' own `code`.
+async fn failed_on_a_forbidden_chunk(
+    ctx: &TestContext,
+    a: &common::Person,
+    a_feed: &mut Live,
+    (thread, message): (Uuid, Uuid),
+    kinds: &[&str],
+    code: MessageInvalidError,
+) {
+    a_feed
+        .until(&format!("A sees the message FAILED on {code:?}"), |delta| {
+            upsert_of(delta, message).is_some_and(|view| view["status"] == "FAILED")
+        })
+        .await;
+    let view = message_view(ctx, &a.passport, thread, message).await;
+    assert_eq!(view["status"], "FAILED", "{code:?}: {view}");
+    assert_eq!(kinds_of(&view), kinds, "{code:?}: {view}");
+    assert_eq!(
+        closure_kind(&view).as_deref(),
+        Some("failed"),
+        "{code:?}: the turn is closed by Threads, never by the writer: {view}"
+    );
+    let failed = facts::of(&ctx.pool, "message", message).await;
+    assert_eq!(
+        facts::the(&failed, "Failed").payload["reason"],
+        code.as_str(),
+        "the Failed fact names Threads' own code"
+    );
+}
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or_dropped() {
+async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_for_members_only() {
     // Given Threads running with a short stream window; T with member A, A's
     // question M1, and A following T.
     let ctx = TestContext::setup_with(Windows {
@@ -63,13 +120,27 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     let m1 = say(&ctx, t, None, &a, "Go on").await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
     let nats = ctx.nats.url();
+    let analyst = ai("a1", "Analyst");
 
-    // When M3 is opened and its first chunk is a text_delta before any
-    // block_start.
-    let m3 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    stream::push(&nats, m3, 0, &[event(0, text_delta(0, "orphan"))]).await;
+    // When M3 is opened, its response started, then a delta names a block the
+    // response never opened.
+    let m3 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let r3 = Streamed::start(m3, None);
+    let orphan = r3.refused(DeltaOp::text_appended(block_id(), "orphan"));
+    let refusal = r3
+        .draft()
+        .clone()
+        .apply(&orphan)
+        .expect_err("the library refuses the delta")
+        .code()
+        .as_str()
+        .to_string();
+    let mut m3_chunks = r3.chunks();
+    m3_chunks.push(delta_chunk(&orphan));
+    stream::push(&nats, m3, 0, &m3_chunks).await;
 
-    // Then the library refuses it: M3 is FAILED, and (3) A sees it.
+    // Then the library refuses it: M3 is FAILED, its turn closed failed, and
+    // (3) A sees it.
     a_feed
         .until("A sees M3 FAILED", |delta| {
             upsert_of(delta, m3).is_some_and(|view| view["status"] == "FAILED")
@@ -78,36 +149,41 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     let failed = message_view(&ctx, &a.passport, t, m3).await;
     assert_eq!(failed["status"], "FAILED");
     assert_eq!(
-        failed["items"],
-        json!([]),
-        "nothing the library refused is kept"
+        kinds_of(&failed),
+        vec!["model_response", "turn_closure"],
+        "the started response is kept, the closure ends the turn: {failed}"
     );
-    assert!(
-        facts::types(&facts::of(&ctx.pool, "message", m3).await).contains(&"Failed"),
-        "a Failed fact records M3's end"
+    assert_eq!(closure_kind(&failed).as_deref(), Some("failed"));
+    assert_eq!(
+        draft_text(&interrupted_response(&failed)),
+        "",
+        "the refused delta is never folded"
+    );
+    let m3_facts = facts::of(&ctx.pool, "message", m3).await;
+    assert_eq!(
+        facts::the(&m3_facts, "Failed").payload["reason"],
+        refusal.as_str(),
+        "the Failed fact names the library's code"
     );
 
-    // When M4 is opened and receives a block_start and two text deltas, each
-    // within the stream window of the previous one, though the three span
-    // more than a window.
-    let m4 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let m4_chunks = vec![
-        opening(0, text_start(0), Uuid::now_v7(), Some("m-1")),
-        event(0, text_delta(0, "half ")),
-        event(0, text_delta(0, "said")),
-    ];
+    // When M4 is opened and receives three pushes of a text response, each
+    // within the stream window of the previous one, though the three span more
+    // than a window.
+    let m4 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut r4 = Streamed::start(m4, Some("m-1"));
+    r4.text(&["half ", "said"], false);
+    let m4_chunks = r4.chunks();
+    let pushes: [&[_]; 3] = [&m4_chunks[0..2], &m4_chunks[2..3], &m4_chunks[3..4]];
     let gap = SHORT_STREAM_IDLE * 3 / 5;
-    for (seq, chunk) in m4_chunks.iter().enumerate() {
-        stream::push(&nats, m4, seq as u64, std::slice::from_ref(chunk)).await;
+    let mut seq = 0;
+    for push in pushes {
+        stream::push(&nats, m4, seq, push).await;
+        seq += push.len() as u64;
         tokio::time::sleep(gap).await;
     }
-    let (last_seq, hash) = (
-        (m4_chunks.len() - 1) as u64,
-        seal_hash(&m4_chunks).expect("the chunks hash"),
-    );
+    let (last_seq, hash) = (seq - 1, seal_hash(&m4_chunks).expect("the chunks hash"));
 
-    // Then M4 still streams: the window runs from the last chunk, not from
-    // the opening.
+    // Then M4 still streams: the window runs from the last chunk.
     assert_eq!(
         message_view(&ctx, &a.passport, t, m4).await["status"],
         "STREAMING",
@@ -117,7 +193,8 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     // When nothing more arrives for longer than the window.
     tokio::time::sleep(SHORT_STREAM_IDLE).await;
 
-    // Then M4 is FAILED, its unfinished step kept as the library finishes it.
+    // Then M4 is FAILED, its turn closed interrupted, and members read the
+    // response kept as the library's interrupted response, holding the text.
     let view = await_message(
         &ctx,
         &a.passport,
@@ -127,16 +204,41 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
         |view| view["status"] == "FAILED",
     )
     .await;
-    assert_eq!(view["items"][0]["kind"], "STEP", "{view}");
-    assert_eq!(view["items"][0]["status"], "FAILED", "{view}");
-    assert_eq!(view["items"][0]["model"], "m-1", "{view}");
     assert_eq!(
-        view["items"][0]["blocks"][0]["content"]["text"], "half said",
+        kinds_of(&view),
+        vec!["model_response", "turn_closure"],
         "{view}"
     );
+    assert_eq!(
+        closure_kind(&view).as_deref(),
+        Some("interrupted"),
+        "{view}"
+    );
+    let kept = interrupted_response(&view);
+    assert_eq!(draft_text(&kept), draft_text(r4.draft()));
+    assert_eq!(draft_text(&kept), "half said");
+    // And a runner's context holds M4's turn without it: the closure alone.
+    let runner = ctx.service_account(true);
+    let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
+    let m4_turn = conversation
+        .turns()
+        .iter()
+        .find(|turn| turn.id().as_uuid() == m4)
+        .and_then(|turn| turn.as_ai())
+        .expect("M4's turn in the runner's context")
+        .clone();
+    assert!(
+        m4_turn
+            .entries()
+            .iter()
+            .all(|entry| matches!(entry, TurnEntry::TurnClosure(_))),
+        "a runner never receives the interrupted response: {m4_turn:?}"
+    );
+    assert!(m4_turn.is_closed());
 
     // When a chunk, then a completion, arrive for M4.
-    stream::push(&nats, m4, last_seq + 1, &[event(0, text_delta(0, " more"))]).await;
+    let late = Streamed::start(m4, None);
+    stream::push(&nats, m4, last_seq + 1, &late.chunks()).await;
     tokio::time::sleep(QUIET_WINDOW).await;
     let late_completion = command(&ctx, &completion(t, m4, last_seq, &hash)).await;
 
@@ -151,214 +253,90 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     .await;
     assert_eq!(message_view(&ctx, &a.passport, t, m4).await, view);
 
-    // When M5 is opened, receives only a block_start, and is failed.
+    // When M5 is opened and receives a frame under the previous version's
+    // accumulator name.
     let m5 = open_stream(&ctx, t, Some(m1), ai("a2", "Critic")).await;
-    let (last_seq, hash) = stream::push(
-        &nats,
-        m5,
-        0,
-        &[opening(0, text_start(0), Uuid::now_v7(), None)],
-    )
-    .await;
-    let fail = command(
-        &ctx,
-        &FailMessage {
-            message_id: m5,
-            thread_id: t,
-            seal: Some(StreamSeal { last_seq, hash }),
-            acting_user_id: None,
-        },
-    )
-    .await;
+    let r5 = Streamed::start(m5, None);
+    stream::push_under_previous_accumulator(&nats, m5, 0, &r5.chunks()[0]).await;
 
-    // Then M5 is FAILED, without the step the library could not finish.
-    message_confirmed(&ctx, fail, MessageStatus::Failed, "failing M5").await;
-    let view = message_view(&ctx, &a.passport, t, m5).await;
-    assert_eq!(view["status"], "FAILED");
-    assert_eq!(view["items"], json!([]), "an unfinishable step is dropped");
-
-    // When M7 is opened and its first step calls a tool no provider accepts.
-    let m7 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    stream::push(
-        &nats,
-        m7,
-        0,
-        &[raw_event(
-            0,
-            json!({ "type": "tool_call_start", "index": 0, "id": "c1", "name": "web.search" }),
-            Some(Uuid::now_v7()),
-        )],
-    )
-    .await;
-    // Then the library refuses it: M7 is FAILED with nothing kept, and its
-    // Failed fact names the library's code.
-    let view = await_message(&ctx, &a.passport, t, m7, "M7 failed", |view| {
+    // Then it is refused and M5 is FAILED, nothing of the frame folded.
+    let view = await_message(&ctx, &a.passport, t, m5, "M5 failed", |view| {
         view["status"] == "FAILED"
     })
     .await;
-    assert_eq!(view["items"], json!([]), "{view}");
-    let m7_facts = facts::of(&ctx.pool, "message", m7).await;
+    assert_eq!(kinds_of(&view), vec!["turn_closure"], "{view}");
+    assert_eq!(closure_kind(&view).as_deref(), Some("failed"));
+
+    // When a writer pushes a model response as a whole ENTRY.
+    let whole = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut response = Streamed::start(whole, None);
+    response.text(&["whole"], true);
+    response.complete(ResponseEnding::finished());
+    stream::push(
+        &nats,
+        whole,
+        0,
+        &[entry_chunk(&TurnEntry::from(response.response()))],
+    )
+    .await;
+    // Then it is refused MESSAGE_INVALID (response_in_entry_chunk) and the
+    // message fails, nothing of the response folded.
+    failed_on_a_forbidden_chunk(
+        &ctx,
+        &a,
+        &mut a_feed,
+        (t, whole),
+        &["turn_closure"],
+        MessageInvalidError::ResponseInEntryChunk,
+    )
+    .await;
+
+    // When a writer pushes an ENTRY while its response is still produced.
+    let mid = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut producing = Streamed::start(mid, None);
+    producing.text(&["mid"], false);
+    let mut mid_chunks = producing.chunks();
+    mid_chunks.push(entry_chunk(&mail(&ai("a2", "Critic"), t, vec![text("hi")])));
+    stream::push(&nats, mid, 0, &mid_chunks).await;
+    // Then it is refused MESSAGE_INVALID (response_still_producing) and the
+    // message fails, the response still produced kept interrupted.
+    failed_on_a_forbidden_chunk(
+        &ctx,
+        &a,
+        &mut a_feed,
+        (t, mid),
+        &["model_response", "turn_closure"],
+        MessageInvalidError::ResponseStillProducing,
+    )
+    .await;
     assert_eq!(
-        facts::the(&m7_facts, "Failed").payload["reason"],
-        "invalid_tool_name"
+        draft_text(&interrupted_response(
+            &message_view(&ctx, &a.passport, t, mid).await
+        )),
+        draft_text(producing.draft()),
+        "the response still produced is kept interrupted, as the library folded it"
     );
 
-    // Given an answer of the branch that called tool c-used.
-    let streamed_call = |id: &str| {
-        let mut chunks = calling_step(0, &[(id, "search", json!({}))]);
-        chunks.push(results_chunk(1, vec![tool_result(id, "search", "found")]));
-        chunks.extend(text_step(2, None, &["answered"], StopReason::EndTurn));
-        chunks
-    };
-    let whole_call = |id: &str| {
-        vec![
-            step(
-                StopReason::AwaitingToolResults,
-                None,
-                vec![tool_call(id, "search", json!({}))],
-            ),
-            tool_results(vec![tool_result(id, "search", "found")]),
-            step(StopReason::EndTurn, None, vec![ai_text("answered")]),
-        ]
-    };
-    let used = store(
-        &ctx,
-        ai_message(t, Some(m1), ai("a1", "Analyst"), whole_call("c-used")),
-        MessageStatus::Completed,
+    // When a writer pushes a closure.
+    let closing = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    stream::push(
+        &nats,
+        closing,
+        0,
+        &[entry_chunk(&closure(ClosureReason::completed()))],
     )
     .await;
-    // When M8, answering it, streams a step calling c-used again and is
-    // completed.
-    let m8 = open_stream(&ctx, t, Some(used), ai("a2", "Critic")).await;
-    let (last_seq, hash) = stream::push(&nats, m8, 0, &streamed_call("c-used")).await;
-    let completed = command(&ctx, &completion(t, m8, last_seq, &hash)).await;
-    // Then M8 is FAILED from the step reusing the id, and its Failed fact
-    // names the library's code.
-    message_confirmed(&ctx, completed, MessageStatus::Failed, "completing M8").await;
-    let view = message_view(&ctx, &a.passport, t, m8).await;
-    assert_eq!(view["status"], "FAILED");
-    assert_eq!(view["items"], json!([]), "its first step reuses c-used");
-    let m8_facts = facts::of(&ctx.pool, "message", m8).await;
-    assert_eq!(
-        facts::the(&m8_facts, "Failed").payload["reason"],
-        "duplicate_tool_call_id_in_conversation"
-    );
-
-    // When M9 is opened, an answer to it calling c-later is stored while it
-    // streams, then M9 streams a step calling c-later and is completed.
-    let m9 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let later = store(
+    // Then it is refused MESSAGE_INVALID (closure_by_writer) and the message
+    // fails: the writer's closure is never taken.
+    failed_on_a_forbidden_chunk(
         &ctx,
-        ai_message(t, Some(m9), ai("a2", "Critic"), whole_call("c-later")),
-        MessageStatus::Completed,
+        &a,
+        &mut a_feed,
+        (t, closing),
+        &["turn_closure"],
+        MessageInvalidError::ClosureByWriter,
     )
     .await;
-    let (last_seq, hash) = stream::push(&nats, m9, 0, &streamed_call("c-later")).await;
-    let completed = command(&ctx, &completion(t, m9, last_seq, &hash)).await;
-    // Then M9 is FAILED the same way, nothing of its stream kept, and the
-    // answer stored under it stays.
-    message_confirmed(&ctx, completed, MessageStatus::Failed, "completing M9").await;
-    let m9_facts = facts::of(&ctx.pool, "message", m9).await;
-    assert_eq!(
-        facts::the(&m9_facts, "Failed").payload["reason"],
-        "duplicate_tool_call_id_in_conversation"
-    );
-    assert_eq!(
-        message_view(&ctx, &a.passport, t, m9).await["items"],
-        json!([])
-    );
-    assert_eq!(
-        message_view(&ctx, &a.passport, t, later).await["status"],
-        "COMPLETED"
-    );
-    // And the conversation of the branch m1 → M9 → later loads: M9, failed
-    // before a step, is left out; c-later is called once.
-    let runner = ctx.service_account(true);
-    let entry_ids = |context: serde_json::Value| -> Vec<String> {
-        conversation_of(&context)
-            .entries()
-            .iter()
-            .map(|entry| entry.id().to_string())
-            .collect()
-    };
-    assert_eq!(
-        entry_ids(context(&ctx, &runner.passport, t, None).await),
-        vec![m1.to_string(), later.to_string()]
-    );
-
-    // When M10, answering the answer that called c-used, streams a step
-    // calling c-used again and is failed by its writer.
-    let m10 = open_stream(&ctx, t, Some(used), ai("a2", "Critic")).await;
-    let (last_seq, hash) = stream::push(&nats, m10, 0, &streamed_call("c-used")).await;
-    let failed = command(
-        &ctx,
-        &FailMessage {
-            message_id: m10,
-            thread_id: t,
-            seal: Some(StreamSeal { last_seq, hash }),
-            acting_user_id: None,
-        },
-    )
-    .await;
-    // Then M10 is FAILED without the step reusing the id, its Failed fact
-    // naming that cut: the stream itself gave no reason.
-    message_confirmed(&ctx, failed, MessageStatus::Failed, "failing M10").await;
-    assert_eq!(
-        message_view(&ctx, &a.passport, t, m10).await["items"],
-        json!([])
-    );
-    let m10_facts = facts::of(&ctx.pool, "message", m10).await;
-    assert_eq!(
-        facts::the(&m10_facts, "Failed").payload["reason"],
-        "duplicate_tool_call_id_in_conversation"
-    );
-
-    // When M11, answering the answer that called c-used, streams the same
-    // step calling c-used and is cancelled.
-    let m11 = open_stream(&ctx, t, Some(used), ai("a2", "Critic")).await;
-    let (last_seq, hash) = stream::push(&nats, m11, 0, &streamed_call("c-used")).await;
-    let cancelled = command(
-        &ctx,
-        &CancelMessage {
-            message_id: m11,
-            thread_id: t,
-            seal: Some(StreamSeal { last_seq, hash }),
-            acting_user_id: Some(a.id),
-        },
-    )
-    .await;
-    // Then M11 is CANCELLED and sealed as received: no conversation holds it.
-    message_confirmed(&ctx, cancelled, MessageStatus::Cancelled, "cancelling M11").await;
-    let view = message_view(&ctx, &a.passport, t, m11).await;
-    assert_eq!(view["items"].as_array().map(Vec::len), Some(3), "{view}");
-
-    // When a whole AI turn answering M11 calls c-x, M11 itself having called
-    // c-x before it was cancelled.
-    let m12 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let (last_seq, hash) = stream::push(&nats, m12, 0, &streamed_call("c-x")).await;
-    let cancelled = command(
-        &ctx,
-        &CancelMessage {
-            message_id: m12,
-            thread_id: t,
-            seal: Some(StreamSeal { last_seq, hash }),
-            acting_user_id: Some(a.id),
-        },
-    )
-    .await;
-    message_confirmed(&ctx, cancelled, MessageStatus::Cancelled, "cancelling M12").await;
-    let after_cancel = store(
-        &ctx,
-        ai_message(t, Some(m12), ai("a2", "Critic"), whole_call("c-x")),
-        MessageStatus::Completed,
-    )
-    .await;
-    // Then it is stored — the cancelled M12 is no conversation's — and the
-    // branch m1 → M12 → it loads for a runner, without M12.
-    assert_eq!(
-        entry_ids(context(&ctx, &runner.passport, t, None).await),
-        vec![m1.to_string(), after_cancel.to_string()]
-    );
 
     // When T is closed and M6 is opened on it, its chunks pushed all the same.
     let closed = command(
@@ -371,17 +349,15 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
     )
     .await;
     thread_confirmed(&ctx, closed, "closing T").await;
-    let open_m6 = streaming_message(t, Some(m1), ai("a1", "Analyst"));
+    let open_m6 = streaming_message(t, Some(m1), &analyst);
     let m6 = open_m6.message_id;
     let refused = command(&ctx, &open_m6).await;
-    let m6_chunks = vec![
-        opening(0, text_start(0), Uuid::now_v7(), None),
-        event(0, text_delta(0, "never")),
-    ];
-    stream::push(&nats, m6, 0, &m6_chunks).await;
+    let mut r6 = Streamed::start(m6, None);
+    r6.text(&["never"], false);
+    stream::push(&nats, m6, 0, &r6.chunks()).await;
 
-    // Then M6 is refused THREAD_NOT_OPEN, and nothing of it is ever folded:
-    // no message, no fact, nothing pushed.
+    // Then M6 is refused THREAD_NOT_OPEN, and nothing of it is ever folded: no
+    // message, no fact, nothing pushed.
     message_refused(&ctx, refused, ReasonCode::ThreadNotOpen, "opening M6").await;
     a_feed
         .until("T's closure reaches A's feed", |delta| {
@@ -390,6 +366,10 @@ async fn t07_a_broken_stream_fails_its_message_and_an_unfinished_step_is_kept_or
         .await;
     a_feed.silence("M6's chunks are never folded").await;
     assert!(facts::of(&ctx.pool, "message", m6).await.is_empty());
+    assert!(
+        !active_branch(&ctx, &a.passport, t).await.contains(&m6),
+        "no message M6"
+    );
 
     ctx.teardown().await;
 }

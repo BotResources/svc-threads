@@ -214,32 +214,56 @@ pub async fn bytes_verified(reference: BlobRef) -> Result<bool, Fault> {
 
 /// The artifacts a message of `thread` names, loaded and locked, when every one
 /// is that thread's, still `PENDING`, and its bytes are present at the declared
-/// digest; `ARTIFACT_NOT_READY` naming the first that is not. Writes nothing.
+/// digest; `ARTIFACT_NOT_READY` naming the first (by id) that is not. Writes
+/// nothing.
 pub async fn ready(
     ops: &mut Ops<'_>,
     thread: Uuid,
     named: &[Uuid],
 ) -> Result<Result<Vec<ArtifactState>, Refusal>, Fault> {
+    let (ready, not_ready) = sort_ready(ops, thread, named).await?;
+    Ok(match not_ready.first() {
+        Some(id) => Err(Refusal::new(ReasonCode::ArtifactNotReady).with("artifact_id", id)),
+        None => Ok(ready),
+    })
+}
+
+/// The artifacts `named` sorted: those ready to attach to a message of
+/// `thread`, loaded and locked, and the ids of those that are not, by id. One
+/// batched load, and the object store asked about every candidate's bytes at
+/// once. Writes nothing.
+pub async fn sort_ready(
+    ops: &mut Ops<'_>,
+    thread: Uuid,
+    named: &[Uuid],
+) -> Result<(Vec<ArtifactState>, Vec<Uuid>), Fault> {
     let mut ids: Vec<Uuid> = named.to_vec();
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
-        return Ok(Ok(Vec::new()));
+        return Ok((Vec::new(), Vec::new()));
     }
     let loaded = ops.load_many::<ArtifactState>(&ids).await?;
-    let not_ready = |id: Uuid| Refusal::new(ReasonCode::ArtifactNotReady).with("artifact_id", id);
-    for id in &ids {
-        let Some(artifact) = loaded.iter().find(|artifact| artifact.id == *id) else {
-            return Ok(Err(not_ready(*id)));
-        };
-        if !artifact.attachable_to(thread) {
-            return Ok(Err(not_ready(*id)));
-        }
-        if !bytes_verified(BlobRef(artifact.blob_ref)).await? {
-            return Ok(Err(not_ready(*id)));
-        }
-    }
-    Ok(Ok(loaded))
+    let candidates: Vec<ArtifactState> = loaded
+        .into_iter()
+        .filter(|artifact| artifact.attachable_to(thread))
+        .collect();
+    let verified = futures_util::future::try_join_all(
+        candidates
+            .iter()
+            .map(|artifact| bytes_verified(BlobRef(artifact.blob_ref))),
+    )
+    .await?;
+    let ready: Vec<ArtifactState> = candidates
+        .into_iter()
+        .zip(verified)
+        .filter_map(|(artifact, verified)| verified.then_some(artifact))
+        .collect();
+    let not_ready = ids
+        .into_iter()
+        .filter(|id| !ready.iter().any(|artifact| artifact.id == *id))
+        .collect();
+    Ok((ready, not_ready))
 }
 
 /// Attaches ready artifacts to `message`, which exists in this transaction.

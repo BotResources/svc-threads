@@ -21,14 +21,13 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::content::answer as text_answer;
+use common::content::reply as text_answer;
 use common::feed::{Live, removes, upsert_of};
 use common::flows::{
     active_branch, ai, answer, branch, branch_answer, context, conversation_of, create_thread, say,
-    uuid_of,
+    turn_ids, uuid_of,
 };
 use common::{TestContext, gql};
-use contract_threads::llm::Entry;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -87,13 +86,17 @@ async fn t10_the_active_branch_ends_at_the_most_recent_message_and_every_branch_
     assert_eq!(tip_m3, vec![m3, m2, m1]);
     // And a runner's conversation follows the active branch.
     let runner = ctx.service_account(true);
-    let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
-    assert_eq!(conversation.entries().len(), 3);
-    assert!(matches!(conversation.entries()[2], Entry::UserInput(_)));
+    let read = context(&ctx, &runner.passport, t, None).await;
+    let conversation = conversation_of(&read);
+    assert_eq!(turn_ids(&conversation), vec![m1, m2b, m3b]);
     assert!(
-        format!("{conversation:?}").contains("better answer")
-            && !format!("{conversation:?}").contains("first answer"),
-        "the runner reads M2b, not M2: {conversation:?}"
+        conversation.turns()[2].as_input().is_some(),
+        "M3b, A's input"
+    );
+    let raw = read["conversation"].to_string();
+    assert!(
+        raw.contains("better answer") && !raw.contains("first answer"),
+        "the runner reads M2b, not M2: {raw}"
     );
 
     // When M1 is retried: M1b, without parent, is the most recent.

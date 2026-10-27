@@ -2,7 +2,7 @@
 //!
 //! > Members A and B follow thread T live; A is the author of M1, a COMPLETED
 //! > user message. The harness edits M1: A and B each receive one update of M1
-//! > carrying the new blocks, edited_at and the raised version, and no reading
+//! > carrying the new content, edited_at and the raised version, and no reading
 //! > of the thread is needed to show it. A user who is not a member of T
 //! > receives nothing.
 //!
@@ -22,7 +22,7 @@
 mod common;
 
 use common::TestContext;
-use common::content::{texts_of, user_text};
+use common::content::{text, texts_of};
 use common::feed::{Live, Revoked, thread_feed, upsert_of, ws_opening};
 use common::flows::{
     command, create_thread, edit_of, message_confirmed, message_version, say, thread_confirmed,
@@ -77,10 +77,10 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
 
     // When the harness edits M1.
     const NEW: &str = "a second wording";
-    let edited = command(&ctx, &edit_of(t, m1, a.id, v, vec![user_text(NEW)])).await;
+    let edited = command(&ctx, &edit_of(t, m1, a.id, v, vec![text(NEW)])).await;
     message_confirmed(&ctx, edited, MessageStatus::Completed, "editing M1").await;
 
-    // Then A and B each receive one update of M1, carrying its new blocks, its
+    // Then A and B each receive one update of M1, carrying its new content, its
     // edited_at and its raised version — no read of the thread involved.
     for (feed, who) in [(&mut a_feed, "A"), (&mut b_feed, "B")] {
         let first = feed
@@ -120,7 +120,7 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
     assert_eq!(revoked, Revoked::Removed);
     // And A edits M1 again.
     const NEWER: &str = "a third wording, for members only";
-    let again = command(&ctx, &edit_of(t, m1, a.id, v + 1, vec![user_text(NEWER)])).await;
+    let again = command(&ctx, &edit_of(t, m1, a.id, v + 1, vec![text(NEWER)])).await;
     message_confirmed(&ctx, again, MessageStatus::Completed, "editing M1 again").await;
     // Then A is told, and B's open feed carries the edit in no frame.
     a_feed

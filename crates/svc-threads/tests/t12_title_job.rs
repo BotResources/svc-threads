@@ -144,7 +144,7 @@ async fn t12_the_first_user_message_starts_one_title_job_which_the_runner_ends_b
         t,
         Some(m1),
         ai("a1", "Analyst"),
-        common::content::answer("42"),
+        common::content::reply("42"),
     )
     .await;
     say(&ctx, t, Some(m2), &b, "Thanks").await;

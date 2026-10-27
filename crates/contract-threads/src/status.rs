@@ -39,10 +39,11 @@ impl From<ClosingStatus> for ThreadStatus {
 }
 
 wire_enum! {
-    /// A message's status, and an item's, which follows its message's. A user
-    /// message is always stored `COMPLETED`; an AI message may be opened
-    /// `STREAMING` and is then completed, failed or cancelled once. A
-    /// `COMPLETED`, `FAILED` or `CANCELLED` message never changes.
+    /// A message's status. A user message is always stored `COMPLETED`; an AI
+    /// message may be opened `STREAMING` and is then completed, failed or
+    /// cancelled once, its turn closed with the library's closure of the same
+    /// name. A `COMPLETED`, `FAILED` or `CANCELLED` message never changes,
+    /// except that the author of a `COMPLETED` user message may edit it.
     pub enum MessageStatus {
         Streaming => "STREAMING",
         Completed => "COMPLETED",
@@ -54,42 +55,6 @@ wire_enum! {
 impl MessageStatus {
     pub const fn is_terminal(self) -> bool {
         !matches!(self, Self::Streaming)
-    }
-}
-
-wire_enum! {
-    /// The kind of a block. The first six are the library's blocks, whose
-    /// content is the library's JSON; the last six are Threads' own, which show
-    /// what happens around the AI and which the library's rules ignore.
-    pub enum BlockKind {
-        Text => "TEXT",
-        Thinking => "THINKING",
-        RedactedThinking => "REDACTED_THINKING",
-        Structured => "STRUCTURED",
-        ToolCall => "TOOL_CALL",
-        ToolResult => "TOOL_RESULT",
-        Artifact => "ARTIFACT",
-        ThreadReference => "THREAD_REFERENCE",
-        JobReference => "JOB_REFERENCE",
-        Citation => "CITATION",
-        Error => "ERROR",
-        Warning => "WARNING",
-    }
-}
-
-impl BlockKind {
-    /// Whether the block belongs to the library's conversation: a runner
-    /// receives it, the library's rules judge it.
-    pub const fn is_library(self) -> bool {
-        matches!(
-            self,
-            Self::Text
-                | Self::Thinking
-                | Self::RedactedThinking
-                | Self::Structured
-                | Self::ToolCall
-                | Self::ToolResult
-        )
     }
 }
 
@@ -105,9 +70,6 @@ mod tests {
         for status in MessageStatus::ALL {
             assert_eq!(MessageStatus::parse(status.as_str()), Ok(*status));
         }
-        for kind in BlockKind::ALL {
-            assert_eq!(BlockKind::parse(kind.as_str()), Ok(*kind));
-        }
     }
 
     #[test]
@@ -115,8 +77,8 @@ mod tests {
         assert!(ThreadStatus::parse("open").is_err());
         assert!(serde_json::from_str::<MessageStatus>("\"DONE\"").is_err());
         assert_eq!(
-            BlockKind::parse("IMAGE").unwrap_err().to_string(),
-            "`IMAGE` is not a BlockKind literal"
+            MessageStatus::parse("DONE").unwrap_err().to_string(),
+            "`DONE` is not a MessageStatus literal"
         );
     }
 
@@ -133,16 +95,5 @@ mod tests {
         assert!(!ThreadStatus::Open.is_terminal());
         assert!(MessageStatus::Cancelled.is_terminal());
         assert!(!MessageStatus::Streaming.is_terminal());
-    }
-
-    #[test]
-    fn six_kinds_are_the_librarys_and_six_are_threads_own() {
-        let library = BlockKind::ALL
-            .iter()
-            .filter(|kind| kind.is_library())
-            .count();
-        assert_eq!(library, 6);
-        assert!(!BlockKind::Artifact.is_library());
-        assert!(BlockKind::ToolResult.is_library());
     }
 }

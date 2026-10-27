@@ -21,7 +21,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::TestContext;
-use common::content::user_text;
+use common::content::text;
 use common::flows::{
     command, create, create_thread, creation, member_ids, resources_of, say, sorted, store,
     thread_confirmed, thread_refused, thread_view, user_message,
@@ -40,8 +40,8 @@ async fn t16_a_child_thread_names_its_parent_and_origin_block_then_lives_on_its_
         ctx.enrol("bob").await,
     );
     let p = create_thread(&ctx, Some(&o), &[&a]).await;
-    let block = user_text("let us dig into this one");
-    let k = block.id;
+    let block = text("let us dig into this one");
+    let k = block.id().as_uuid();
     store(
         &ctx,
         user_message(p, None, a.id, vec![block]),

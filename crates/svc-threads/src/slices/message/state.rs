@@ -1,29 +1,32 @@
-//! A message's canonical state, as its store reads it back: the message row,
-//! its author (with the roster copy's name for a user author), its blocks or
-//! its items with theirs, and the members of its thread, which decide who sees
-//! it — plus the changes a transition made and not yet saved
-//! ([`MessageChange`]).
+//! A message's canonical state, as its store reads it back: the turn row (its
+//! author — with the roster copy's name for a user author — its status and its
+//! turn kind), its content as the library's records with its annotations, and
+//! the members of its thread, which decide who sees it — plus the changes a
+//! transition made and not yet saved ([`MessageChange`]).
 //!
 //! While a message streams, its content is the accumulated lane's
-//! ([`super::draft`]): the row holds none until the stream closes. The guarded
+//! ([`super::draft`]): the rows hold none until the stream closes. The guarded
 //! transitions live in [`super::transitions`].
 
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use contract_threads::{BlockKind, MessageStatus};
+use contract_threads::MessageStatus;
+use contract_threads::llm::{AgentId, Author, ObservedAt, TurnId, TurnKind, TurnRecord};
+use service_engine::error::EngineError;
 use service_engine::name::NounName;
 use service_engine::visibility::{Cohorts, Visibility};
 use service_engine::wire::Noun;
 use service_engine::{Cohort, Deps};
 use uuid::Uuid;
 
+use super::content::Content;
 use crate::facts::Fact;
+use crate::fault::corrupt;
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
 use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
-/// The message noun: what a message's impacts name — the accumulated lane's
-/// too, whose chunks fold into the message they belong to.
+/// The message noun: what a message's impacts name.
 pub struct Message;
 
 impl Noun for Message {
@@ -58,75 +61,39 @@ impl Visibility for Message {
 /// Who wrote a message: exactly one of a user and an AI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageAuthor {
-    /// A user, shown under the roster copy's current name (never copied).
+    /// A user, the human of the message's human message, shown under the
+    /// roster copy's current name (never copied).
     User {
         user_id: Uuid,
         display_name: Option<String>,
         in_roster: bool,
     },
-    /// An AI, as the storing service named it; Threads does not read the id.
-    Ai { id: String, name: String },
+    /// An AI: the library's agent id and its name, as the storing service gave
+    /// them. Threads does not read the id.
+    Agent { agent: AgentId, name: Author },
 }
 
-/// The kind of an item of an AI message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ItemKind {
-    Step,
-    ToolResults,
-}
-
-impl ItemKind {
-    pub fn as_db(self) -> &'static str {
-        match self {
-            Self::Step => "STEP",
-            Self::ToolResults => "TOOL_RESULTS",
-        }
+/// The library's literal of a turn kind, read back by a total mapping.
+pub fn turn_kind_of_db(stored: &str) -> Result<TurnKind, UnknownStoredValue> {
+    match stored {
+        "input_turn" => Ok(TurnKind::InputTurn),
+        "ai_turn" => Ok(TurnKind::AITurn),
+        other => Err(UnknownStoredValue {
+            column: "message.turn_kind",
+            value: other.to_owned(),
+        }),
     }
-
-    pub fn from_db(stored: &str) -> Result<Self, UnknownStoredValue> {
-        match stored {
-            "STEP" => Ok(Self::Step),
-            "TOOL_RESULTS" => Ok(Self::ToolResults),
-            other => Err(UnknownStoredValue {
-                column: "message_item.kind",
-                value: other.to_owned(),
-            }),
-        }
-    }
-}
-
-/// A stored block: its kind and its content (the library's JSON, or a Threads
-/// block's typed content), at its index.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredBlock {
-    pub id: Uuid,
-    pub index: i32,
-    pub kind: BlockKind,
-    pub content: serde_json::Value,
-}
-
-/// A stored item of an AI message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredItem {
-    pub index: i32,
-    pub kind: ItemKind,
-    pub status: MessageStatus,
-    /// A step's stop reason, usage and model, as the library's JSON.
-    pub stop_reason: Option<serde_json::Value>,
-    pub usage: Option<serde_json::Value>,
-    pub model: Option<String>,
-    pub blocks: Vec<StoredBlock>,
 }
 
 /// What a transition changed and the store has yet to write beside the message
 /// row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageChange {
-    /// The message's content is written: at its creation when it arrives
-    /// whole, at its close when it streamed.
+    /// The message's content is written whole, its identities with it: at its
+    /// creation when it arrives whole, at its close when it streamed, at an
+    /// edit (replacing what was there).
     ContentWritten,
-    /// Its author deleted it: its content goes, the node stays. (An edit
-    /// rewrites the content whole: `ContentWritten` replaces what was there.)
+    /// Its author deleted it: its content goes, the node stays.
     ContentRemoved,
     Recorded(Fact),
 }
@@ -145,29 +112,17 @@ pub struct MessageState {
     /// The date of its author's latest edit; `None` until the first.
     pub edited_at: Option<DateTime<Utc>>,
     pub version: i64,
-    /// A user message's blocks, in order; empty for an AI message and once
-    /// deleted.
-    pub blocks: Vec<StoredBlock>,
-    /// An AI message's items, in order; empty for a user message, and while a
-    /// message streams (its content is then the accumulated lane's).
-    pub items: Vec<StoredItem>,
+    /// The library's kind of its turn: an input turn for a user message, an AI
+    /// turn or an input turn for an AI message.
+    pub turn_kind: TurnKind,
+    /// The turn's own observed time, as the library writes it.
+    pub observed_at: Option<ObservedAt>,
+    /// Its content: empty while it streams, and once deleted.
+    pub content: Content,
     /// The members of the message's thread.
     pub members: BTreeSet<Uuid>,
     /// Unsaved changes, in order.
     pub pending: Vec<MessageChange>,
-}
-
-/// Whether a message of a branch is part of the conversation the branch is,
-/// for a runner: not deleted, and complete, or failed after its first step. A
-/// cancelled message, one still streaming and one failed before its first step
-/// are not.
-pub fn in_conversation(status: MessageStatus, deleted: bool, has_a_step: bool) -> bool {
-    !deleted
-        && match status {
-            MessageStatus::Completed => true,
-            MessageStatus::Failed => has_a_step,
-            MessageStatus::Cancelled | MessageStatus::Streaming => false,
-        }
 }
 
 impl MessageState {
@@ -185,15 +140,53 @@ impl MessageState {
     pub fn author_user(&self) -> Option<Uuid> {
         match &self.author {
             MessageAuthor::User { user_id, .. } => Some(*user_id),
-            MessageAuthor::Ai { .. } => None,
+            MessageAuthor::Agent { .. } => None,
         }
     }
 
-    /// Every block of the message, its own and its items'.
-    pub fn all_blocks(&self) -> impl Iterator<Item = &StoredBlock> {
-        self.blocks
-            .iter()
-            .chain(self.items.iter().flat_map(|item| item.blocks.iter()))
+    /// The agent that wrote it, when an AI did.
+    pub fn author_agent(&self) -> Option<AgentId> {
+        match &self.author {
+            MessageAuthor::Agent { agent, .. } => Some(*agent),
+            MessageAuthor::User { .. } => None,
+        }
+    }
+
+    /// Its turn's id: the message's own. Every message id is a UUIDv7, refused
+    /// otherwise when it is stored.
+    pub fn turn_id(&self) -> Result<TurnId, EngineError> {
+        TurnId::from_uuid(self.id).map_err(corrupt)
+    }
+
+    /// Its turn's row, as the library's record: an AI turn names its agent and
+    /// author, an input turn neither.
+    pub fn turn_record(&self) -> Result<TurnRecord, EngineError> {
+        let mut record = TurnRecord::new(self.turn_id()?, self.turn_kind);
+        if self.turn_kind == TurnKind::AITurn {
+            let MessageAuthor::Agent { agent, name } = &self.author else {
+                return Err(corrupt(UnknownStoredValue {
+                    column: "message.author",
+                    value: "an AI turn without its agent".to_owned(),
+                }));
+            };
+            record = record.with_agent(*agent).with_author(name.clone());
+        }
+        if let Some(observed_at) = &self.observed_at {
+            record = record.with_observed_at(observed_at.clone());
+        }
+        Ok(record)
+    }
+
+    /// Whether it is part of the conversation a runner receives: not deleted,
+    /// not cancelled, and not failed before its first entry. A message still
+    /// streaming is part of it with what its stream holds.
+    pub fn in_conversation(&self) -> bool {
+        !self.deleted
+            && match self.status {
+                MessageStatus::Completed | MessageStatus::Streaming => true,
+                MessageStatus::Failed => self.content.has_an_entry(),
+                MessageStatus::Cancelled => false,
+            }
     }
 }
 
@@ -201,34 +194,39 @@ impl MessageState {
 pub(crate) mod tests {
     use super::*;
 
+    pub fn agent() -> MessageAuthor {
+        MessageAuthor::Agent {
+            agent: AgentId::from_uuid(Uuid::now_v7()).unwrap(),
+            name: Author::new("Analyst").unwrap(),
+        }
+    }
+
     pub fn message_in(members: &[Uuid]) -> MessageState {
         MessageState {
             id: Uuid::now_v7(),
             thread_id: Uuid::now_v7(),
             parent_message_id: None,
-            author: MessageAuthor::Ai {
-                id: "a1".into(),
-                name: "Analyst".into(),
-            },
+            author: agent(),
             job_id: None,
             status: MessageStatus::Completed,
             deleted: false,
             created_at: Utc::now(),
             edited_at: None,
             version: 1,
-            blocks: Vec::new(),
-            items: Vec::new(),
+            turn_kind: TurnKind::AITurn,
+            observed_at: None,
+            content: Content::default(),
             members: members.iter().copied().collect(),
             pending: Vec::new(),
         }
     }
 
     #[test]
-    fn an_item_kind_maps_to_and_from_its_column() {
-        for kind in [ItemKind::Step, ItemKind::ToolResults] {
-            assert_eq!(ItemKind::from_db(kind.as_db()), Ok(kind));
+    fn a_turn_kind_maps_to_and_from_its_column() {
+        for kind in TurnKind::ALL {
+            assert_eq!(turn_kind_of_db(kind.as_str()), Ok(*kind));
         }
-        assert!(ItemKind::from_db("step").is_err());
+        assert!(turn_kind_of_db("AI_TURN").is_err());
     }
 
     #[test]
@@ -248,5 +246,29 @@ pub(crate) mod tests {
             &message_in(&[gone.user().unwrap()]),
             &gone
         ));
+    }
+
+    #[test]
+    fn deleted_cancelled_and_failed_before_their_first_entry_are_left_out() {
+        let mut message = message_in(&[Uuid::now_v7()]);
+        assert!(message.in_conversation());
+        message.deleted = true;
+        assert!(!message.in_conversation());
+        message.deleted = false;
+        message.status = MessageStatus::Cancelled;
+        assert!(!message.in_conversation());
+        message.status = MessageStatus::Failed;
+        assert!(!message.in_conversation(), "failed before its first entry");
+        message.status = MessageStatus::Streaming;
+        assert!(message.in_conversation(), "what its stream holds");
+    }
+
+    #[test]
+    fn an_ai_turn_row_names_its_agent_and_author() {
+        let message = message_in(&[]);
+        let record = message.turn_record().unwrap();
+        assert_eq!(record.kind(), TurnKind::AITurn);
+        assert_eq!(record.agent(), message.author_agent());
+        record.check_local().unwrap();
     }
 }

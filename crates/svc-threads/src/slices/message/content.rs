@@ -1,497 +1,391 @@
-//! The content of a message, judged by the conversation model of
-//! `br-llm-messages` and stored in Threads' decomposition: a user message's
-//! blocks, an AI message's items and their blocks.
+//! A message's content as Threads holds it: its turn's entries and blocks as
+//! the library's storage records (`br-llm-messages-records/1`), in the order the
+//! library decomposes the turn, and its annotations after their entries.
 //!
-//! A library block is stored as the library's own JSON for it — re-serialized
-//! from the parsed value, so that what Threads keeps is exactly what the library
-//! loads, its strings (a thinking, its signature, a redacted thinking) byte for
-//! byte. A Threads block keeps its typed content. The library's rules ignore
-//! Threads blocks, and a runner never receives them.
-//!
-//! The same module turns stored content back into the library's model, for the
-//! conversation a runner reads: a user message is the input, and an AI message
-//! the turn, whose id is the message's id.
-//!
-//! The library judges one conversation; Threads holds a tree of them, one per
-//! branch. The rule that spans a conversation — a tool call id is used once in
-//! it — is held for every branch through a message ([`check_calls_unused`]),
-//! so that whichever branch a runner reads loads.
+//! Threads keeps no decomposition of its own: a turn becomes rows through
+//! `RecordSet::from_turn` and comes back through `RecordSet::into_turns`, so
+//! what Threads stores is exactly what the library loads. The library judges
+//! every turn before it is stored; its refusals are answered with its own error
+//! code ([`refusal_of`]).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
-    AssistantBlock, Author, InputId, MessageError, ModelId, RedactedThinking, Signature, Step,
-    StopReason, Text, ToolCallId, ToolName, ToolResult, ToolResults, Turn, TurnId, TurnState,
-    Usage, UserBlock, UserInput, UserSource,
+    BlockRecord, ContentBlockKind, EntryRecord, Error, ErrorCode, RecordSet, RepresentationState,
+    Turn, TurnEntryKind, TurnRecord,
 };
-use contract_threads::{
-    Block, BlockBody, BlockKind, Item, MessageInvalidError, MessageStatus, ReasonCode,
-};
+use contract_threads::{MessageInvalidError, PlacedAnnotation, ReasonCode};
 use uuid::Uuid;
 
-use super::state::{ItemKind, StoredBlock, StoredItem};
 use crate::command::Refusal;
 
-/// The code of a refusal of the library's rules: what a `MESSAGE_INVALID`
-/// names in its `error` param, the vocabulary `contract-threads` publishes.
-pub fn library_error_code(error: &MessageError) -> &'static str {
-    MessageInvalidError::of_library(error).as_str()
+/// A message's content: its entries and blocks as records, its annotations.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Content {
+    /// In the order of the turn.
+    pub entries: Vec<EntryRecord>,
+    /// In the order the library decomposes the turn: each root block followed
+    /// by its children.
+    pub blocks: Vec<BlockRecord>,
+    /// In order: by the entry they follow, then their place after it.
+    pub annotations: Vec<PlacedAnnotation>,
 }
 
-/// What library JSON is expected to be where Threads reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shape {
-    UserBlock,
-    AssistantBlock,
-    ToolResult,
-    StreamEvent,
-}
+impl Content {
+    /// The records of a whole turn, with its annotations.
+    pub fn of_turn(turn: &Turn, annotations: Vec<PlacedAnnotation>) -> Result<Self, Error> {
+        let set = RecordSet::from_turn(turn)?;
+        Ok(Self {
+            entries: set.entries().to_vec(),
+            blocks: set.blocks().to_vec(),
+            annotations,
+        })
+    }
 
-/// The library's refusal of a value named by library JSON of `shape` that
-/// does not load: each value the JSON names is built with the library's own
-/// constructor, so that the refusal — an invalid tool name, a blank text, an
-/// empty signature — is the library's. `None` when every value builds: the
-/// JSON is then not the library's shape.
-pub fn value_refusal(json: &serde_json::Value, shape: Shape) -> Option<MessageError> {
-    type Build = fn(String) -> Result<(), MessageError>;
-    let built = |field: &str, build: Build| {
-        json.get(field)
-            .and_then(serde_json::Value::as_str)
-            .map(|value| build(value.to_owned()))
-    };
-    let text: Build = |value| Text::new(value).map(drop);
-    let call_id: Build = |value| ToolCallId::new(value).map(drop);
-    let tool_name: Build = |value| ToolName::new(value).map(drop);
-    let signature: Build = |value| Signature::new(value).map(drop);
-    let redacted: Build = |value| RedactedThinking::new(value).map(drop);
-    let kind = json.get("type").and_then(serde_json::Value::as_str);
-    let checks: Vec<Option<Result<(), MessageError>>> = match (shape, kind) {
-        (Shape::UserBlock | Shape::AssistantBlock, Some("text")) => vec![built("text", text)],
-        (Shape::AssistantBlock, Some("thinking")) => vec![built("signature", signature)],
-        (Shape::AssistantBlock, Some("redacted_thinking")) => vec![built("data", redacted)],
-        (Shape::AssistantBlock, Some("tool_call"))
-        | (Shape::StreamEvent, Some("tool_call_start")) => {
-            vec![built("id", call_id), built("name", tool_name)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.blocks.is_empty() && self.annotations.is_empty()
+    }
+
+    /// Whether the turn holds an entry other than its closure: a message failed
+    /// before its first entry is left out of a runner's conversation.
+    pub fn has_an_entry(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.kind() != TurnEntryKind::TurnClosure)
+    }
+
+    /// The rows of the turn the library's conversation holds: every row but
+    /// those of an interrupted response, which members see and a runner never.
+    pub fn complete_rows(&self) -> (Vec<EntryRecord>, Vec<BlockRecord>) {
+        let interrupted: HashSet<_> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.state() != RepresentationState::Complete)
+            .map(EntryRecord::id)
+            .collect();
+        let entries = self
+            .entries
+            .iter()
+            .filter(|entry| !interrupted.contains(&entry.id()))
+            .cloned()
+            .collect();
+        let blocks = self
+            .blocks
+            .iter()
+            .filter(|block| !interrupted.contains(&block.entry()))
+            .cloned()
+            .collect();
+        (entries, blocks)
+    }
+
+    /// The library's turn of the complete rows, under its turn row.
+    pub fn to_turn(&self, record: TurnRecord) -> Result<Turn, Error> {
+        let (entries, blocks) = self.complete_rows();
+        let mut turns = RecordSet::new()
+            .with_turns(vec![record])
+            .with_entries(entries)
+            .with_blocks(blocks)
+            .into_turns()?;
+        Ok(turns.remove(0))
+    }
+
+    /// Every id the content declares: its entries', its blocks' (children
+    /// included), its text blocks' citations' and its annotations'.
+    pub fn identities(&self) -> Vec<Uuid> {
+        let mut ids: Vec<Uuid> = self.entries.iter().map(|e| e.id().as_uuid()).collect();
+        for block in &self.blocks {
+            ids.push(block.id().as_uuid());
+            ids.extend(citation_ids(block));
         }
-        // A tool result's content blocks are text blocks.
-        (Shape::ToolResult, _) => {
-            let content = json
-                .get("content")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(|block| value_refusal(block, Shape::UserBlock).map(Err));
-            [
-                built("tool_call_id", call_id),
-                built("tool_name", tool_name),
-            ]
-            .into_iter()
-            .chain(content)
+        ids.extend(self.annotations.iter().map(|placed| placed.annotation.id));
+        ids
+    }
+
+    /// The ids each entry declares, by entry: its own, its blocks' (children
+    /// included) and their citations' — read off the library's records, so
+    /// that what counts as an id is the library's decomposition.
+    pub fn identities_by_entry(&self) -> HashMap<Uuid, Vec<Uuid>> {
+        let mut by_entry: HashMap<Uuid, Vec<Uuid>> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.id().as_uuid(), vec![entry.id().as_uuid()]))
+            .collect();
+        for block in &self.blocks {
+            if let Some(ids) = by_entry.get_mut(&block.entry().as_uuid()) {
+                ids.push(block.id().as_uuid());
+                ids.extend(citation_ids(block));
+            }
+        }
+        by_entry
+    }
+
+    /// The artifacts its `ARTIFACT` annotations name.
+    pub fn artifacts(&self) -> Vec<Uuid> {
+        self.annotations
+            .iter()
+            .filter_map(|placed| placed.annotation.body.artifact())
             .collect()
-        }
-        _ => Vec::new(),
-    };
-    checks.into_iter().flatten().find_map(Result::err)
-}
-
-/// Why content was refused: one of Threads' own rules, or the library's.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ContentFault {
-    Threads(MessageInvalidError),
-    Library(MessageError),
-}
-
-impl ContentFault {
-    /// Library JSON of `shape` that does not load: the library's refusal of a
-    /// value it names, `block_content_invalid` otherwise.
-    pub fn unreadable(json: &serde_json::Value, shape: Shape) -> Self {
-        match value_refusal(json, shape) {
-            Some(error) => Self::Library(error),
-            None => Self::Threads(MessageInvalidError::BlockContentInvalid),
-        }
     }
 
-    pub fn code(&self) -> MessageInvalidError {
-        match self {
-            Self::Threads(code) => *code,
-            Self::Library(error) => MessageInvalidError::of_library(error),
-        }
-    }
-
-    /// The `MESSAGE_INVALID` refusal it is.
-    pub fn refusal(&self) -> Refusal {
-        match self {
-            Self::Threads(code) => invalid(*code),
-            Self::Library(error) => invalid_by_library(error),
-        }
+    /// Whether `entry` is one of its entries.
+    pub fn holds_entry(&self, entry: Uuid) -> bool {
+        self.entries.iter().any(|row| row.id().as_uuid() == entry)
     }
 }
 
-/// The tool call ids already used on a branch through a message: by the
-/// messages before it and after it that a conversation holds.
-pub type UsedCallIds = HashSet<ToolCallId>;
-
-/// The tool call ids of stored items, in order.
-pub fn call_ids(items: &[StoredItem]) -> Vec<ToolCallId> {
-    items
-        .iter()
-        .flat_map(|item| item.blocks.iter())
-        .filter(|block| block.kind == BlockKind::ToolCall)
-        .filter_map(|block| serde_json::from_value::<AssistantBlock>(block.content.clone()).ok())
-        .filter_map(|block| block.as_tool_call().map(|call| call.id.clone()))
-        .collect()
-}
-
-/// The library's conversation rule, across the branches through a message: none
-/// of its tool call ids is used by a message before or after it.
-pub fn check_calls_unused(items: &[StoredItem], used: &UsedCallIds) -> Result<(), MessageError> {
-    match call_ids(items).into_iter().find(|id| used.contains(id)) {
-        Some(id) => Err(MessageError::DuplicateToolCallIdInConversation { id }),
-        None => Ok(()),
+/// The citation ids of a text block's record: a citation is the library's
+/// citation of a text block, its id in the record's payload.
+pub fn citation_ids(block: &BlockRecord) -> Vec<Uuid> {
+    if block.kind() != ContentBlockKind::Text {
+        return Vec::new();
     }
-}
-
-/// A `MESSAGE_INVALID` refusal for a library error, with the detail the
-/// error names: the id it is about, the field it refuses.
-pub fn invalid_by_library(error: &MessageError) -> Refusal {
-    let refusal = invalid(MessageInvalidError::of_library(error));
-    match error {
-        MessageError::DuplicateToolCallId { id }
-        | MessageError::DuplicateToolCallIdInTurn { id }
-        | MessageError::DuplicateToolCallIdInConversation { id }
-        | MessageError::DuplicateToolResultId { id }
-        | MessageError::ToolNameMismatch { id, .. } => refusal.with("tool_call_id", id.as_str()),
-        MessageError::DuplicateEntryId { id } => refusal.with("entry_id", id),
-        MessageError::Blank { field } | MessageError::InvalidJson { field, .. } => {
-            refusal.with("field", field)
-        }
-        _ => refusal,
-    }
-}
-
-/// A `MESSAGE_INVALID` refusal under `code`.
-pub fn invalid(code: MessageInvalidError) -> Refusal {
-    Refusal::new(ReasonCode::MessageInvalid).with("error", code.as_str())
-}
-
-/// The library block of a contract block, by the library's rules, as the
-/// library re-serializes it. Its kind must be the one its content says.
-pub fn assistant_block(block: &Block) -> Result<(AssistantBlock, serde_json::Value), Refusal> {
-    let Some(raw) = block.body.library() else {
-        return Err(invalid(MessageInvalidError::BlockKindNotAllowed).with("block_id", block.id));
-    };
-    let parsed = raw.to_assistant().map_err(|_| {
-        ContentFault::unreadable(raw.as_json(), Shape::AssistantBlock)
-            .refusal()
-            .with("block_id", block.id)
-    })?;
-    let expected = match &parsed {
-        AssistantBlock::Text { .. } => Some(BlockKind::Text),
-        AssistantBlock::Thinking(_) => Some(BlockKind::Thinking),
-        AssistantBlock::RedactedThinking(_) => Some(BlockKind::RedactedThinking),
-        AssistantBlock::Structured { .. } => Some(BlockKind::Structured),
-        AssistantBlock::ToolCall(_) => Some(BlockKind::ToolCall),
-        // A block a later library adds has no Threads kind.
-        _ => None,
-    };
-    let content_invalid =
-        || invalid(MessageInvalidError::BlockContentInvalid).with("block_id", block.id);
-    if expected != Some(block.kind()) {
-        return Err(content_invalid());
-    }
-    let json = serde_json::to_value(&parsed).map_err(|_| content_invalid())?;
-    Ok((parsed, json))
-}
-
-/// The library tool result of a `TOOL_RESULT` block.
-pub fn tool_result_block(block: &Block) -> Result<(ToolResult, serde_json::Value), Refusal> {
-    tool_result_of(block).map_err(|fault| fault.refusal().with("block_id", block.id))
-}
-
-/// The library tool result of a `TOOL_RESULT` block, or why it is not one.
-pub fn tool_result_of(block: &Block) -> Result<(ToolResult, serde_json::Value), ContentFault> {
-    let Some(raw) = block
-        .body
-        .library()
-        .filter(|_| block.kind() == BlockKind::ToolResult)
-    else {
-        return Err(ContentFault::Threads(
-            MessageInvalidError::BlockKindNotAllowed,
-        ));
-    };
-    let parsed = raw
-        .to_tool_result()
-        .map_err(|_| ContentFault::unreadable(raw.as_json(), Shape::ToolResult))?;
-    let json = serde_json::to_value(&parsed)
-        .map_err(|_| ContentFault::Threads(MessageInvalidError::BlockContentInvalid))?;
-    Ok((parsed, json))
-}
-
-/// The stored form of a Threads block.
-pub fn threads_block(block: &Block, index: usize) -> Result<StoredBlock, Refusal> {
-    let refuse = |code: MessageInvalidError| invalid(code).with("block_id", block.id);
-    let content = match &block.body {
-        BlockBody::Artifact(content) => serde_json::to_value(content),
-        BlockBody::ThreadReference(content) => serde_json::to_value(content),
-        BlockBody::JobReference(content) => serde_json::to_value(content),
-        BlockBody::Citation(content) => serde_json::to_value(content),
-        BlockBody::Error(content) | BlockBody::Warning(content) => serde_json::to_value(content),
-        _ => return Err(refuse(MessageInvalidError::BlockKindNotAllowed)),
-    }
-    .map_err(|_| refuse(MessageInvalidError::BlockContentInvalid))?;
-    Ok(StoredBlock {
-        id: block.id,
-        index: index as i32,
-        kind: block.kind(),
-        content,
-    })
-}
-
-/// The artifacts a list of blocks names in its `ARTIFACT` blocks.
-pub fn named_artifacts<'a>(blocks: impl IntoIterator<Item = &'a StoredBlock>) -> Vec<Uuid> {
-    blocks
+    serde_json::to_value(block.payload())
+        .ok()
+        .and_then(|payload| payload.get("citations").cloned())
+        .and_then(|citations| citations.as_array().cloned())
         .into_iter()
-        .filter(|block| block.kind == BlockKind::Artifact)
-        .filter_map(|block| {
-            block
-                .content
-                .get("artifact_id")
+        .flatten()
+        .filter_map(|citation| {
+            citation
+                .get("id")
                 .and_then(serde_json::Value::as_str)
-                .and_then(|raw| Uuid::parse_str(raw).ok())
+                .and_then(|id| Uuid::parse_str(id).ok())
         })
         .collect()
 }
 
-/// Every block id of a list of blocks appears once.
-fn unique_ids<'a>(ids: impl IntoIterator<Item = &'a Uuid>) -> Result<(), Refusal> {
-    let mut seen = BTreeSet::new();
-    for id in ids {
-        crate::command::minted("block_id", *id)?;
-        if !seen.insert(*id) {
-            return Err(Refusal::new(ReasonCode::KeyReused).with("block_id", id));
-        }
-    }
-    Ok(())
+/// The first id named twice in `ids`.
+pub fn first_repeated(ids: impl IntoIterator<Item = Uuid>) -> Option<Uuid> {
+    let mut seen = HashSet::new();
+    ids.into_iter().find(|id| !seen.insert(*id))
 }
 
-/// The input id of a user message: its own id.
-pub fn input_id(message: Uuid) -> InputId {
-    InputId::new(message.to_string()).expect("a UUID's text is never empty")
+/// A `MESSAGE_INVALID` refusal under one of Threads' own codes.
+pub fn invalid(code: MessageInvalidError) -> Refusal {
+    Refusal::new(ReasonCode::MessageInvalid).with("error", code.as_str())
 }
 
-/// The turn id of an AI message: its own id.
-pub fn turn_id(message: Uuid) -> TurnId {
-    TurnId::new(message.to_string()).expect("a UUID's text is never empty")
-}
-
-/// The user input of message `message`, judged: text blocks by the library's
-/// rules, Threads blocks other than `ARTIFACT`; at least one text.
-pub fn user_blocks(message: Uuid, blocks: &[Block]) -> Result<Vec<StoredBlock>, Refusal> {
-    unique_ids(blocks.iter().map(|block| &block.id))?;
-    let mut stored = Vec::with_capacity(blocks.len());
-    let mut library = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        match block.kind() {
-            BlockKind::Text => {
-                let raw = block.body.library().expect("TEXT is a library kind");
-                let parsed = raw.to_user().map_err(|_| {
-                    ContentFault::unreadable(raw.as_json(), Shape::UserBlock)
-                        .refusal()
-                        .with("block_id", block.id)
-                })?;
-                if !matches!(parsed, UserBlock::Text { .. }) {
-                    return Err(invalid(MessageInvalidError::BlockContentInvalid)
-                        .with("block_id", block.id));
-                }
-                stored.push(StoredBlock {
-                    id: block.id,
-                    index: index as i32,
-                    kind: BlockKind::Text,
-                    content: serde_json::to_value(&parsed).map_err(|_| {
-                        invalid(MessageInvalidError::BlockContentInvalid).with("block_id", block.id)
-                    })?,
-                });
-                library.push(parsed);
-            }
-            BlockKind::Artifact => {
-                return Err(
-                    invalid(MessageInvalidError::ArtifactInUserMessage).with("block_id", block.id)
-                );
-            }
-            kind if kind.is_library() => {
-                return Err(invalid(MessageInvalidError::BlockKindNotAllowed)
-                    .with("block_id", block.id)
-                    .with("kind", kind.as_str()));
-            }
-            _ => stored.push(threads_block(block, index)?),
-        }
-    }
-    UserInput::new(input_id(message), UserSource::Human, None, library)
-        .map_err(|e| invalid_by_library(&e))?;
-    Ok(stored)
-}
-
-/// The library step of a stored step item.
-fn library_step(item: &StoredItem) -> Result<Step, MessageError> {
-    let stop_reason: StopReason = item
-        .stop_reason
-        .clone()
-        .and_then(|json| serde_json::from_value(json).ok())
-        .ok_or(MessageError::MissingFinish)?;
-    let usage: Option<Usage> = item
-        .usage
-        .clone()
-        .and_then(|json| serde_json::from_value(json).ok());
-    let content: Vec<AssistantBlock> = item
-        .blocks
-        .iter()
-        .filter(|block| block.kind.is_library())
-        .filter_map(|block| serde_json::from_value(block.content.clone()).ok())
-        .collect();
-    let model = item.model.clone().map(ModelId::new).transpose()?;
-    Step::new(content, stop_reason, usage, model)
-}
-
-fn library_results(item: &StoredItem) -> Vec<ToolResult> {
-    item.blocks
-        .iter()
-        .filter(|block| block.kind == BlockKind::ToolResult)
-        .filter_map(|block| serde_json::from_value(block.content.clone()).ok())
-        .collect()
-}
-
-/// The library turn of stored items, by the library's rules — those of a turn
-/// loaded from JSON: a tool results item holds at least one result.
-pub fn turn_of(
-    id: Uuid,
-    author: Option<Author>,
-    items: &[StoredItem],
-) -> Result<Turn, MessageError> {
-    let mut items = items.iter();
-    let first = match items.next() {
-        Some(item) if item.kind == ItemKind::Step => library_step(item)?,
-        _ => return Err(MessageError::TurnMustStartWithStep),
+/// The refusal of what the library refuses: `MESSAGE_INVALID` under the
+/// library's code, naming the object and the place the library names.
+pub fn refusal_of(error: &Error) -> Refusal {
+    let refusal = invalid(MessageInvalidError::of_library(error.code()));
+    let refusal = match error.object_id() {
+        Some(id) => refusal.with("object_id", id),
+        None => refusal,
     };
-    let mut turn = Turn::new(turn_id(id), author, first);
-    for item in items {
-        match item.kind {
-            ItemKind::Step => turn.push_step(library_step(item)?)?,
-            ItemKind::ToolResults => {
-                let results = library_results(item);
-                if results.is_empty() {
-                    return Err(MessageError::EmptyToolResults);
-                }
-                turn.push_results(results)?
+    match error.location() {
+        Some(location) => refusal.with("location", location),
+        None => refusal,
+    }
+}
+
+/// The refusal of content whose every id the caller minted for a new object —
+/// plain blocks, which reference nothing: an id the library refuses as no
+/// UUIDv7 is `ID_NOT_UUIDV7`, anything else the library's `MESSAGE_INVALID`.
+pub fn minted_refusal_of(error: &Error) -> Refusal {
+    match error.code() {
+        ErrorCode::InvalidIdentity => {
+            let refusal = Refusal::new(ReasonCode::IdNotUuidV7);
+            let refusal = match error.object_id() {
+                Some(id) => refusal.with("id", id),
+                None => refusal,
+            };
+            match error.location() {
+                Some(location) => refusal.with("location", location),
+                None => refusal,
             }
         }
+        _ => refusal_of(error),
     }
-    Ok(turn)
 }
 
-/// The library user input of message `message`'s stored blocks, under its
-/// author.
-pub fn user_input_of(
-    message: Uuid,
-    blocks: &[StoredBlock],
-    author: Author,
-) -> Result<UserInput, MessageError> {
-    let content: Vec<UserBlock> = blocks
-        .iter()
-        .filter(|block| block.kind.is_library())
-        .filter_map(|block| serde_json::from_value(block.content.clone()).ok())
-        .collect();
-    UserInput::new(input_id(message), UserSource::Human, Some(author), content)
+/// The refusal of a turn or an entry the library refuses, read from the
+/// caller's JSON: an id it declares for a new object (an entry's, a block's, a
+/// citation's) that is no UUIDv7 is `ID_NOT_UUIDV7`; a reference that is none
+/// (an agent, a human, the call a result answers), and anything else, the
+/// library's `MESSAGE_INVALID`.
+///
+/// The library names the id it refused, not its role, and its location stops
+/// at the entry. The role is read off the library's own decomposition: in a
+/// copy of the JSON every UUID the library would refuse is replaced by a fresh
+/// UUIDv7 stand-in, and `declared` answers the ids the copy declares, as the
+/// library reads it; the refused id is a declared one when its stand-in is. A
+/// malformed id the library cannot name, or a copy it still refuses for
+/// another reason, cannot be placed: the library's `MESSAGE_INVALID`.
+pub fn declared_refusal_of(
+    json: &serde_json::Value,
+    error: &Error,
+    declared: impl FnOnce(serde_json::Value) -> Option<Vec<Uuid>>,
+) -> Refusal {
+    let (ErrorCode::InvalidIdentity, Some(refused)) = (error.code(), error.object_id()) else {
+        return refusal_of(error);
+    };
+    let mut probe = json.clone();
+    let mut stand_ins = HashMap::new();
+    stand_in_refused_ids(&mut probe, &mut stand_ins);
+    let Some(stand_in) = stand_ins.get(&refused).copied() else {
+        return refusal_of(error);
+    };
+    match declared(probe) {
+        Some(ids) if ids.contains(&stand_in) => minted_refusal_of(error),
+        _ => refusal_of(error),
+    }
 }
 
-/// An AI turn given whole, judged: every step and every tool results item by
-/// the library's rules, in order, the turn starting with a step and not left
-/// awaiting tool results. Its items are stored `COMPLETED`.
-pub fn ai_items(message_id: Uuid, items: &[Item]) -> Result<Vec<StoredItem>, Refusal> {
-    let all_ids = items.iter().flat_map(|item| match item {
-        Item::Step(step) => step.blocks.iter(),
-        Item::ToolResults(results) => results.blocks.iter(),
-    });
-    unique_ids(all_ids.map(|block| &block.id))?;
-    let mut stored = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        stored.push(match item {
-            Item::Step(step) => {
-                let mut blocks = Vec::with_capacity(step.blocks.len());
-                let mut content = Vec::new();
-                for (position, block) in step.blocks.iter().enumerate() {
-                    if block.kind().is_library() {
-                        let (parsed, json) = assistant_block(block)?;
-                        content.push(parsed);
-                        blocks.push(StoredBlock {
-                            id: block.id,
-                            index: position as i32,
-                            kind: block.kind(),
-                            content: json,
-                        });
-                    } else {
-                        blocks.push(threads_block(block, position)?);
-                    }
-                }
-                let model = match &step.model {
-                    Some(model) => Some(
-                        ModelId::new(model.clone())
-                            .map_err(|e| invalid_by_library(&e).with("item_index", index))?,
-                    ),
-                    None => None,
-                };
-                let library =
-                    Step::new(content, step.stop_reason.clone(), step.usage.clone(), model)
-                        .map_err(|e| invalid_by_library(&e).with("item_index", index))?;
-                StoredItem {
-                    index: index as i32,
-                    kind: ItemKind::Step,
-                    status: MessageStatus::Completed,
-                    stop_reason: serde_json::to_value(library.stop_reason()).ok(),
-                    usage: library
-                        .usage()
-                        .and_then(|usage| serde_json::to_value(usage).ok()),
-                    model: library.model().map(|model| model.as_str().to_owned()),
-                    blocks,
-                }
+/// Replaces, in place, every string of `value` that is a UUID the library
+/// refuses as an id (not a UUIDv7) by a fresh UUIDv7, the same one for every
+/// occurrence of an id.
+fn stand_in_refused_ids(value: &mut serde_json::Value, stand_ins: &mut HashMap<Uuid, Uuid>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(id) = Uuid::try_parse(text)
+                && contract_threads::llm::BlockId::from_uuid(id).is_err()
+            {
+                let stand_in = *stand_ins.entry(id).or_insert_with(Uuid::now_v7);
+                *text = stand_in.to_string();
             }
-            Item::ToolResults(results) => {
-                let mut blocks = Vec::with_capacity(results.blocks.len());
-                let mut collected = ToolResults::empty();
-                for (position, block) in results.blocks.iter().enumerate() {
-                    if block.kind().is_library() {
-                        let (result, json) = tool_result_block(block)?;
-                        collected
-                            .push(result)
-                            .map_err(|e| invalid_by_library(&e).with("item_index", index))?;
-                        blocks.push(StoredBlock {
-                            id: block.id,
-                            index: position as i32,
-                            kind: BlockKind::ToolResult,
-                            content: json,
-                        });
-                    } else {
-                        blocks.push(threads_block(block, position)?);
-                    }
-                }
-                StoredItem {
-                    index: index as i32,
-                    kind: ItemKind::ToolResults,
-                    status: MessageStatus::Completed,
-                    stop_reason: None,
-                    usage: None,
-                    model: None,
-                    blocks,
-                }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                stand_in_refused_ids(item, stand_ins);
             }
-        });
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                stand_in_refused_ids(item, stand_ins);
+            }
+        }
+        _ => {}
     }
-    let turn = turn_of(message_id, None, &stored).map_err(|e| invalid_by_library(&e))?;
-    if matches!(turn.state(), TurnState::AwaitingToolResults { .. }) {
-        return Err(invalid(MessageInvalidError::TurnAwaitingToolResults));
+}
+
+/// Whether a string of `value`, or a key, holds U+0000.
+pub fn holds_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(holds_nul),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, item)| key.contains('\0') || holds_nul(item)),
+        _ => false,
     }
-    Ok(stored)
+}
+
+/// `MESSAGE_INVALID` (`nul_character`) when what a command carries holds
+/// U+0000. The library accepts it in a text, but Postgres refuses it in `text`
+/// and `jsonb`: the store would fail on a terminal fault and the command stay
+/// unanswered, so it is refused when judged.
+pub fn nul_refusal<T: serde::Serialize>(carried: &T) -> Option<Refusal> {
+    let value = serde_json::to_value(carried).ok()?;
+    holds_nul(&value).then(|| invalid(MessageInvalidError::NulCharacter))
 }
 
 #[cfg(test)]
-#[path = "content_tests.rs"]
-mod tests;
+mod tests {
+    use contract_threads::llm::{
+        AITurn, AgentId, BlockId, Citation, CitationId, CitationSource, ClosureReason, EntryId,
+        HumanId, HumanMessage, InputTurn, ModelResponse, PlainBlock, ResponseEnding,
+        ResponseMetadata, TextBlock, TurnClosure, TurnId, TurnKind,
+    };
+    use contract_threads::{AnnotationBody, Notice};
+
+    use super::*;
+
+    fn v7() -> Uuid {
+        Uuid::now_v7()
+    }
+
+    fn cited_text(text: &str) -> (TextBlock, Uuid) {
+        let citation = v7();
+        let block = TextBlock::new(BlockId::from_uuid(v7()).unwrap(), text)
+            .unwrap()
+            .with_citations(vec![Citation::new(
+                CitationId::from_uuid(citation).unwrap(),
+                CitationSource::new("kb:1").unwrap(),
+            )])
+            .unwrap();
+        (block, citation)
+    }
+
+    #[test]
+    fn a_turn_becomes_records_and_comes_back_whole() {
+        let turn_id = TurnId::from_uuid(v7()).unwrap();
+        let (text, _) = cited_text("hello");
+        let human = HumanMessage::new(
+            EntryId::from_uuid(v7()).unwrap(),
+            HumanId::from_uuid(v7()).unwrap(),
+            vec![PlainBlock::try_from(contract_threads::llm::ContentBlock::Text(text)).unwrap()],
+        )
+        .unwrap();
+        let turn: Turn = InputTurn::new(turn_id, vec![human.into()]).unwrap().into();
+        let content = Content::of_turn(&turn, Vec::new()).unwrap();
+        assert_eq!(content.entries.len(), 1);
+        assert_eq!(content.blocks.len(), 1);
+        let record = TurnRecord::new(turn_id, TurnKind::InputTurn);
+        assert_eq!(content.to_turn(record).unwrap(), turn);
+        assert!(content.has_an_entry());
+    }
+
+    #[test]
+    fn the_identities_of_a_content_name_its_entries_blocks_citations_and_annotations() {
+        let turn_id = TurnId::from_uuid(v7()).unwrap();
+        let agent = AgentId::from_uuid(v7()).unwrap();
+        let (text, citation) = cited_text("answer");
+        let response_id = EntryId::from_uuid(v7()).unwrap();
+        let response = ModelResponse::new(
+            response_id,
+            vec![text.clone().into()],
+            ResponseEnding::finished(),
+            ResponseMetadata::new(),
+        )
+        .unwrap();
+        let mut ai = AITurn::open(
+            turn_id,
+            agent,
+            contract_threads::llm::Author::new("Analyst").unwrap(),
+        );
+        ai.push_entry(response.into()).unwrap();
+        ai.push_entry(
+            TurnClosure::new(
+                EntryId::from_uuid(v7()).unwrap(),
+                ClosureReason::completed(),
+            )
+            .into(),
+        )
+        .unwrap();
+        let annotation = PlacedAnnotation::new(
+            response_id.as_uuid(),
+            contract_threads::Annotation::new(
+                v7(),
+                AnnotationBody::Warning(Notice {
+                    code: "PARTIAL".into(),
+                    text: None,
+                }),
+            ),
+        );
+        let content = Content::of_turn(&ai.into(), vec![annotation.clone()]).unwrap();
+        let ids = content.identities();
+        assert!(ids.contains(&response_id.as_uuid()));
+        assert!(ids.contains(&text.id().as_uuid()));
+        assert!(ids.contains(&citation));
+        assert!(ids.contains(&annotation.annotation.id));
+        assert_eq!(first_repeated(ids), None);
+        assert!(content.holds_entry(response_id.as_uuid()));
+    }
+
+    #[test]
+    fn a_library_refusal_names_the_librarys_code_and_a_minted_id_refused_is_id_not_uuidv7() {
+        let error =
+            PlainBlock::from_json(r#"{"type":"text","id":"not-an-id","text":"hi"}"#).unwrap_err();
+        assert_eq!(minted_refusal_of(&error).code, ReasonCode::IdNotUuidV7);
+        let refusal = refusal_of(&error);
+        assert_eq!(refusal.code, ReasonCode::MessageInvalid);
+        assert_eq!(refusal.params["error"], "invalid_identity");
+        let error =
+            PlainBlock::from_json(&format!(r#"{{"type":"text","id":"{}","text":"  "}}"#, v7()))
+                .unwrap_err();
+        let refusal = refusal_of(&error);
+        assert_eq!(refusal.code, ReasonCode::MessageInvalid);
+        assert_eq!(refusal.params["error"], "invalid_content");
+    }
+}

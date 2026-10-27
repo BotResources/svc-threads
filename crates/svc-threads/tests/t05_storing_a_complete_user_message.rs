@@ -1,48 +1,56 @@
 //! **T05 — Storing a complete user message.**
 //!
-//! > Playing the agents service, the harness stores on OPEN thread T a
-//! > COMPLETED user message M1 authored by member A, with one TEXT block under
-//! > a minted id and no parent: message.confirmed names the command and status
-//! > COMPLETED; every member reads M1 with A's current display name, and a
-//! > subscriber of T receives it. The message's Created fact carries kinds,
-//! > positions, author and status, and no text. A message whose blocks the
-//! > library refuses (an empty text, a TOOL_RESULT in a user input) is refused
-//! > MESSAGE_INVALID and nothing is stored. A user author who is not a member
-//! > is refused. A parent from another thread is refused MESSAGE_INVALID.
-//! > Reusing M1's id is refused KEY_REUSED. The thread is closed COMPLETED:
-//! > storing on it is refused THREAD_NOT_OPEN, as is any later close. Renaming
-//! > A in Identity shows the new name on M1 everywhere, while no fact carries a
-//! > name. An impersonated author's store carries the impersonator: it is in
-//! > the Created fact, never on the message.
+//! > Playing the agents service, the harness stores on OPEN thread T, with
+//! > message.store v2, a COMPLETED user message M1: an input turn under M1's id
+//! > holding a human message of member A under a minted entry id, with a text
+//! > block and an image block under minted ids, and no parent: message.confirmed
+//! > names the command, M1 and status COMPLETED; every member reads M1 as that
+//! > turn, with A's current display name, and a member following T receives it.
+//! > A user message holding a structured content block is stored too. The
+//! > message's Created fact carries kinds, positions, author and status, and no
+//! > text. The bus redelivers the store under its own envelope id: no second
+//! > distinct answer, M1 stored once. A message the library refuses (an empty
+//! > text, an explicit null, an entry id equal to its turn's id) is refused
+//! > MESSAGE_INVALID naming the library's error code, and nothing is stored; so
+//! > is a user message holding an annotation. A human who is not a member is
+//! > refused NOT_A_MEMBER. A parent from another thread is refused
+//! > MESSAGE_INVALID; a parent nobody stored, MESSAGE_NOT_FOUND; a thread nobody
+//! > created, THREAD_NOT_FOUND. Reusing M1's id is refused KEY_REUSED. An
+//! > impersonated author's store carries the impersonator: it is in the Created
+//! > fact, never on the message. Renaming A in Identity shows the new name on M1
+//! > everywhere members read it and in the members of a runner's context, while
+//! > no fact and no stored message carries a name. The thread is closed
+//! > COMPLETED: storing on it is refused THREAD_NOT_OPEN, as is any later close.
 //!
-//! The library's rules include those of `br-llm-messages` 0.5 an AI turn given
-//! whole meets: a tool name every provider accepts, and a tool call id used
-//! once in the conversation — on the branch of the message, before or after
-//! it, a fork being another conversation. Each refusal names the library's
-//! code in its `error` param.
+//! The library's error code a refusal names is computed by the library itself
+//! on the very input sent (`common::content::entry_refusal`, `InputTurn::new`).
+//!
+//! "Nothing is stored" is read on three channels: no fact of the refused
+//! message, the active branch unchanged, and B's open feed of T silent across
+//! every refused store. "Never on the message" holds for the store too: the
+//! impersonator's id is in no row but the fact log's.
 //!
 //! Channels: the answers (4), M1 as each member reads it with its affordance
-//! (2), B's live feed of T (3), the fact log, a runner's context (the name
-//! "everywhere"). Adversarial: a non-member author, a foreign parent, a reused
-//! id, an impersonator, a redelivered command.
+//! (2), B's live feed of T (3), the fact log and the store, a runner's context.
+//! Adversarial: a non-member human, a foreign parent, a reused id, an
+//! impersonator, a redelivered command, content the library refuses.
 
 mod common;
 
 use common::content::{
-    ai_text, raw_text, step, text_content, tool_call, tool_result, tool_results, user_text,
+    self, assert_same_turn, entry_refusal, human, image, input_turn, structured, text, to_json,
+    turn_of, warning,
 };
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, ai, ai_message, command, context, conversation_of, create_thread,
-    message_confirmed, message_refused, message_view, say, thread_confirmed, thread_refused,
+    active_branch, command, context, conversation_of, create_thread, message_confirmed,
+    message_refused, message_view, say, thread_confirmed, thread_refused, user_entry_message,
     user_message,
 };
-use common::{TestContext, identity};
-use contract_threads::llm::{Entry, StopReason, UserBlock};
-use contract_threads::{
-    Block, BlockBody, CloseThread, ClosingStatus, LibraryBlock, MessageStatus, ReasonCode,
-};
+use common::{TestContext, identity, store};
+use contract_threads::llm::{EntryId, HumanMessage, IncomingEntry, InputTurn, Turn, TurnEntry};
+use contract_threads::{CloseThread, ClosingStatus, MessageStatus, MessageTurn, ReasonCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -61,14 +69,13 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     let t = create_thread(&ctx, Some(&o), &[&a, &b]).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
 
-    // When the agents service stores M1 by A: one TEXT block, no parent.
+    // When the agents service stores, with message.store v2, M1: an input turn
+    // under M1's id holding A's human message (a minted entry id) with a text
+    // block and an image block, no parent.
     const SECRET: &str = "the quarterly figures are confidential";
-    let store_m1 = user_message(t, None, a.id, vec![user_text(SECRET)]);
+    let entry = human(a.id, vec![text(SECRET), image()]);
+    let store_m1 = user_entry_message(t, None, a.id, &entry);
     let m1 = store_m1.message_id;
-    let block = match &store_m1.message {
-        contract_threads::NewMessage::User(user) => user.blocks[0].id,
-        contract_threads::NewMessage::Ai(_) => unreachable!(),
-    };
     let store_command = command(&ctx, &store_m1).await;
 
     // Then (4) message.confirmed names the command, M1 and COMPLETED.
@@ -81,13 +88,15 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     assert_eq!(confirmed.command_type, "message.store");
     common::flows::answered_once(&ctx, store_command, "storing M1").await;
 
-    // And (2) every member reads M1: A's author line under A's current name,
-    // its one TEXT block, and the read mark it offers.
+    // And (2) every member reads M1 as that turn — the library's input turn,
+    // entry for entry — under A's current name, with the read mark it offers.
+    let stored_as = Turn::from(input_turn(m1, vec![entry.clone()]));
     for person in [&o, &a, &b] {
         let view = message_view(&ctx, &person.passport, t, m1).await;
         assert_eq!(view["status"], "COMPLETED", "{view}");
         assert_eq!(view["deleted"], false);
         assert_eq!(view["parentMessageId"], Value::Null);
+        assert_eq!(view["turnKind"], "INPUT_TURN", "{view}");
         assert_eq!(
             view["author"],
             json!({
@@ -97,11 +106,22 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
                 "name": identity::display_name("ada"),
             })
         );
+        let read = &view["entries"][0];
         assert_eq!(
-            view["blocks"],
-            json!([{ "id": block, "index": 0, "kind": "TEXT", "content": text_content(SECRET) }])
+            (
+                read["id"].clone(),
+                read["index"].clone(),
+                read["kind"].clone()
+            ),
+            (
+                json!(entry.id().as_uuid()),
+                json!(0),
+                json!("human_message")
+            ),
+            "{view}"
         );
-        assert_eq!(view["items"], json!([]));
+        assert_eq!(read["annotations"], json!([]));
+        assert_same_turn(&turn_of(&view), &stored_as, "M1");
         common::gql::assert_allowed(&view, "markRead");
     }
 
@@ -111,9 +131,22 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
             upsert_of(delta, m1).is_some()
         })
         .await;
-    assert_eq!(
-        upsert_of(&pushed, m1).expect("an upsert of M1")["blocks"][0]["content"],
-        text_content(SECRET)
+    assert_same_turn(
+        &turn_of(upsert_of(&pushed, m1).expect("an upsert of M1")),
+        &stored_as,
+        "M1 as B's feed carries it",
+    );
+
+    // And a user message holding a structured content block is stored too.
+    let figures = structured(json!({ "quarter": "Q3", "revenue": 42 }));
+    let structured_entry = human(a.id, vec![figures]);
+    let with_structure = user_entry_message(t, Some(m1), a.id, &structured_entry);
+    let m_structured = with_structure.message_id;
+    common::flows::store(&ctx, with_structure, MessageStatus::Completed).await;
+    assert_same_turn(
+        &turn_of(&message_view(&ctx, &b.passport, t, m_structured).await),
+        &Turn::from(input_turn(m_structured, vec![structured_entry])),
+        "a structured content block",
     );
 
     // And the Created fact names the author, the kinds and the status — never
@@ -123,7 +156,7 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     let payload = created.payload.to_string();
     for needle in [
         a.id.to_string(),
-        "TEXT".to_string(),
+        "human_message".to_string(),
         "COMPLETED".to_string(),
     ] {
         assert!(
@@ -137,66 +170,123 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     common::flows::redeliver(&ctx, store_command, &store_m1).await;
     // Then no second distinct answer is published, and M1 is stored once.
     common::flows::replayed_alike(&ctx, store_command, "the redelivered store").await;
-    assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1]);
+    assert_eq!(
+        active_branch(&ctx, &a.passport, t).await,
+        vec![m1, m_structured]
+    );
     assert_eq!(
         facts::of(&ctx.pool, "message", m1).await.len(),
         m1_facts.len()
     );
 
     // When the agents service stores messages the library refuses: an empty
-    // text, a TOOL_RESULT in a user input.
-    for (blocks, what, error) in [
+    // text, an explicit null, an entry id equal to its turn's id. (Whatever
+    // the stores before pushed, B has read it.)
+    b_feed.drain().await;
+    let valid = to_json(&human(a.id, vec![text("hello")]));
+    let mut empty_text = valid.clone();
+    empty_text["content"][0]["text"] = json!("");
+    let mut explicit_null = valid.clone();
+    explicit_null["observed_at"] = Value::Null;
+    let same_id = Uuid::now_v7();
+    let entry_as_turn = TurnEntry::from(
+        HumanMessage::new(
+            EntryId::from_uuid(same_id).expect("a UUIDv7"),
+            content::human_id(a.id),
+            vec![text("hello")],
+        )
+        .expect("a human message on its own"),
+    );
+    let same_id_code = InputTurn::new(
+        content::turn_id(same_id),
+        vec![IncomingEntry::try_from(entry_as_turn.clone()).expect("an incoming entry")],
+    )
+    .expect_err("the library refuses an entry id equal to its turn's id")
+    .code()
+    .as_str()
+    .to_string();
+    let cases: Vec<(Uuid, Value, String, &str)> = vec![
         (
-            vec![raw_text(json!({ "type": "text", "text": "" }))],
+            Uuid::now_v7(),
+            empty_text.clone(),
+            entry_refusal(&empty_text).expect("the library refuses an empty text"),
             "an empty text",
-            "blank",
         ),
         (
-            vec![tool_result("c1", "search", "found")],
-            "a TOOL_RESULT in a user input",
-            "block_kind_not_allowed",
+            Uuid::now_v7(),
+            explicit_null.clone(),
+            entry_refusal(&explicit_null).expect("the library refuses an explicit null"),
+            "an explicit null",
         ),
-    ] {
-        let refused = user_message(t, Some(m1), a.id, blocks);
-        let refused_id = refused.message_id;
+        (
+            same_id,
+            to_json(&entry_as_turn),
+            same_id_code,
+            "an entry id equal to its turn's id",
+        ),
+    ];
+    for (message_id, entry_json, error, what) in cases {
+        let mut refused = user_message(t, Some(m1), a.id, vec![text("placeholder")]);
+        refused.message_id = message_id;
+        let MessageTurn::User(user) = &mut refused.message else {
+            unreachable!("a user message")
+        };
+        user.entry = contract_threads::LibraryJson::from_json(entry_json);
         let refused_command = command(&ctx, &refused).await;
 
-        // Then each is refused MESSAGE_INVALID, naming why, and nothing is
-        // stored.
+        // Then each is refused MESSAGE_INVALID, naming the library's code, and
+        // nothing is stored.
         let answer = message_refused(&ctx, refused_command, ReasonCode::MessageInvalid, what).await;
-        assert_eq!(answer.params["error"], error, "{what}: {answer:?}");
+        assert_eq!(answer.params["error"], json!(error), "{what}: {answer:?}");
         assert!(
-            facts::of(&ctx.pool, "message", refused_id).await.is_empty(),
+            facts::of(&ctx.pool, "message", message_id).await.is_empty(),
             "{what}"
         );
         assert_eq!(
             active_branch(&ctx, &a.passport, t).await,
-            vec![m1],
+            vec![m1, m_structured],
             "{what}"
         );
     }
 
-    // When X, not a member, is named the author.
-    let outsider = command(
+    // When a user message holds an annotation.
+    let mut annotated = user_message(t, Some(m1), a.id, vec![text("noted")]);
+    let annotated_id = annotated.message_id;
+    if let MessageTurn::User(user) = &mut annotated.message {
+        let after: TurnEntry =
+            serde_json::from_value(user.entry.as_json().clone()).expect("the library's entry");
+        user.annotations = vec![content::after(&after, warning("NOTE", "a user's note"))];
+    }
+    let annotated_command = command(&ctx, &annotated).await;
+    // Then refused MESSAGE_INVALID, and nothing is stored.
+    let answer = message_refused(
         &ctx,
-        &user_message(t, Some(m1), x.id, vec![user_text("hello")]),
+        annotated_command,
+        ReasonCode::MessageInvalid,
+        "a user message holding an annotation",
     )
     .await;
+    assert_eq!(
+        answer.params["error"], "annotation_in_user_message",
+        "{answer:?}"
+    );
+    assert!(
+        facts::of(&ctx.pool, "message", annotated_id)
+            .await
+            .is_empty()
+    );
+
+    // When X, not a member, is the human of the message.
+    let outsider = command(&ctx, &user_message(t, Some(m1), x.id, vec![text("hello")])).await;
     // Then refused NOT_A_MEMBER.
-    message_refused(
-        &ctx,
-        outsider,
-        ReasonCode::NotAMember,
-        "a non-member author",
-    )
-    .await;
+    message_refused(&ctx, outsider, ReasonCode::NotAMember, "a non-member human").await;
 
     // When a message of T names a parent of another thread.
     let elsewhere = create_thread(&ctx, Some(&a), &[]).await;
     let foreign = say(&ctx, elsewhere, None, &a, "elsewhere").await;
     let foreign_parent = command(
         &ctx,
-        &user_message(t, Some(foreign), a.id, vec![user_text("hi")]),
+        &user_message(t, Some(foreign), a.id, vec![text("hi")]),
     )
     .await;
     // Then refused MESSAGE_INVALID.
@@ -211,11 +301,10 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     // When a message of T names a parent nobody stored.
     let unknown_parent = command(
         &ctx,
-        &user_message(t, Some(Uuid::now_v7()), a.id, vec![user_text("hi")]),
+        &user_message(t, Some(Uuid::now_v7()), a.id, vec![text("hi")]),
     )
     .await;
-    // Then refused MESSAGE_NOT_FOUND: "A command naming a thread or a message
-    // that does not exist is refused THREAD_NOT_FOUND or MESSAGE_NOT_FOUND".
+    // Then refused MESSAGE_NOT_FOUND.
     message_refused(
         &ctx,
         unknown_parent,
@@ -227,7 +316,7 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     // When a message is stored on a thread nobody created.
     let nowhere = command(
         &ctx,
-        &user_message(Uuid::now_v7(), None, a.id, vec![user_text("hi")]),
+        &user_message(Uuid::now_v7(), None, a.id, vec![text("hi")]),
     )
     .await;
     // Then refused THREAD_NOT_FOUND.
@@ -239,93 +328,8 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     )
     .await;
 
-    // When an AI message is stored complete with content the library refuses:
-    // a turn opening on tool results instead of a step.
-    let no_step = ai_message(
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        vec![tool_results(vec![tool_result("c1", "search", "found")])],
-    );
-    let no_step_id = no_step.message_id;
-    let no_step_command = command(&ctx, &no_step).await;
-    // Then refused MESSAGE_INVALID, nothing stored.
-    message_refused(
-        &ctx,
-        no_step_command,
-        ReasonCode::MessageInvalid,
-        "a turn without a first step",
-    )
-    .await;
-    assert!(facts::of(&ctx.pool, "message", no_step_id).await.is_empty());
-
-    // When an AI turn names a tool no provider accepts.
-    let dotted = Block::new(
-        Uuid::now_v7(),
-        BlockBody::ToolCall(LibraryBlock::from_json(json!({
-            "type": "tool_call", "id": "call-x", "name": "web.search", "arguments": {}
-        }))),
-    );
-    let dotted_turn = ai_message(
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        vec![step(StopReason::AwaitingToolResults, None, vec![dotted])],
-    );
-    let dotted_id = dotted_turn.message_id;
-    let dotted_command = command(&ctx, &dotted_turn).await;
-    // Then refused MESSAGE_INVALID with the library's code, nothing stored.
-    let refused = message_refused(
-        &ctx,
-        dotted_command,
-        ReasonCode::MessageInvalid,
-        "an invalid tool name",
-    )
-    .await;
-    assert_eq!(refused.params["error"], "invalid_tool_name", "{refused:?}");
-    assert!(facts::of(&ctx.pool, "message", dotted_id).await.is_empty());
-
-    // When an AI turn calls tool call-1 and answers, and the next turn of its
-    // branch calls call-1 again.
-    let calling = |id: &str| {
-        vec![
-            step(
-                StopReason::AwaitingToolResults,
-                None,
-                vec![tool_call(id, "search", json!({ "q": "q3" }))],
-            ),
-            tool_results(vec![tool_result(id, "search", "found")]),
-            step(StopReason::EndTurn, None, vec![ai_text("answered")]),
-        ]
-    };
-    let first_call =
-        common::flows::answer(&ctx, t, Some(m1), ai("a1", "Analyst"), calling("call-1")).await;
-    let again = ai_message(t, Some(first_call), ai("a2", "Critic"), calling("call-1"));
-    let again_id = again.message_id;
-    let again_command = command(&ctx, &again).await;
-    // Then the second is refused MESSAGE_INVALID with the library's code and
-    // the id, nothing stored: the conversation of the branch would not load.
-    let refused = message_refused(
-        &ctx,
-        again_command,
-        ReasonCode::MessageInvalid,
-        "a tool call id reused on the branch",
-    )
-    .await;
-    assert_eq!(
-        refused.params["error"], "duplicate_tool_call_id_in_conversation",
-        "{refused:?}"
-    );
-    assert_eq!(refused.params["tool_call_id"], "call-1", "{refused:?}");
-    assert!(facts::of(&ctx.pool, "message", again_id).await.is_empty());
-
-    // When a regeneration of the first answer — a fork, another branch —
-    // calls call-1.
-    // Then it is stored: no branch holds call-1 twice.
-    common::flows::answer(&ctx, t, Some(m1), ai("a1", "Analyst"), calling("call-1")).await;
-
     // When a new store reuses M1's id.
-    let mut reuse = user_message(t, None, b.id, vec![user_text("mine")]);
+    let mut reuse = user_message(t, None, b.id, vec![text("mine")]);
     reuse.message_id = m1;
     let reuse_command = command(&ctx, &reuse).await;
     // Then refused KEY_REUSED, M1 untouched.
@@ -336,14 +340,19 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
         "reusing M1's id",
     )
     .await;
-    assert_eq!(
-        message_view(&ctx, &a.passport, t, m1).await["author"]["userId"],
-        Value::String(a.id.to_string())
+    assert_same_turn(
+        &turn_of(&message_view(&ctx, &a.passport, t, m1).await),
+        &stored_as,
+        "M1 after a reuse of its id",
     );
+    // And no refused store reached B: its feed of T stayed silent throughout.
+    b_feed
+        .silence("a refused store pushes nothing to a member")
+        .await;
 
     // When A's message is stored through impersonation by I.
     let impersonator = Uuid::now_v7();
-    let mut impersonated = user_message(t, Some(m1), a.id, vec![user_text("on A's behalf")]);
+    let mut impersonated = user_message(t, Some(m1), a.id, vec![text("on A's behalf")]);
     impersonated.impersonator_id = Some(impersonator);
     let m2 = impersonated.message_id;
     let impersonated_command = command(&ctx, &impersonated).await;
@@ -366,39 +375,61 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
         !view.to_string().contains(&impersonator.to_string()),
         "the impersonator is never on the message: {view}"
     );
+    store::assert_nowhere(
+        &ctx.pool,
+        &impersonator.to_string(),
+        &["fact"],
+        "the impersonator, outside the fact log",
+    )
+    .await;
 
     // When Identity renames A.
     ctx.rename(&a, "adele").await;
 
-    // Then the new name shows on M1 everywhere: as members read it, and in a
-    // runner's context.
+    // Then the new name shows on M1 everywhere members read it, and in the
+    // members of a runner's context — the conversation itself names nobody.
     for person in [&o, &b] {
         let view = message_view(&ctx, &person.passport, t, m1).await;
         assert_eq!(view["author"]["name"], identity::display_name("adele"));
     }
     let runner = ctx.service_account(true);
-    let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
-    let Entry::UserInput(first) = &conversation.entries()[0] else {
-        panic!("the conversation opens on M1: {conversation:?}");
+    let read = context(&ctx, &runner.passport, t, None).await;
+    let a_member = read["members"]
+        .as_array()
+        .expect("the context's members")
+        .iter()
+        .find(|member| member["userId"] == json!(a.id))
+        .cloned()
+        .expect("A among the context's members");
+    assert_eq!(a_member["displayName"], identity::display_name("adele"));
+    let conversation = conversation_of(&read);
+    let first = conversation.turns()[0]
+        .as_input()
+        .expect("the conversation opens on M1, an input turn");
+    assert_eq!(
+        first.entries()[0].kind().map(|kind| kind.as_str()),
+        Some("human_message")
+    );
+    let IncomingEntry::HumanMessage(message) = &first.entries()[0] else {
+        panic!("M1 holds A's human message: {conversation:?}");
     };
+    assert_eq!(message.human().as_uuid(), a.id, "the human is A, by id");
     assert_eq!(
-        first
-            .author()
-            .map(|author| author.name().as_str().to_string()),
-        Some(identity::display_name("adele"))
+        to_json(&first.entries()[0]),
+        to_json(&entry),
+        "M1's human message, whole"
     );
-    assert_eq!(
-        first.content(),
-        &[UserBlock::text(
-            contract_threads::llm::Text::new(SECRET).unwrap()
-        )]
-    );
-    // And no fact carries a name, the old nor the new.
+    // And no fact and no stored message carries a name, the old nor the new.
     for name in [
         identity::display_name("ada"),
         identity::display_name("adele"),
     ] {
         facts::assert_no_fact_carries(&ctx.pool, &name, "a name").await;
+        assert!(
+            !read["conversation"].to_string().contains(&name),
+            "the conversation names nobody"
+        );
+        store::assert_nowhere(&ctx.pool, &name, &["known_users"], "a stored message").await;
     }
 
     // When the thread is closed COMPLETED.
@@ -411,11 +442,7 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     thread_confirmed(&ctx, closed, "closing T").await;
 
     // Then storing on it is refused THREAD_NOT_OPEN, as is any later close.
-    let late = command(
-        &ctx,
-        &user_message(t, Some(m2), a.id, vec![user_text("late")]),
-    )
-    .await;
+    let late = command(&ctx, &user_message(t, Some(m2), a.id, vec![text("late")])).await;
     message_refused(
         &ctx,
         late,

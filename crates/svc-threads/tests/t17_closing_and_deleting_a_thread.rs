@@ -19,15 +19,14 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::artifacts::{File, download_url, fetch, object_count, upload};
-use common::content::{ai_text, artifact_block, step, user_text};
+use common::content::{annotations_of, text};
 use common::facts;
 use common::feed::{Live, removes, upsert_of};
 use common::flows::{
-    ai, answer, command, create, create_thread, creation, say, thread_confirmed, thread_refused,
-    thread_view, user_message,
+    ai, answer_attaching, command, create, create_thread, creation, message_view, say,
+    thread_confirmed, thread_refused, thread_view, user_message, uuid_of,
 };
-use common::{M_SET_READ_MARK, PUSH_TIMEOUT, TestContext, eventually, gql};
-use contract_threads::llm::StopReason;
+use common::{M_SET_READ_MARK, PUSH_TIMEOUT, TestContext, eventually, gql, store};
 use contract_threads::{CloseThread, ClosingStatus, DeleteThread, ReasonCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -77,11 +76,7 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
     assert!(facts::types(&facts::of(&ctx.pool, "thread", t).await).contains(&"Cancelled"));
 
     // When a message is stored on T, then T is closed again as COMPLETED.
-    let message = command(
-        &ctx,
-        &user_message(t, Some(m1), a.id, vec![user_text("late")]),
-    )
-    .await;
+    let message = command(&ctx, &user_message(t, Some(m1), a.id, vec![text("late")])).await;
     let reclose = command(&ctx, &close(t, ClosingStatus::Completed, o.id)).await;
 
     // Then both are refused THREAD_NOT_OPEN, and T still reads CANCELLED, with
@@ -119,18 +114,18 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
     let runner = ctx.service_account(true);
     let file = File::csv("summary\nok\n");
     let x = upload(&ctx, &runner.passport, u, &file).await;
-    let m2 = answer(
+    let m2 = answer_attaching(
         &ctx,
         u,
         Some(m1),
         ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("done"), artifact_block(x)],
-        )],
+        "the summary is done",
+        x,
     )
     .await;
+    let attached = annotations_of(&message_view(&ctx, &a.passport, u, m2).await);
+    assert_eq!(attached.len(), 1, "M2's ARTIFACT annotation");
+    let annotation = uuid_of(&attached[0].1["id"]);
     let marked = ctx
         .run(
             &a.passport,
@@ -188,22 +183,21 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
         deleted_fact.actor_id,
         common::commands::commanding_service().id()
     );
-    // And nothing of U is left: members, resources, messages, read marks.
-    for table in [
-        "threads.thread_member",
-        "threads.thread_resource",
-        "threads.message",
-        "threads.read_mark",
-        "threads.artifact",
+    // And nothing of U is left anywhere in the store but its facts: no row
+    // names U, its messages, its annotation or its artifact — members,
+    // resources, messages, entries, read marks, artifacts, whatever tables the
+    // implementation keeps them in — and no row holds its texts.
+    for (id, what) in [
+        (u, "U"),
+        (m1, "M1"),
+        (m2, "M2"),
+        (annotation, "M2's annotation"),
+        (x, "X"),
     ] {
-        let rows: i64 = sqlx::query_scalar(&format!(
-            "SELECT count(*) FROM {table} WHERE thread_id = $1"
-        ))
-        .bind(u)
-        .fetch_one(&ctx.pool)
-        .await
-        .expect("count U's rows");
-        assert_eq!(rows, 0, "{table} holds nothing of U");
+        store::assert_nowhere(&ctx.pool, &id.to_string(), &["fact"], what).await;
+    }
+    for text in ["summarise this", "the summary is done"] {
+        store::assert_nowhere(&ctx.pool, text, &[], "a text of U").await;
     }
 
     // When Jobs then confirms the cancellation.
