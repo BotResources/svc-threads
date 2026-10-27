@@ -1,146 +1,146 @@
 //! Closing a `STREAMING` message, once its stream is sealed: what the close
 //! commands (`message.complete`, `fail`, `cancel`) and the stream watch share.
 //!
-//! The sealed draft closes to its stored content ([`super::draft::close`]),
-//! judged against the tool call ids the branches through the message already
-//! use ([`store::used_call_ids`]); the `ARTIFACT` blocks it keeps attach their
-//! artifacts; the message row, its items and blocks, and its facts are
-//! written; its watch ends.
+//! The sealed draft is judged under the message — its id, agent and author —
+//! and against the ids other messages already declared
+//! ([`store::held_ids`]), then closed with the library's closure
+//! ([`draft::close`]); the `ARTIFACT` annotations it keeps attach their
+//! artifacts; the message row, its records, annotations and identities, and its
+//! facts are written; its watch ends.
 //!
 //! What a close that nobody can refuse (a failure, a cancel, the watch) keeps
-//! must still be storable: an `ARTIFACT` block whose artifact is not ready is
-//! dropped, and a block id some other message already holds drops the content
-//! entirely — the message is then stored without items, which no conversation
-//! shows: a completion then fails (`block_id_reused`), since a `COMPLETED`
-//! message always holds its turn. A completion is judged before its seal instead
-//! ([`precheck_completion`]), so that it can be refused and change nothing.
+//! must still be storable: an `ARTIFACT` annotation whose artifact is not ready
+//! is dropped. A completion is judged before its seal instead
+//! ([`precheck_completion`]), so that it can be refused `ARTIFACT_NOT_READY`
+//! and change nothing.
 
-use contract_threads::{BlockKind, ReasonCode};
+use std::collections::HashSet;
+
+use contract_threads::llm::{AgentId, Author, TurnId};
 use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Ops;
 use uuid::Uuid;
 
-use super::content::{UsedCallIds, named_artifacts};
-use super::draft::{self, CloseKind, MessageDraft};
-use super::state::{Message, MessageState, StoredItem};
+use super::draft::{self, CloseKind, Judged, StreamRefusal, TurnDraft};
+use super::state::{Message, MessageAuthor, MessageState};
 use super::store;
-use super::stream::MessageContent;
+use super::stream::{LegacyContent, TurnContent};
 use super::watch;
 use super::{MessageCause, message_cause};
 use crate::command::{MessageOutcome, Refusal};
 use crate::facts::FactMeta;
-use crate::fault::Fault;
+use crate::fault::{Fault, corrupt};
 use crate::slices::artifact::lifecycle;
 use crate::slices::artifact::state::ArtifactState;
+use crate::slices::thread::state::UnknownStoredValue;
 
-/// The tool call ids the branches through a closing message already use, read
-/// at most once per close and only for a stream that calls tools: the
-/// message's thread is locked, so they do not change while it closes.
-#[derive(Default)]
-pub struct BranchCalls {
-    loaded: Option<UsedCallIds>,
-    none: UsedCallIds,
-}
-
-impl BranchCalls {
-    async fn for_draft(
-        &mut self,
-        ops: &mut Ops<'_>,
-        message: &MessageState,
-        draft: &MessageDraft,
-    ) -> Result<&UsedCallIds, Fault> {
-        if self.loaded.is_none() && draft.calls_tools() {
-            self.loaded = Some(
-                store::used_call_ids(ops.connection(), message.parent_message_id, message.id)
-                    .await?,
-            );
-        }
-        Ok(self.loaded.as_ref().unwrap_or(&self.none))
+/// The id, agent and author a streaming message's turn is judged under.
+pub fn turn_of(message: &MessageState) -> Result<(TurnId, AgentId, Author), EngineError> {
+    match &message.author {
+        MessageAuthor::Agent { agent, name } => Ok((message.turn_id()?, *agent, name.clone())),
+        MessageAuthor::User { .. } => Err(corrupt(UnknownStoredValue {
+            column: "message.author",
+            value: "a streaming message without its agent".to_owned(),
+        })),
     }
 }
 
-/// Judges a completion on the content the stream holds now, before its seal: the
-/// artifacts it names must be ready and its block ids unused. A refusal here
-/// changes nothing. Answers the artifacts, loaded and locked.
+/// A stream judged under its message, the ids other messages declared cutting
+/// it where they appear. One read of the identities, under the message's
+/// thread lock: they do not change while it closes.
+pub async fn judge_held(
+    ops: &mut Ops<'_>,
+    message: &MessageState,
+    stream: &TurnDraft,
+) -> Result<Judged, Fault> {
+    let (turn, agent, author) = turn_of(message)?;
+    let first = stream.judge(turn, agent, &author, &HashSet::new())?;
+    let held: HashSet<Uuid> =
+        store::held_ids(ops.connection(), &first.identities()?, Some(message.id))
+            .await?
+            .into_iter()
+            .collect();
+    if held.is_empty() {
+        return Ok(first);
+    }
+    Ok(stream.judge(turn, agent, &author, &held)?)
+}
+
+/// Judges a completion on what the stream holds now, before its seal: the
+/// artifacts it names must be ready. A refusal here changes nothing. Answers the
+/// artifacts, loaded and locked.
 pub async fn precheck_completion(
     ops: &mut Ops<'_>,
     message: &MessageState,
-    preview: &MessageDraft,
-    calls: &mut BranchCalls,
+    preview: &TurnDraft,
 ) -> Result<Result<Vec<ArtifactState>, Refusal>, Fault> {
-    let used = calls.for_draft(ops, message, preview).await?;
-    let closed = draft::close(preview, CloseKind::Complete, used);
-    let ids: Vec<Uuid> = closed
-        .items
-        .iter()
-        .flat_map(|item| item.blocks.iter().map(|block| block.id))
-        .collect();
-    let held = store::held_block_ids(ops.connection(), &ids, None).await?;
-    if !held.is_empty() {
-        return Ok(Err(
-            Refusal::new(ReasonCode::KeyReused).with("block_ids", held)
-        ));
-    }
-    let named = named_artifacts(closed.items.iter().flat_map(|item| item.blocks.iter()));
-    lifecycle::ready(ops, message.thread_id, &named).await
+    let judged = judge_held(ops, message, preview).await?;
+    let closed = draft::close(judged, CloseKind::Complete)?;
+    lifecycle::ready(ops, message.thread_id, &closed.content.artifacts()).await
 }
 
-/// What a close already knows when it stores: the artifacts a completion
-/// judged ready, the branch's calls it read.
-#[derive(Default)]
-pub struct Prior {
-    pub artifacts: Vec<ArtifactState>,
-    pub calls: BranchCalls,
+/// The refusal of a stream a 0.4 writer pushed to under the 0.4 accumulator
+/// name, if it did: its frames are sealed (gone from the lane) and the stream
+/// refused there.
+pub async fn legacy_refusal(
+    ops: &mut Ops<'_>,
+    message: Uuid,
+) -> Result<Option<StreamRefusal>, Fault> {
+    let Some(seq) = ops
+        .accumulated::<LegacyContent>(&message)
+        .await?
+        .state
+        .first
+    else {
+        return Ok(None);
+    };
+    sealed_or_already(
+        ops.seal_current::<LegacyContent>(&message)
+            .await
+            .map(|_| ()),
+    )?;
+    Ok(Some(StreamRefusal {
+        seq: Some(seq),
+        code: contract_threads::MessageInvalidError::ChunkUnreadable.as_str(),
+        object_id: None,
+        location: Some("accumulator".to_owned()),
+    }))
 }
 
 /// Stores a sealed stream's content on its message and ends its watch.
-/// `fallback_reason` names why the message failed when its stream does not
-/// (the watch's silent writer), before the cut its close made.
 pub async fn store_closed(
     ops: &mut Ops<'_>,
     mut message: MessageState,
-    sealed: &MessageDraft,
+    sealed: &TurnDraft,
     kind: CloseKind,
-    mut prior: Prior,
-    fallback_reason: Option<&'static str>,
+    mut artifacts: Vec<ArtifactState>,
     meta: &FactMeta,
 ) -> Result<MessageOutcome, Fault> {
-    let used = prior.calls.for_draft(ops, &message, sealed).await?;
-    let mut closed = draft::close(sealed, kind, used);
-    let held = store::held_block_ids(
-        ops.connection(),
-        &closed
-            .items
-            .iter()
-            .flat_map(|item| item.blocks.iter().map(|block| block.id))
-            .collect::<Vec<_>>(),
-        None,
-    )
-    .await?;
-    if !held.is_empty() {
-        closed = closed.without_content();
+    let mut sealed = sealed.clone();
+    if let Some(refusal) = legacy_refusal(ops, message.id).await? {
+        sealed.refuse(refusal);
     }
-    let mut artifacts = prior.artifacts;
-    let named = named_artifacts(closed.items.iter().flat_map(|item| item.blocks.iter()));
-    let missing: Vec<Uuid> = named
-        .iter()
-        .copied()
+    let judged = judge_held(ops, &message, &sealed).await?;
+    let mut closed = draft::close(judged, kind)?;
+    let missing: Vec<Uuid> = closed
+        .content
+        .artifacts()
+        .into_iter()
         .filter(|id| !artifacts.iter().any(|artifact| artifact.id == *id))
         .collect();
     for id in missing {
         match lifecycle::ready(ops, message.thread_id, &[id]).await? {
             Ok(mut ready) => artifacts.append(&mut ready),
-            Err(_) => drop_artifact_blocks(&mut closed.items, id),
+            Err(_) => closed
+                .content
+                .annotations
+                .retain(|placed| placed.annotation.body.artifact() != Some(id)),
         }
     }
-    let reason = closed.failure.or(fallback_reason).or(closed.cut);
-    match message.close(closed, reason, meta)? {
-        Ok(()) => {}
-        Err(_) => {
-            return Err(Fault::Engine(service_engine::error::EngineError::Service(
-                "a message closed twice in one transaction".into(),
-            )));
-        }
+    if message.close(closed, meta)?.is_err() {
+        return Err(Fault::Engine(EngineError::Service(
+            "a message closed twice in one transaction".into(),
+        )));
     }
     ops.save(&message).await?;
     lifecycle::attach(ops, artifacts, message.id, meta).await?;
@@ -153,20 +153,6 @@ pub async fn store_closed(
         status: message.status,
         deleted: false,
     })
-}
-
-/// Drops the `ARTIFACT` blocks naming `artifact`, renumbering their items.
-fn drop_artifact_blocks(items: &mut [StoredItem], artifact: Uuid) {
-    for item in items.iter_mut() {
-        item.blocks.retain(|block| {
-            block.kind != BlockKind::Artifact
-                || block.content.get("artifact_id").and_then(|id| id.as_str())
-                    != Some(artifact.to_string().as_str())
-        });
-        for (index, block) in item.blocks.iter_mut().enumerate() {
-            block.index = index as i32;
-        }
-    }
 }
 
 /// Seals the stream of every message of `thread` still `STREAMING`, in the
@@ -182,11 +168,8 @@ pub async fn seal_streams_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(
     .fetch_all(ops.connection())
     .await?;
     for message in streaming {
-        sealed_or_already(
-            ops.seal_current::<MessageContent>(&message)
-                .await
-                .map(|_| ()),
-        )?;
+        sealed_or_already(ops.seal_current::<TurnContent>(&message).await.map(|_| ()))?;
+        legacy_refusal(ops, message).await?;
     }
     Ok(())
 }
@@ -209,7 +192,7 @@ mod tests {
     fn a_stream_already_sealed_counts_as_sealed_and_any_other_error_is_a_fault() {
         assert!(sealed_or_already(Ok(())).is_ok());
         let already = EngineError::Accumulator(AccumulatorError::AlreadySealed {
-            accumulator: AccumulatorName::from_static("message_content"),
+            accumulator: AccumulatorName::from_static("turn_content"),
             high_water: 3,
         });
         assert!(sealed_or_already(Err(already)).is_ok());

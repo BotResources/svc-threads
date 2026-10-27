@@ -1,7 +1,7 @@
 //! The read side of an artifact: the gate the engine's download asks
 //! (`Query::download`) — the artifact's visibility to the caller (a member of its
 //! thread) and its blob reference — and nothing else. Artifacts are shown to
-//! members inside messages, as `ARTIFACT` blocks; this view is never subscribed
+//! members inside messages, as `ARTIFACT` annotations; this view is never subscribed
 //! to, so it populates nothing.
 
 use std::collections::BTreeSet;

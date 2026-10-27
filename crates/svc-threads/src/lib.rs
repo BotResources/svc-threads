@@ -11,8 +11,10 @@
 //!
 //! - [`slices::thread`]: a thread, its members, resources and read marks — the
 //!   thread views, the members KV offer;
-//! - [`slices::message`]: the messages of a thread, their items and blocks, the
-//!   accumulated lane their streams fold into, and the thread's live feed;
+//! - [`slices::message`]: the messages of a thread — turns of the
+//!   `br-llm-messages` 2.0 model, stored as the library's records with Threads'
+//!   annotations — the accumulated lane their streams fold into, the upgrade of
+//!   the messages an earlier version stored, and the thread's live feed;
 //! - [`slices::artifact`]: the files runners attach to messages, in object
 //!   storage;
 //! - [`slices::runner`]: the operations reserved to runners — a thread's

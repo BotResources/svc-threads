@@ -15,16 +15,17 @@
 //! before the refused chunk until the stream watch stores the failure, so that
 //! what a member sees and what the facts and answers say never disagree.
 //!
-//! ENGINE GAP (br-service-engine v0.4.1): the chunk reader reads one stream per
+//! ENGINE GAP (br-service-engine v0.4.2): the chunk reader reads one stream per
 //! call. A frame reads the streams of the `STREAMING` messages it renders
 //! concurrently, one read each (typically one per thread); the engine would
 //! need a batched `ChunkReader::states`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use contract_threads::{BlockKind, MessageStatus};
+use contract_threads::llm::{DraftSnapshot, RepresentationState, Turn, TurnKind};
+use contract_threads::{AnnotationKind, MessageStatus};
 use futures_util::future::{BoxFuture, try_join_all};
 use serde::{Deserialize, Serialize};
 use service_engine::error::EngineError;
@@ -42,12 +43,16 @@ use service_engine::{JsonScalar, KeyCeiling, Page};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::draft::MessageDraft;
-use super::state::{ItemKind, Message, MessageAuthor, MessageState, StoredBlock, StoredItem};
+use super::closing::turn_of;
+use super::content::Content;
+use super::draft::TurnDraft;
+use super::state::{Message, MessageAuthor, MessageState};
 use super::store::{self, MessageStore};
-use super::stream::{MessageContent, MessageStream};
+use super::stream::{MessageStream, TurnContent};
 use crate::directory::KNOWN_USER_NAMESPACE;
+use crate::fault::{corrupt, encode};
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
+use crate::slices::thread::state::UnknownStoredValue;
 
 /// A message's status, as GraphQL shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
@@ -70,62 +75,74 @@ impl From<MessageStatus> for MessageStatusView {
     }
 }
 
-/// A block's kind, as GraphQL shows it.
+/// A turn's kind, as GraphQL shows the library's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
-#[graphql(name = "BlockKind")]
-pub enum BlockKindView {
-    Text,
-    Thinking,
-    RedactedThinking,
-    Structured,
-    ToolCall,
-    ToolResult,
+#[graphql(name = "TurnKind")]
+pub enum TurnKindView {
+    InputTurn,
+    AiTurn,
+}
+
+/// The state of an entry, as GraphQL shows the library's record states: a
+/// response being produced, an entry complete, or a response interrupted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
+#[graphql(name = "EntryState")]
+pub enum EntryStateView {
+    Producing,
+    Complete,
+    Interrupted,
+}
+
+/// An annotation's kind, as GraphQL shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
+#[graphql(name = "AnnotationKind")]
+pub enum AnnotationKindView {
     Artifact,
     ThreadReference,
     JobReference,
-    Citation,
     Error,
     Warning,
 }
 
-impl From<BlockKind> for BlockKindView {
-    fn from(kind: BlockKind) -> Self {
+impl From<AnnotationKind> for AnnotationKindView {
+    fn from(kind: AnnotationKind) -> Self {
         match kind {
-            BlockKind::Text => Self::Text,
-            BlockKind::Thinking => Self::Thinking,
-            BlockKind::RedactedThinking => Self::RedactedThinking,
-            BlockKind::Structured => Self::Structured,
-            BlockKind::ToolCall => Self::ToolCall,
-            BlockKind::ToolResult => Self::ToolResult,
-            BlockKind::Artifact => Self::Artifact,
-            BlockKind::ThreadReference => Self::ThreadReference,
-            BlockKind::JobReference => Self::JobReference,
-            BlockKind::Citation => Self::Citation,
-            BlockKind::Error => Self::Error,
-            BlockKind::Warning => Self::Warning,
+            AnnotationKind::Artifact => Self::Artifact,
+            AnnotationKind::ThreadReference => Self::ThreadReference,
+            AnnotationKind::JobReference => Self::JobReference,
+            AnnotationKind::Error => Self::Error,
+            AnnotationKind::Warning => Self::Warning,
         }
     }
 }
 
-/// An item's kind, as GraphQL shows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
-#[graphql(name = "ItemKind")]
-pub enum ItemKindView {
-    Step,
-    ToolResults,
+/// A kind or a state of a later library, which this build cannot show.
+fn unshown(column: &'static str, value: &str) -> EngineError {
+    corrupt(UnknownStoredValue {
+        column,
+        value: value.to_owned(),
+    })
 }
 
-impl From<ItemKind> for ItemKindView {
-    fn from(kind: ItemKind) -> Self {
-        match kind {
-            ItemKind::Step => Self::Step,
-            ItemKind::ToolResults => Self::ToolResults,
-        }
-    }
+fn turn_kind_view(kind: TurnKind) -> Result<TurnKindView, EngineError> {
+    Ok(match kind {
+        TurnKind::InputTurn => TurnKindView::InputTurn,
+        TurnKind::AITurn => TurnKindView::AiTurn,
+        other => return Err(unshown("message.turn_kind", other.as_str())),
+    })
+}
+
+fn state_view(state: RepresentationState) -> Result<EntryStateView, EngineError> {
+    Ok(match state {
+        RepresentationState::Producing => EntryStateView::Producing,
+        RepresentationState::Complete => EntryStateView::Complete,
+        RepresentationState::Interrupted => EntryStateView::Interrupted,
+        other => return Err(unshown("message_entry.state", other.as_str())),
+    })
 }
 
 /// Who wrote a message: a user (shown under the roster copy's current name) or
-/// an AI (its id and name, as given by the service that stored it).
+/// an AI (its agent id and name, as given by the service that stored it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, async_graphql::Enum)]
 #[graphql(name = "AuthorKind")]
 pub enum AuthorKindView {
@@ -137,32 +154,38 @@ pub enum AuthorKindView {
 pub struct AuthorView {
     pub kind: AuthorKindView,
     pub user_id: Option<Uuid>,
+    /// An AI author's agent id: the library's, a UUIDv7.
     pub ai_id: Option<String>,
     /// The user's current display name, or the AI's name.
     pub name: Option<String>,
 }
 
+/// One annotation after an entry: a Threads block, not part of the library's
+/// conversation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct BlockView {
+pub struct AnnotationView {
     pub id: Uuid,
+    /// Its place among the annotations after its entry, from 0.
     pub index: i32,
-    pub kind: BlockKindView,
-    /// The library's JSON for a library block (its text so far while its item
-    /// streams), the typed content of a Threads block.
+    pub kind: AnnotationKindView,
+    /// Its content, typed by its kind.
     pub content: JsonScalar,
 }
 
+/// One entry of a message's turn, with the annotations placed after it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct ItemView {
+pub struct EntryView {
+    pub id: Uuid,
+    /// Its position in the turn, from 0.
     pub index: i32,
-    pub kind: ItemKindView,
-    pub status: MessageStatusView,
-    /// A step's stop reason, as the library's JSON.
-    pub stop_reason: Option<JsonScalar>,
-    /// A step's usage, as the library's JSON.
-    pub usage: Option<JsonScalar>,
-    pub model: Option<String>,
-    pub blocks: Vec<BlockView>,
+    /// The library's entry kind: `human_message`, `model_response`, …
+    pub kind: String,
+    pub state: EntryStateView,
+    /// A complete entry: the library's JSON for the entry. A response still
+    /// produced or interrupted: the library's draft snapshot
+    /// (`br-llm-messages-draft/1`) of what arrived.
+    pub content: JsonScalar,
+    pub annotations: Vec<AnnotationView>,
 }
 
 /// One message as a member of its thread sees it.
@@ -179,12 +202,107 @@ pub struct MessageView {
     /// When its author last edited it; `null` until the first edit.
     pub edited_at: Option<DateTime<Utc>>,
     pub version: i64,
-    /// A user message's blocks.
-    pub blocks: Vec<BlockView>,
-    /// An AI message's items: while it streams, those its stream folded so far.
-    pub items: Vec<ItemView>,
+    /// The library's kind of the message's turn.
+    pub turn_kind: TurnKindView,
+    /// The entries of its turn, in order: while it streams, those its stream
+    /// folded so far, a response still produced included; none once deleted.
+    pub entries: Vec<EntryView>,
     /// `{ markRead: { allowed, reason? } }`.
     pub affordances: Affordances,
+}
+
+fn json_of<T: Serialize>(value: &T, what: &'static str) -> Result<JsonScalar, EngineError> {
+    serde_json::to_value(value)
+        .map(async_graphql::Json)
+        .map_err(|source| encode(what, source))
+}
+
+/// The annotations placed after `entry`, as members see them.
+fn annotation_views(content: &Content, entry: Uuid) -> Result<Vec<AnnotationView>, EngineError> {
+    content
+        .annotations
+        .iter()
+        .filter(|placed| placed.after_entry_id == entry)
+        .enumerate()
+        .map(|(index, placed)| {
+            let mut body = serde_json::to_value(&placed.annotation.body)
+                .map_err(|source| encode("an annotation", source))?;
+            Ok(AnnotationView {
+                id: placed.annotation.id,
+                index: index as i32,
+                kind: placed.annotation.kind().into(),
+                content: async_graphql::Json(
+                    body.get_mut("content")
+                        .map(serde_json::Value::take)
+                        .unwrap_or_default(),
+                ),
+            })
+        })
+        .collect()
+}
+
+/// The entries of a message's content, as members see them: each complete
+/// entry as the library reads it back (its turn rebuilt from the records, so
+/// what is shown is what the library loads), each response still produced or
+/// interrupted as the library's draft snapshot.
+fn entry_views(message: &MessageState, content: &Content) -> Result<Vec<EntryView>, EngineError> {
+    if content.entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let turn = content
+        .to_turn(message.turn_record()?)
+        .map_err(|error| stored_fault(message.id, &error))?;
+    let mut complete: Vec<serde_json::Value> = match &turn {
+        Turn::AITurn(ai) => ai
+            .entries()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>(),
+        Turn::InputTurn(input) => input
+            .entries()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>(),
+        _ => Ok(Vec::new()),
+    }
+    .map_err(|source| encode("an entry", source))?;
+    complete.reverse();
+    let mut views = Vec::with_capacity(content.entries.len());
+    for (index, entry) in content.entries.iter().enumerate() {
+        let state = entry.state();
+        let shown = if state == RepresentationState::Complete {
+            async_graphql::Json(
+                complete
+                    .pop()
+                    .ok_or_else(|| unshown("message_entry", "an entry the turn does not hold"))?,
+            )
+        } else {
+            let blocks = content
+                .blocks
+                .iter()
+                .filter(|block| block.entry() == entry.id())
+                .cloned()
+                .collect();
+            let snapshot = DraftSnapshot::new(entry.clone(), blocks)
+                .map_err(|error| stored_fault(message.id, &error))?;
+            json_of(&snapshot, "a draft snapshot")?
+        };
+        views.push(EntryView {
+            id: entry.id().as_uuid(),
+            index: index as i32,
+            kind: entry.kind().as_str().to_owned(),
+            state: state_view(state)?,
+            content: shown,
+            annotations: annotation_views(content, entry.id().as_uuid())?,
+        });
+    }
+    Ok(views)
+}
+
+/// Content Threads stored that the library cannot read back: a fault of the
+/// store — Threads only stores what the library loads.
+fn stored_fault(message: Uuid, error: &contract_threads::llm::Error) -> EngineError {
+    EngineError::Service(format!("message {message} does not load: {error}").into())
 }
 
 /// What a window of [`MessagesView`] is: one page of one branch of one thread.
@@ -210,7 +328,7 @@ impl MessagesWindow {
 /// streams.
 pub struct MessageFacts {
     rows: BTreeMap<Uuid, MessageState>,
-    streams: BTreeMap<Uuid, MessageDraft>,
+    streams: BTreeMap<Uuid, TurnDraft>,
 }
 
 static NOUNS: [NounName; 2] = [<Message as Noun>::NAME, <MessageStream as Noun>::NAME];
@@ -223,16 +341,27 @@ impl MessagesView {
 
     /// The view of one message, its stream's content included: the one
     /// projection of every entry point.
+    ///
+    /// A streaming message shows what its stream holds, judged under the
+    /// message as its close will judge it: drafts included.
     pub fn render(
         message: &MessageState,
-        stream: Option<&MessageDraft>,
+        stream: Option<&TurnDraft>,
         principal: &ThreadsPrincipal,
-    ) -> MessageView {
-        let items = match (message.status, stream) {
-            (MessageStatus::Streaming, Some(stream)) => stream.preview(),
-            _ => message.items.clone(),
+    ) -> Result<MessageView, EngineError> {
+        let streamed = match (message.status, stream) {
+            (MessageStatus::Streaming, Some(stream)) => {
+                let (turn, agent, author) = turn_of(message)?;
+                Some(
+                    stream
+                        .judge(turn, agent, &author, &HashSet::new())?
+                        .content()?,
+                )
+            }
+            _ => None,
         };
-        MessageView {
+        let entries = entry_views(message, streamed.as_ref().unwrap_or(&message.content))?;
+        Ok(MessageView {
             id: message.id,
             thread_id: message.thread_id,
             parent_message_id: message.parent_message_id,
@@ -243,10 +372,10 @@ impl MessagesView {
             created_at: message.created_at,
             edited_at: message.edited_at,
             version: message.version,
-            blocks: message.blocks.iter().map(block_view).collect(),
-            items: items.iter().map(item_view).collect(),
+            turn_kind: turn_kind_view(message.turn_kind)?,
+            entries,
             affordances: message.affordances(principal),
-        }
+        })
     }
 }
 
@@ -344,7 +473,7 @@ impl Projector for MessagesView {
                 .map(|message| message.id)
                 .collect();
             let streams = try_join_all(streaming.iter().map(|id| async move {
-                let held = chunks.state::<MessageContent>(id).await?;
+                let held = chunks.state::<TurnContent>(id).await?;
                 Ok::<_, EngineError>((*id, held.state))
             }))
             .await?;
@@ -361,11 +490,12 @@ impl Projector for MessagesView {
         key: &Uuid,
         principal: &ThreadsPrincipal,
     ) -> Result<Option<MessageView>, EngineError> {
-        Ok(facts
+        facts
             .rows
             .get(key)
             .filter(|message| <Message as Visibility>::visible(message, principal))
-            .map(|message| Self::render(message, facts.streams.get(key), principal)))
+            .map(|message| Self::render(message, facts.streams.get(key), principal))
+            .transpose()
     }
 }
 
@@ -397,95 +527,92 @@ fn author_view(author: &MessageAuthor) -> AuthorView {
             ai_id: None,
             name: display_name.clone(),
         },
-        MessageAuthor::Ai { id, name } => AuthorView {
+        MessageAuthor::Agent { agent, name } => AuthorView {
             kind: AuthorKindView::Ai,
             user_id: None,
-            ai_id: Some(id.clone()),
-            name: Some(name.clone()),
+            ai_id: Some(agent.to_string()),
+            name: Some(name.as_str().to_owned()),
         },
-    }
-}
-
-fn block_view(block: &StoredBlock) -> BlockView {
-    BlockView {
-        id: block.id,
-        index: block.index,
-        kind: block.kind.into(),
-        content: async_graphql::Json(block.content.clone()),
-    }
-}
-
-fn item_view(item: &StoredItem) -> ItemView {
-    ItemView {
-        index: item.index,
-        kind: item.kind.into(),
-        status: item.status.into(),
-        stop_reason: item.stop_reason.clone().map(async_graphql::Json),
-        usage: item.usage.clone().map(async_graphql::Json),
-        model: item.model.clone(),
-        blocks: item.blocks.iter().map(block_view).collect(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use async_graphql::resolver_utils::EnumType;
+    use contract_threads::llm::{
+        BlockId, BlockStart, DeltaOp, EntryId, HumanId, HumanMessage, InputTurn, PlainBlock,
+        ResponseDelta, ResponseDraft, ResponseMetadata, TextBlock, TurnEntry,
+    };
+    use contract_threads::{Chunk, MessageStatus};
 
     use super::*;
     use crate::principal::tests::{active, person};
+    use crate::slices::message::draft;
     use crate::slices::message::state::tests::message_in;
 
+    fn literal<T: EnumType + PartialEq + Copy>(shown: T) -> &'static str {
+        T::items()
+            .iter()
+            .find(|item| item.value == shown)
+            .expect("every value is an item")
+            .name
+    }
+
     #[test]
-    fn every_contract_literal_shows_under_its_own_name() {
+    fn every_contract_and_library_literal_shows_under_its_own_name() {
         for status in MessageStatus::ALL {
-            let shown = MessageStatusView::from(*status);
-            let item = MessageStatusView::items()
-                .iter()
-                .find(|item| item.value == shown)
-                .expect("every value is an item");
-            assert_eq!(item.name, status.as_str());
+            assert_eq!(literal(MessageStatusView::from(*status)), status.as_str());
         }
-        for kind in BlockKind::ALL {
-            let shown = BlockKindView::from(*kind);
-            let item = BlockKindView::items()
-                .iter()
-                .find(|item| item.value == shown)
-                .expect("every value is an item");
-            assert_eq!(item.name, kind.as_str());
+        for state in RepresentationState::ALL {
+            assert_eq!(
+                literal(state_view(*state).unwrap()),
+                state.as_str().to_uppercase()
+            );
         }
-        for kind in [ItemKind::Step, ItemKind::ToolResults] {
-            let shown = ItemKindView::from(kind);
-            let item = ItemKindView::items()
-                .iter()
-                .find(|item| item.value == shown)
-                .expect("every value is an item");
-            assert_eq!(item.name, kind.as_db());
+        for kind in TurnKind::ALL {
+            assert_eq!(
+                literal(turn_kind_view(*kind).unwrap()),
+                kind.as_str().to_uppercase()
+            );
+        }
+        for kind in AnnotationKind::ALL {
+            assert_eq!(literal(AnnotationKindView::from(*kind)), kind.as_str());
         }
     }
 
     #[test]
-    fn an_ai_message_shows_its_items_and_its_author() {
+    fn a_streaming_message_shows_the_response_its_writer_is_producing_as_its_draft() {
         let member = person(false, active());
         let mut message = message_in(&[member.user().unwrap()]);
-        message.items = vec![StoredItem {
-            index: 0,
-            kind: ItemKind::Step,
-            status: MessageStatus::Completed,
-            stop_reason: Some(serde_json::json!({ "type": "end_turn" })),
-            usage: None,
-            model: Some("m-1".into()),
-            blocks: vec![StoredBlock {
-                id: Uuid::now_v7(),
-                index: 0,
-                kind: BlockKind::Text,
-                content: serde_json::json!({ "type": "text", "text": "hi" }),
-            }],
-        }];
-        let view = MessagesView::render(&message, None, &member);
-        assert_eq!(view.author.kind, AuthorKindView::Ai);
-        assert_eq!(view.author.name.as_deref(), Some("Analyst"));
-        assert_eq!(view.items[0].model.as_deref(), Some("m-1"));
-        assert_eq!(view.items[0].blocks[0].kind, BlockKindView::Text);
+        message.status = MessageStatus::Streaming;
+        let (turn, entry, block) = (
+            message.turn_id().unwrap(),
+            EntryId::from_uuid(Uuid::now_v7()).unwrap(),
+            BlockId::from_uuid(Uuid::now_v7()).unwrap(),
+        );
+        let mut stream = TurnDraft::default();
+        let deltas = [
+            DeltaOp::response_started(ResponseMetadata::new()),
+            DeltaOp::block_started(block, BlockStart::text()),
+            DeltaOp::text_appended(block, "so far"),
+        ];
+        for (seq, op) in deltas.into_iter().enumerate() {
+            let chunk = Chunk::delta(&ResponseDelta::new(turn, entry, op)).unwrap();
+            draft::fold(
+                &mut stream,
+                seq as u64,
+                serde_json::to_value(chunk).unwrap(),
+            );
+        }
+        let view = MessagesView::render(&message, Some(&stream), &member).unwrap();
+        assert_eq!(view.status, MessageStatusView::Streaming);
+        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries[0].kind, "model_response");
+        assert_eq!(view.entries[0].state, EntryStateView::Producing);
+        let snapshot: DraftSnapshot =
+            serde_json::from_value(view.entries[0].content.0.clone()).unwrap();
+        let restored = ResponseDraft::from_snapshot(&snapshot).unwrap();
+        assert_eq!(restored.view().slots()[0].text(), Some("so far"));
         assert_eq!(
             serde_json::to_value(&view.affordances).unwrap(),
             serde_json::json!({ "markRead": { "allowed": true } })
@@ -493,36 +620,39 @@ mod tests {
     }
 
     #[test]
-    fn a_streaming_message_shows_its_stream_so_far_under_its_rows_status() {
+    fn a_complete_entry_shows_as_the_librarys_entry() {
         let member = person(false, active());
-        let mut message = message_in(&[member.user().unwrap()]);
-        message.status = MessageStatus::Streaming;
-        let mut stream = MessageDraft::default();
-        super::super::draft::fold(
-            &mut stream,
-            0,
-            serde_json::json!({
-                "item_index": 0,
-                "kind": "STEP_EVENT",
-                "event": { "type": "block_start", "index": 0, "kind": "text" },
-                "block_id": Uuid::now_v7()
-            }),
-        );
-        super::super::draft::fold(
-            &mut stream,
-            1,
-            serde_json::json!({
-                "item_index": 0,
-                "kind": "STEP_EVENT",
-                "event": { "type": "text_delta", "index": 0, "text": "so far" }
-            }),
-        );
-        let view = MessagesView::render(&message, Some(&stream), &member);
-        assert_eq!(view.status, MessageStatusView::Streaming);
-        assert_eq!(view.items[0].status, MessageStatusView::Streaming);
-        assert_eq!(
-            view.items[0].blocks[0].content.0,
-            serde_json::json!({ "type": "text", "text": "so far" })
-        );
+        let user = member.user().unwrap();
+        let mut message = message_in(&[user]);
+        message.author = MessageAuthor::User {
+            user_id: user,
+            display_name: Some("Ada".into()),
+            in_roster: true,
+        };
+        message.turn_kind = TurnKind::InputTurn;
+        let said = HumanMessage::new(
+            EntryId::from_uuid(Uuid::now_v7()).unwrap(),
+            HumanId::from_uuid(user).unwrap(),
+            vec![
+                PlainBlock::try_from(
+                    TextBlock::new(BlockId::from_uuid(Uuid::now_v7()).unwrap(), "hi").unwrap(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let entry = TurnEntry::from(said.clone());
+        let turn: Turn = InputTurn::new(message.turn_id().unwrap(), vec![said.into()])
+            .unwrap()
+            .into();
+        message.content = Content::of_turn(&turn, Vec::new()).unwrap();
+        let view = MessagesView::render(&message, None, &member).unwrap();
+        assert_eq!(view.author.name.as_deref(), Some("Ada"));
+        assert_eq!(view.turn_kind, TurnKindView::InputTurn);
+        assert_eq!(view.entries[0].kind, "human_message");
+        assert_eq!(view.entries[0].state, EntryStateView::Complete);
+        let read: TurnEntry = serde_json::from_value(view.entries[0].content.0.clone()).unwrap();
+        assert_eq!(read, entry);
+        assert!(view.entries[0].annotations.is_empty());
     }
 }

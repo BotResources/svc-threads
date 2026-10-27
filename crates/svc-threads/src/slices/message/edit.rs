@@ -1,6 +1,7 @@
 //! `integration.cmd.threads.message.edit.v1`: a `COMPLETED` user message that
-//! is not deleted, rewritten in place by its author. Its blocks are replaced
-//! whole; it keeps its id, its place in the tree and every descendant, even
+//! is not deleted, rewritten in place by its author. Its human message's
+//! content is replaced whole by the library's plain blocks; the message keeps
+//! its id, its entry's id, its place in the tree and every descendant, even
 //! those written on its previous content. Threads keeps no history of the
 //! previous content: the `Edited` fact records the new blocks' kinds and
 //! positions, never their text.
@@ -12,25 +13,23 @@
 //! (`ID_NOT_UUIDV7`, `KEY_REUSED`, `MESSAGE_INVALID`) — so that an edit from a
 //! version the message has left never reaches its content.
 
-use contract_threads::{EditMessage, MessageStatus, ReasonCode};
+use contract_threads::llm::{
+    EntryId, HumanId, HumanMessage, IncomingEntry, InputTurn, PlainBlock, Turn,
+};
+use contract_threads::{
+    LibraryJson, MessageInvalidError, MessageStatus, ReasonCode, ThreadsCommand, v1,
+};
 use futures_util::future::BoxFuture;
-use serde::Serialize;
-use service_engine::error::EngineError;
+use serde::Deserialize;
 use service_engine::pipeline::Reaction;
 use uuid::Uuid;
 
 use super::commands::{Verdict, message_of, refuse_on, writable_thread};
-use super::state::{Message, MessageChange, MessageState, StoredBlock};
-use super::transitions::{BlockShape, EDITED, shapes};
-use super::{MessageCause, content, message_cause, store};
+use super::content::{Content, first_repeated, invalid, minted_refusal_of, refusal_of};
+use super::state::{Message, MessageState};
+use super::{MessageCause, message_cause, store};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
-use crate::facts::{Fact, FactMeta};
 use crate::fault::Fault;
-
-#[derive(Serialize)]
-struct EditedFact {
-    blocks: Vec<BlockShape>,
-}
 
 impl MessageState {
     /// `MESSAGE_NOT_EDITABLE` unless the message is a user message,
@@ -68,28 +67,99 @@ impl MessageState {
         None
     }
 
-    /// The edit itself, once judged: the blocks replaced whole, `edited_at`
-    /// set, the version raised by one, `Edited` recorded.
-    pub fn edit(&mut self, blocks: Vec<StoredBlock>, meta: &FactMeta) -> Result<(), EngineError> {
-        let fact = Fact::new(
-            EDITED,
-            &EditedFact {
-                blocks: shapes(&blocks),
-            },
-            meta,
-        )?;
-        self.blocks = blocks;
-        self.edited_at = Some(meta.occurred_at);
-        self.version += 1;
-        self.pending.push(MessageChange::ContentWritten);
-        self.pending.push(MessageChange::Recorded(fact));
-        Ok(())
+    /// The id of its human message, which an edit keeps.
+    fn human_entry(&self) -> Option<EntryId> {
+        self.content.entries.first().map(|entry| entry.id())
     }
+}
+
+/// `message.edit` as it arrives: [`contract_threads::EditMessage`], or the 0.4
+/// form of the same offer, whose `blocks` Threads converts — a sender still on
+/// `contract-threads` 0.4 keeps editing.
+#[derive(Debug, Deserialize)]
+pub struct EditWire {
+    pub message_id: Uuid,
+    pub thread_id: Uuid,
+    pub acting_user_id: Uuid,
+    pub expected_version: u64,
+    #[serde(default)]
+    pub content: Vec<LibraryJson>,
+    #[serde(default)]
+    pub blocks: Option<Vec<v1::Block>>,
+}
+
+impl ThreadsCommand for EditWire {
+    const AGGREGATE: &'static str = <contract_threads::EditMessage as ThreadsCommand>::AGGREGATE;
+    const VERB: &'static str = <contract_threads::EditMessage as ThreadsCommand>::VERB;
+
+    fn thread_id(&self) -> Uuid {
+        self.thread_id
+    }
+
+    fn acting_user_id(&self) -> Option<Uuid> {
+        Some(self.acting_user_id)
+    }
+}
+
+/// The new content of an edit: its plain blocks, read by the library — the 0.4
+/// `blocks` converted when `content` is absent. A block id the library refuses
+/// as no UUIDv7 is `ID_NOT_UUIDV7`.
+fn new_blocks(command: &EditWire) -> Result<Vec<PlainBlock>, Refusal> {
+    match (&command.blocks, command.content.is_empty()) {
+        (Some(blocks), true) => {
+            let (content, annotations) =
+                super::v1::user_content(blocks, Uuid::nil()).map_err(|fault| fault.refusal())?;
+            if !annotations.is_empty() {
+                return Err(invalid(MessageInvalidError::AnnotationInUserMessage));
+            }
+            Ok(content)
+        }
+        _ => command
+            .content
+            .iter()
+            .map(|block| {
+                block
+                    .to_plain_block()
+                    .map_err(|error| minted_refusal_of(&error))
+            })
+            .collect(),
+    }
+}
+
+/// The edited message's new content: its human message, under the ids it
+/// keeps, holding `blocks` — judged by the library, a repeated id refused
+/// `KEY_REUSED` first.
+fn edited_content(message: &MessageState, blocks: Vec<PlainBlock>) -> Result<Content, Refusal> {
+    let mut ids = Vec::new();
+    for block in &blocks {
+        ids.push(block.id().as_uuid());
+        if let PlainBlock::Text(text) = block {
+            ids.extend(text.citations().iter().map(|c| c.id().as_uuid()));
+        }
+    }
+    if let Some(repeated) = first_repeated(ids) {
+        return Err(Refusal::new(ReasonCode::KeyReused).with("ids", [repeated]));
+    }
+    let entry = message
+        .human_entry()
+        .ok_or_else(|| invalid(MessageInvalidError::NotAUserTurn))?;
+    let human = message
+        .author_user()
+        .ok_or_else(|| invalid(MessageInvalidError::NotAUserTurn))?;
+    let human = HumanId::from_uuid(human).map_err(|error| refusal_of(&error))?;
+    let message_turn = message
+        .turn_id()
+        .map_err(|_| invalid(MessageInvalidError::TurnIdMismatch))?;
+    let said = HumanMessage::new(entry, human, blocks).map_err(|error| refusal_of(&error))?;
+    let turn: Turn = InputTurn::new(message_turn, vec![IncomingEntry::from(said)])
+        .map_err(|error| refusal_of(&error))?
+        .into();
+    Content::of_turn(&turn, Vec::new()).map_err(|error| refusal_of(&error))
 }
 
 pub fn edit<'r>(
     cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<EditMessage>,
+    Inbound(command): Inbound<EditWire>,
 ) -> BoxFuture<'r, Result<(), Fault>> {
     Box::pin(async move {
         let call = Call::of(cx, &command)?;
@@ -101,23 +171,25 @@ pub fn edit<'r>(
 async fn edit_message(
     cx: &mut Reaction<'_>,
     call: &Call,
-    command: &EditMessage,
+    command: &EditWire,
 ) -> Result<Verdict, Fault> {
-    refuse_on!(writable_thread(cx, command.thread_id).await?);
+    let thread = refuse_on!(writable_thread(cx, command.thread_id).await?);
     let mut state = refuse_on!(message_of(cx, command.thread_id, command.message_id).await?);
     if let Some(refusal) = state.edit_refusal(command.acting_user_id, command.expected_version) {
         return Ok(Err(refusal));
     }
-    let blocks = refuse_on!(content::user_blocks(state.id, &command.blocks));
-    // The message's own block ids may be kept; any other held id is reused.
-    let ids: Vec<Uuid> = blocks.iter().map(|block| block.id).collect();
-    let held = store::held_block_ids(cx.connection(), &ids, Some(state.id)).await?;
-    if !held.is_empty() {
-        return Ok(Err(
-            Refusal::new(ReasonCode::KeyReused).with("block_ids", held)
-        ));
+    let blocks = refuse_on!(new_blocks(command));
+    let content = refuse_on!(edited_content(&state, blocks));
+    // The message's own ids may be kept; any other held id is reused.
+    let ids = content.identities();
+    let mut held = store::held_ids(cx.connection(), &ids, Some(state.id)).await?;
+    if ids.contains(&thread.id) {
+        held.push(thread.id);
     }
-    state.edit(blocks, &call.meta)?;
+    if !held.is_empty() {
+        return Ok(Err(Refusal::new(ReasonCode::KeyReused).with("ids", held)));
+    }
+    state.edit(content, &call.meta)?;
     cx.save(&state).await?;
     cx.impact_caused::<Message, _>(
         &state.id,
@@ -131,22 +203,11 @@ async fn edit_message(
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use contract_threads::llm::{BlockId, TextBlock, TurnKind};
 
     use super::*;
     use crate::slices::message::state::MessageAuthor;
     use crate::slices::message::state::tests::message_in;
-
-    fn meta() -> FactMeta {
-        FactMeta {
-            actor: br_core_integration::Actor::Service(Uuid::now_v7().into()),
-            acting_user_id: None,
-            impersonator_id: None,
-            correlation_id: Uuid::now_v7(),
-            causation_id: None,
-            occurred_at: Utc::now(),
-        }
-    }
 
     fn by_user(user: Uuid) -> MessageState {
         let mut message = message_in(&[user]);
@@ -155,16 +216,15 @@ mod tests {
             display_name: Some("Ada".into()),
             in_roster: true,
         };
+        message.turn_kind = TurnKind::InputTurn;
         message
     }
 
-    fn text(words: &str) -> StoredBlock {
-        StoredBlock {
-            id: Uuid::now_v7(),
-            index: 0,
-            kind: contract_threads::BlockKind::Text,
-            content: serde_json::json!({ "type": "text", "text": words }),
-        }
+    fn text(words: &str) -> PlainBlock {
+        PlainBlock::try_from(
+            TextBlock::new(BlockId::from_uuid(Uuid::now_v7()).unwrap(), words).unwrap(),
+        )
+        .unwrap()
     }
 
     fn code(refusal: Option<Refusal>) -> Option<ReasonCode> {
@@ -180,9 +240,6 @@ mod tests {
             Some(ReasonCode::MessageNotEditable),
             "an AI message"
         );
-        // A stored user message is always COMPLETED
-        // (`message_user_input_is_complete`), so the status check is defensive:
-        // pinned here on an in-memory user message in each other status.
         for status in [
             MessageStatus::Streaming,
             MessageStatus::Failed,
@@ -221,20 +278,56 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_replaces_the_blocks_and_records_no_content() {
+    fn the_wire_of_the_0_4_edit_still_decodes() {
+        let edit: EditWire = serde_json::from_value(serde_json::json!({
+            "message_id": Uuid::now_v7(),
+            "thread_id": Uuid::now_v7(),
+            "acting_user_id": Uuid::now_v7(),
+            "expected_version": 2,
+            "blocks": [{ "id": Uuid::now_v7(), "kind": "TEXT", "content": { "type": "text", "text": "hi" } }]
+        }))
+        .unwrap();
+        let blocks = new_blocks(&edit).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(EditWire::coords(), contract_threads::EditMessage::coords());
+    }
+
+    #[test]
+    fn a_block_id_that_is_no_uuidv7_is_id_not_uuidv7() {
+        let edit: EditWire = serde_json::from_value(serde_json::json!({
+            "message_id": Uuid::now_v7(),
+            "thread_id": Uuid::now_v7(),
+            "acting_user_id": Uuid::now_v7(),
+            "expected_version": 2,
+            "content": [{ "type": "text", "id": Uuid::new_v4(), "text": "hi" }]
+        }))
+        .unwrap();
+        assert_eq!(new_blocks(&edit).unwrap_err().code, ReasonCode::IdNotUuidV7);
+    }
+
+    #[test]
+    fn an_edit_keeps_the_human_messages_id_and_refuses_an_id_named_twice() {
         let author = Uuid::now_v7();
         let mut message = by_user(author);
-        message.blocks = vec![text("the old secret")];
-        let at = meta();
-        message.edit(vec![text("the new secret")], &at).unwrap();
-        assert_eq!(message.version, 2);
-        assert_eq!(message.edited_at, Some(at.occurred_at));
-        assert_eq!(message.blocks[0].content["text"], "the new secret");
-        let facts = message.pending_facts();
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].event_type, EDITED);
-        let payload = facts[0].payload.to_string();
-        assert!(!payload.contains("secret"), "{payload}");
-        assert_eq!(facts[0].payload["blocks"][0]["kind"], "TEXT");
+        let entry = Uuid::now_v7();
+        let said = HumanMessage::new(
+            EntryId::from_uuid(entry).unwrap(),
+            HumanId::from_uuid(author).unwrap(),
+            vec![text("before")],
+        )
+        .unwrap();
+        let turn: Turn = InputTurn::new(message.turn_id().unwrap(), vec![said.into()])
+            .unwrap()
+            .into();
+        message.content = Content::of_turn(&turn, Vec::new()).unwrap();
+        let content = edited_content(&message, vec![text("after"), text("and more")]).unwrap();
+        assert_eq!(content.entries[0].id().as_uuid(), entry);
+        assert_eq!(content.blocks.len(), 2);
+        let twice = text("twice");
+        let refused = edited_content(&message, vec![twice.clone(), twice]).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::KeyReused);
+        let refused = edited_content(&message, Vec::new()).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::MessageInvalid);
+        assert_eq!(refused.params["error"], "invalid_content");
     }
 }

@@ -14,7 +14,7 @@
 //! A runner requests an upload for a thread and receives a time-bounded upload
 //! access pinned to the declared size and digest (the engine's verified
 //! presigned POST); the artifact is `PENDING`. It becomes `ATTACHED` when a
-//! message of the same thread names it in an `ARTIFACT` block and its bytes are
+//! message of the same thread names it in an `ARTIFACT` annotation and its bytes are
 //! present with the declared digest; a `PENDING` artifact never attached is
 //! removed at the end of the upload window. A member reads it through a
 //! time-bounded read access once the engine verified its bytes; it lives as long

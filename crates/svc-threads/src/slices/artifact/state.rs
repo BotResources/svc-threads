@@ -3,7 +3,7 @@
 //! members of its thread, who may read it.
 //!
 //! `PENDING` at the upload request; `ATTACHED` once a message of the same
-//! thread names it in an `ARTIFACT` block with its bytes present at the
+//! thread names it in an `ARTIFACT` annotation with its bytes present at the
 //! declared digest. It lives as long as its message — or, never attached, as
 //! long as the upload window.
 

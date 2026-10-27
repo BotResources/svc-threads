@@ -140,7 +140,7 @@ impl Persistence for ThreadStore {
         })
     }
 
-    /// The thread row; its members, resources, messages, items, blocks, read
+    /// The thread row; its members, resources, messages, entries, blocks, annotations, read
     /// marks and title Job go with it by cascade. Its artifacts do not: they are
     /// deleted first, through their own store, so that their bytes are
     /// released.

@@ -1,13 +1,18 @@
-//! The message capability: the messages of a thread, their items and blocks,
-//! the accumulated lane a streaming message folds into, the message commands,
-//! and the thread's live feed.
+//! The message capability: the messages of a thread — each a turn of the
+//! `br-llm-messages` 2.0 model, stored as the library's records with Threads'
+//! annotations — the accumulated lane a streaming message folds into, the
+//! message commands, and the thread's live feed.
 //!
 //! - `state`: the canonical message, its visibility (the thread's membership)
 //!   and its unsaved changes;
-//! - `content`: a message's content judged by the library's rules, stored in
-//!   Threads' decomposition, and read back into the library's model;
-//! - `draft`: a stream's content as its chunks fold, and as it closes;
-//! - `stream`: the `message_content` accumulator of `STREAMING_threads`;
+//! - `content`: a message's content as the library's records, and the
+//!   refusals of the library's rules;
+//! - `derived`: the ids Threads derives (a closure, a conversion's entries);
+//! - `draft`: a stream's turn as its chunks fold, judged and closed;
+//! - `stream`: the `turn_content` accumulator of `STREAMING_threads`;
+//! - `v1`: the 0.4 form, converted to the 2.0 model;
+//! - `upgrade`: the conversion, at boot, of the messages an earlier Threads
+//!   stored;
 //! - `transitions`: the guarded transition of each command, its facts;
 //! - `commands`: the reactions to the message commands, each answered once;
 //! - `edit`: a user message edited in place by its author — its decision and
@@ -26,9 +31,9 @@
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | message row (status, deleted, edited at, version) | store, complete, fail, cancel, edit, delete, stream watch | resource, `message` noun, caused | Upsert; the open head repopulates on a new message (it enters the page, the oldest leaves) |
-//! | items, blocks | store (whole), close (folded content), edit (blocks replaced), delete (content gone) | resource, `message` noun | Upsert |
-//! | a streaming message's content | a chunk folded on any pod (lane A) | resource, `message_stream` noun, staged by the engine | Upsert of that message only, with the content so far; never a repopulation |
+//! | message row (status, deleted, edited at, version) | store (v1, v2), complete, fail, cancel, edit, delete, stream watch | resource, `message` noun, caused | Upsert; the open head repopulates on a new message (it enters the page, the oldest leaves) |
+//! | entries, blocks, annotations | store (whole), close (judged stream), edit (content replaced), delete (content gone) | resource, `message` noun | Upsert |
+//! | a streaming message's turn | a chunk folded on any pod (lane A) | resource, `message_stream` noun, staged by the engine | Upsert of that message only, its drafts included; never a repopulation |
 //! | the thread's members | add/remove members, thread deleted | principal facts of each user added or removed, `MEMBERSHIP_DEPS` | the member's windows repopulated: Upsert / Remove |
 //! | a user author's name | directory mirror | foreign `threads.known_user`, inverted to the messages they wrote | Upsert |
 //! | the caller's standing | directory mirror | principal facts, `ROSTER_DEPS`; the resolver ends the sessions of a caller no longer active | windows repopulated, or sessions ended |
@@ -43,6 +48,7 @@ pub mod closing;
 pub mod commands;
 pub mod content;
 pub mod decision;
+pub mod derived;
 pub mod draft;
 pub mod edit;
 pub mod graphql;
@@ -50,6 +56,8 @@ pub mod state;
 pub mod store;
 pub mod stream;
 pub mod transitions;
+pub mod upgrade;
+pub mod v1;
 pub mod view;
 pub mod watch;
 
@@ -88,8 +96,10 @@ pub fn message_cause(kind: MessageCause, thread_id: Uuid) -> MessageImpact {
 
 pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError> {
     engine.register_projector(MessagesView)?;
-    engine.register_accumulator(stream::MessageContent)?;
-    engine.register_reaction("threads-message-store", commands::store)?;
+    engine.register_accumulator(stream::TurnContent)?;
+    engine.register_accumulator(stream::LegacyContent)?;
+    engine.register_reaction("threads-message-store-v2", commands::store_v2)?;
+    engine.register_reaction("threads-message-store", commands::store_v1)?;
     engine.register_reaction("threads-message-complete", commands::complete)?;
     engine.register_reaction("threads-message-fail", commands::fail)?;
     engine.register_reaction("threads-message-cancel", commands::cancel)?;
