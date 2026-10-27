@@ -1,7 +1,9 @@
 //! Playing a writer on Threads' message stream: the lane-A frames of a
 //! `STREAMING` message, published on `stream.threads.{message_id}` of the
 //! `STREAMING_threads` stream with their `Nats-Msg-Id`, exactly as
-//! `contract_threads::ChunkFrame` describes them.
+//! `contract_threads::ChunkFrame` describes them — accumulator `turn_content`,
+//! each chunk a library response delta, a whole library entry or a whole
+//! annotation.
 //!
 //! Neither the Fabric nor the harness offers a lane-A producer (a harness and
 //! library gap), and `async_nats` is banned from a suite: the frames go out
@@ -37,6 +39,26 @@ pub async fn push(
 pub async fn push_frame(nats_url: &str, frame: &ChunkFrame) {
     let body = serde_json::to_string(frame).expect("a frame serializes");
     push_raw(nats_url, &frame.subject(), &frame.msg_id(), &body).await;
+}
+
+/// Publishes `chunk` at `seq` under the accumulator name of the previous version
+/// (`message_content`): a frame of 0.4's wire, which 0.5 refuses.
+pub async fn push_under_previous_accumulator(
+    nats_url: &str,
+    message_id: Uuid,
+    seq: u64,
+    chunk: &Chunk,
+) {
+    let frame = ChunkFrame::new(message_id, seq, chunk.clone());
+    let mut body = serde_json::to_value(&frame).expect("a frame serializes");
+    body["accumulator"] = serde_json::Value::String("message_content".to_string());
+    push_raw(
+        nats_url,
+        &frame.subject(),
+        &frame.msg_id(),
+        &body.to_string(),
+    )
+    .await;
 }
 
 /// Publishes any body on a message's subject: the adversarial path (a frame the

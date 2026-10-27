@@ -7,17 +7,19 @@
 use std::collections::BTreeMap;
 
 use br_core_auth::Passport;
+use contract_threads::llm::{Conversation, PlainBlock, ProjectedThread, Turn, TurnEntry};
 use contract_threads::{
-    AiAuthor, AiDelivery, AiMessage, Block, CompleteMessage, CreateThread, DeleteMessage,
-    EditMessage, Item, MessageCommandConfirmed, MessageCommandRefused, MessageStatus, NewMessage,
-    ReasonCode, ReopenThread, ResolveThread, StoreMessage, StreamSeal, ThreadCommandConfirmed,
-    ThreadCommandRefused, ThreadsCommand, UserMessage,
+    AiTurnMessage, CompleteMessage, CreateThread, DeleteMessage, EditMessage,
+    MessageCommandConfirmed, MessageCommandRefused, MessageStatus, NewTurn, PlacedAnnotation,
+    ReasonCode, ReopenThread, ResolveThread, StoreMessageV2, StreamSeal, ThreadCommandConfirmed,
+    ThreadCommandRefused, ThreadsCommand, TurnDelivery, UserTurn,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::commands::{Answer, commanding_service, send, send_as};
+use super::content::{self, Agent};
 use super::{
     PUSH_TIMEOUT, Person, Q_CONTEXT_FOR, Q_MESSAGES, Q_THREAD, Q_THREADS, QUIET_WINDOW,
     TestContext, eventually, gql,
@@ -238,73 +240,137 @@ pub async fn await_members(
 
 // ── messages ────────────────────────────────────────────────────────────────
 
-pub fn ai(id: &str, name: &str) -> AiAuthor {
-    AiAuthor {
-        id: id.to_string(),
-        name: name.to_string(),
+/// The agent `label` named `name` (see [`content::agent`]).
+pub fn ai(label: &str, name: &str) -> Agent {
+    content::agent(label, name)
+}
+
+/// A store under a fresh UUIDv7, of `message`.
+fn storing(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    message_id: Uuid,
+    message: NewTurn,
+) -> StoreMessageV2 {
+    StoreMessageV2 {
+        message_id,
+        thread_id: thread,
+        parent_message_id: parent,
+        job_id: None,
+        acting_user_id: None,
+        impersonator_id: None,
+        message,
     }
 }
 
-/// A complete user message by `author`.
+/// A complete user message by `author`: an input turn holding one human
+/// message of `author` with `content`.
 pub fn user_message(
     thread: Uuid,
     parent: Option<Uuid>,
     author: Uuid,
-    blocks: Vec<Block>,
-) -> StoreMessage {
-    StoreMessage {
-        message_id: Uuid::now_v7(),
-        thread_id: thread,
-        parent_message_id: parent,
-        job_id: None,
-        acting_user_id: Some(author),
-        impersonator_id: None,
-        message: NewMessage::User(UserMessage {
-            author_user_id: author,
-            blocks,
-        }),
-    }
+    content: Vec<PlainBlock>,
+) -> StoreMessageV2 {
+    user_entry_message(thread, parent, author, &content::human(author, content))
 }
 
-/// A complete AI message by `author`.
+/// A complete user message holding `entry`, as given.
+pub fn user_entry_message(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    author: Uuid,
+    entry: &TurnEntry,
+) -> StoreMessageV2 {
+    let mut store = storing(
+        thread,
+        parent,
+        Uuid::now_v7(),
+        NewTurn::User(UserTurn {
+            entry: content::to_json(entry),
+            annotations: Vec::new(),
+        }),
+    );
+    store.acting_user_id = Some(author);
+    store
+}
+
+/// A complete AI message: the AI turn of `agent` holding `entries`, closed
+/// completed, and no annotation.
 pub fn ai_message(
     thread: Uuid,
     parent: Option<Uuid>,
-    author: AiAuthor,
-    items: Vec<Item>,
-) -> StoreMessage {
-    StoreMessage {
-        message_id: Uuid::now_v7(),
-        thread_id: thread,
-        parent_message_id: parent,
-        job_id: None,
-        acting_user_id: None,
-        impersonator_id: None,
-        message: NewMessage::Ai(AiMessage {
-            author,
-            delivery: AiDelivery::Completed { items },
+    agent: &Agent,
+    entries: Vec<TurnEntry>,
+) -> StoreMessageV2 {
+    let message = Uuid::now_v7();
+    let turn = content::ai_turn(message, agent, content::closed(entries));
+    whole_message(
+        thread,
+        parent,
+        message,
+        agent,
+        &Turn::from(turn),
+        Vec::new(),
+    )
+}
+
+/// A complete AI message under `message`'s id: `turn` as given (an AI turn or
+/// an input turn of incoming entries) and `annotations`.
+pub fn whole_message(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    message: Uuid,
+    agent: &Agent,
+    turn: &Turn,
+    annotations: Vec<PlacedAnnotation>,
+) -> StoreMessageV2 {
+    raw_whole_message(
+        thread,
+        parent,
+        message,
+        agent,
+        content::to_json(turn),
+        annotations,
+    )
+}
+
+/// A complete AI message carrying `turn` as raw JSON: the adversarial path.
+pub fn raw_whole_message(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    message: Uuid,
+    agent: &Agent,
+    turn: Value,
+    annotations: Vec<PlacedAnnotation>,
+) -> StoreMessageV2 {
+    storing(
+        thread,
+        parent,
+        message,
+        NewTurn::Ai(AiTurnMessage {
+            agent_id: agent.uuid(),
+            author_name: agent.name.clone(),
+            delivery: TurnDelivery::Completed { turn, annotations },
         }),
-    }
+    )
 }
 
 /// An AI message opened `STREAMING`, empty.
-pub fn streaming_message(thread: Uuid, parent: Option<Uuid>, author: AiAuthor) -> StoreMessage {
-    StoreMessage {
-        message_id: Uuid::now_v7(),
-        thread_id: thread,
-        parent_message_id: parent,
-        job_id: None,
-        acting_user_id: None,
-        impersonator_id: None,
-        message: NewMessage::Ai(AiMessage {
-            author,
-            delivery: AiDelivery::Streaming,
+pub fn streaming_message(thread: Uuid, parent: Option<Uuid>, agent: &Agent) -> StoreMessageV2 {
+    storing(
+        thread,
+        parent,
+        Uuid::now_v7(),
+        NewTurn::Ai(AiTurnMessage {
+            agent_id: agent.uuid(),
+            author_name: agent.name.clone(),
+            delivery: TurnDelivery::Streaming,
         }),
-    }
+    )
 }
 
 /// `store` sent and confirmed with `status`; answers the message id.
-pub async fn store(ctx: &TestContext, store: StoreMessage, status: MessageStatus) -> Uuid {
+pub async fn store(ctx: &TestContext, store: StoreMessageV2, status: MessageStatus) -> Uuid {
     let message = store.message_id;
     let command_id = command(ctx, &store).await;
     let confirmed = message_confirmed(ctx, command_id, status, "the message's storage").await;
@@ -323,28 +389,55 @@ pub async fn say(
 ) -> Uuid {
     store(
         ctx,
-        user_message(
-            thread,
-            parent,
-            author.id,
-            vec![super::content::user_text(text)],
-        ),
+        user_message(thread, parent, author.id, vec![content::text(text)]),
         MessageStatus::Completed,
     )
     .await
 }
 
-/// `author` answers `parent` with `items`, complete.
+/// `agent` answers `parent` with `entries`, its turn closed completed.
 pub async fn answer(
     ctx: &TestContext,
     thread: Uuid,
     parent: Option<Uuid>,
-    author: AiAuthor,
-    items: Vec<Item>,
+    agent: Agent,
+    entries: Vec<TurnEntry>,
 ) -> Uuid {
     store(
         ctx,
-        ai_message(thread, parent, author, items),
+        ai_message(thread, parent, &agent, entries),
+        MessageStatus::Completed,
+    )
+    .await
+}
+
+/// `agent` answers `parent` in `text`, attaching `artifact` in an ARTIFACT
+/// annotation after its answer; its turn closed completed.
+pub async fn answer_attaching(
+    ctx: &TestContext,
+    thread: Uuid,
+    parent: Option<Uuid>,
+    agent: Agent,
+    text: &str,
+    artifact: Uuid,
+) -> Uuid {
+    let replied = content::reply(text);
+    let message = Uuid::now_v7();
+    let turn = Turn::from(content::ai_turn(
+        message,
+        &agent,
+        content::closed(replied.clone()),
+    ));
+    store(
+        ctx,
+        whole_message(
+            thread,
+            parent,
+            message,
+            &agent,
+            &turn,
+            vec![content::after(&replied[0], content::artifact(artifact))],
+        ),
         MessageStatus::Completed,
     )
     .await
@@ -355,11 +448,11 @@ pub async fn open_stream(
     ctx: &TestContext,
     thread: Uuid,
     parent: Option<Uuid>,
-    author: AiAuthor,
+    agent: Agent,
 ) -> Uuid {
     store(
         ctx,
-        streaming_message(thread, parent, author),
+        streaming_message(thread, parent, &agent),
         MessageStatus::Streaming,
     )
     .await
@@ -377,20 +470,37 @@ pub fn completion(thread: Uuid, message: Uuid, last_seq: u64, hash: &str) -> Com
     }
 }
 
-/// `acting`'s edit of `message`, made from `expected_version`, with `blocks`.
+/// `acting`'s edit of `message`, made from `expected_version`, with `content`.
 pub fn edit_of(
     thread: Uuid,
     message: Uuid,
     acting: Uuid,
     expected_version: u64,
-    blocks: Vec<Block>,
+    content: Vec<PlainBlock>,
+) -> EditMessage {
+    raw_edit_of(
+        thread,
+        message,
+        acting,
+        expected_version,
+        content.iter().map(content::to_json).collect(),
+    )
+}
+
+/// An edit carrying raw JSON content: the adversarial path.
+pub fn raw_edit_of(
+    thread: Uuid,
+    message: Uuid,
+    acting: Uuid,
+    expected_version: u64,
+    content: Vec<Value>,
 ) -> EditMessage {
     EditMessage {
         message_id: message,
         thread_id: thread,
         acting_user_id: acting,
         expected_version,
-        blocks,
+        content,
     }
 }
 
@@ -543,43 +653,78 @@ where
     }
 }
 
-/// A runner's read of a thread's context, whole or lightened for `ai`: the
-/// raw answer.
+/// A runner's read of a thread's context, whole (`agent` absent) or as the
+/// agent context of the agent id named — any string, the adversarial path
+/// included: the raw answer.
 pub async fn context_answer(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
-    ai: Option<&AiAuthor>,
+    agent: Option<&str>,
 ) -> Value {
-    let ai = ai.map(|ai| json!({ "id": ai.id, "name": ai.name }));
     ctx.run(
         passport,
         Q_CONTEXT_FOR,
-        json!({ "thread": thread, "ai": ai }),
+        json!({ "thread": thread, "agent": agent }),
     )
     .await
 }
 
-/// A runner's read of a thread's context.
+/// A runner's read of a thread's context, whole or for `agent`.
 pub async fn context(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
-    ai: Option<&AiAuthor>,
+    agent: Option<&Agent>,
 ) -> Value {
-    let answer = context_answer(ctx, passport, thread, ai).await;
+    let agent = agent.map(|agent| agent.uuid().to_string());
+    let answer = context_answer(ctx, passport, thread, agent.as_deref()).await;
     gql::data(&answer, "threadsContext").clone()
 }
 
-/// The conversation of a context, loaded by the library — a conversation it
-/// cannot load fails here.
-pub fn conversation_of(context: &Value) -> contract_threads::llm::Conversation {
-    serde_json::from_value(context["conversation"].clone()).unwrap_or_else(|e| {
+/// The whole conversation of a context, loaded by the library — a
+/// conversation it cannot load fails here. Its id is the thread's.
+pub fn conversation_of(context: &Value) -> Conversation {
+    assert!(
+        context["projectedThread"].is_null(),
+        "a context read naming no agent holds no projected thread: {context}"
+    );
+    let conversation: Conversation = serde_json::from_value(context["conversation"].clone())
+        .unwrap_or_else(|e| {
+            panic!(
+                "the context's conversation is one the library loads ({e}): {}",
+                context["conversation"]
+            )
+        });
+    assert_eq!(
+        conversation.id().as_uuid(),
+        uuid_of(&context["threadId"]),
+        "the conversation is the thread's"
+    );
+    conversation
+}
+
+/// The agent context of a context read naming an agent, loaded by the library.
+pub fn projected_of(context: &Value) -> ProjectedThread {
+    assert!(
+        context["conversation"].is_null(),
+        "a context read naming an agent holds no whole conversation: {context}"
+    );
+    serde_json::from_value(context["projectedThread"].clone()).unwrap_or_else(|e| {
         panic!(
-            "the context's conversation is one the library loads ({e}): {}",
-            context["conversation"]
+            "the agent context is a projected thread the library loads ({e}): {}",
+            context["projectedThread"]
         )
     })
+}
+
+/// The ids of the turns of a whole conversation, in order.
+pub fn turn_ids(conversation: &Conversation) -> Vec<Uuid> {
+    conversation
+        .turns()
+        .iter()
+        .map(|turn| turn.id().as_uuid())
+        .collect()
 }
 
 /// The thread's version as a member reads it.

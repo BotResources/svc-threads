@@ -3,9 +3,10 @@
 //! declares, the reason codes, the GraphQL documents the scenarios send, and the
 //! timeouts.
 //!
-//! Every root, argument and field below is the scaffold's SDL (`svc-threads
-//! schema`): the registry carries no SDL for 0.1.0 yet. A rename is a naming
-//! alignment in this one file, never a change of what is asserted.
+//! Every root, argument and field below is the SDL the suite reads: 0.4.0's,
+//! with the 0.5.0 message and context shapes `tests/ORACLE_CONTRACT.md` names
+//! (the registry carries no 0.5.0 SDL). A rename is a naming alignment in this
+//! one file, never a change of what is asserted.
 //! `affordances` is the engine's JSON scalar `{ action: { allowed, reason? } }`.
 
 use std::time::Duration;
@@ -79,6 +80,9 @@ pub const RUNNER_SCOPE_REQUIRED: &str = "RUNNER_SCOPE_REQUIRED";
 /// Not named by the functional specification ("accepted only for that
 /// thread's active title Job"): the draft registry tests' (T12), to ratify.
 pub const JOB_NOT_ACTIVE: &str = "JOB_NOT_ACTIVE";
+/// Named by the registry: an agent context named by an agent id that is not a
+/// UUIDv7.
+pub const AI_PERSPECTIVE_INVALID: &str = "AI_PERSPECTIVE_INVALID";
 
 /// The title runner type this suite configures ([`ENV_TITLE_RUNNER_TYPE`]).
 pub const TITLE_RUNNER_TYPE: &str = "thread-title-e2e";
@@ -105,17 +109,18 @@ pub const Q_THREAD: &str = "query($id: UUID!) { threadsThread(id: $id) { \
 pub const Q_MESSAGES: &str = "query($thread: UUID!, $size: Int!, $before: UUID, $tip: UUID) { \
     threadsMessages(threadId: $thread, size: $size, before: $before, branchTip: $tip) { \
         id threadId parentMessageId jobId status deleted createdAt editedAt version affordances \
-        author { kind userId aiId name } \
-        blocks { id index kind content } \
-        items { index kind status stopReason usage model blocks { id index kind content } } } }";
+        author { kind userId aiId name } turnKind \
+        entries { id index kind state content annotations { id index kind content } } } }";
 
+/// The context of a thread, whole: no agent named.
 pub const Q_CONTEXT: &str = "query($thread: UUID!) { threadsContext(threadId: $thread) { \
-    threadId conversation members { userId displayName } resources { key ids } } }";
+    threadId conversation projectedThread members { userId displayName } resources { key ids } } }";
 
-/// The context, whole (`ai` null) or lightened for the AI named.
-pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $ai: AiPerspective) { \
-    threadsContext(threadId: $thread, ai: $ai) { \
-    threadId conversation members { userId displayName } resources { key ids } } }";
+/// The context, whole (`agent` null) or as the agent context of the agent id
+/// named.
+pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $agent: String) { \
+    threadsContext(threadId: $thread, agentId: $agent) { \
+    threadId conversation projectedThread members { userId displayName } resources { key ids } } }";
 
 pub const Q_ARTIFACT_DOWNLOAD: &str = "query($thread: UUID!, $artifact: UUID!) { \
     threadsArtifactDownload(threadId: $thread, artifactId: $artifact) }";
@@ -143,9 +148,8 @@ pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(si
 
 /// The fields of a message the suite reads, on every channel.
 pub const MESSAGE_FIELDS: &str = "id threadId parentMessageId jobId status deleted createdAt \
-    editedAt version affordances author { kind userId aiId name } \
-    blocks { id index kind content } \
-    items { index kind status stopReason usage model blocks { id index kind content } }";
+    editedAt version affordances author { kind userId aiId name } turnKind \
+    entries { id index kind state content annotations { id index kind content } }";
 
 /// The fields of a thread the suite reads on its live channels.
 pub const THREAD_FIELDS: &str = "id ownerId title parentThreadId originBlockId status \
