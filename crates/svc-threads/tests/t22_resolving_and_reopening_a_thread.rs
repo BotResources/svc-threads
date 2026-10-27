@@ -26,7 +26,7 @@
 
 mod common;
 
-use common::content::{text_step, user_text};
+use common::content::{Streamed, text};
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
@@ -35,7 +35,7 @@ use common::flows::{
     resolution_of, say, thread_confirmed, thread_refused, thread_view, user_message, version,
 };
 use common::{M_SET_READ_MARK, TestContext, gql, stream};
-use contract_threads::llm::StopReason;
+use contract_threads::llm::ResponseEnding;
 use contract_threads::{
     AddMembers, AddResourceIds, CancelMessage, CloseThread, ClosingStatus, DeleteThread,
     FailMessage, MessageStatus, ReasonCode, SetTitle,
@@ -61,13 +61,10 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
     let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
     let m2f = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
     let m2c = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let (last_seq, hash) = stream::push(
-        &ctx.nats.url(),
-        m2,
-        0,
-        &text_step(0, None, &["it is ", "settled"], StopReason::EndTurn),
-    )
-    .await;
+    let mut settled = Streamed::start(m2, None);
+    settled.text(&["it is ", "settled"], true);
+    settled.complete(ResponseEnding::finished());
+    let (last_seq, hash) = stream::push(&ctx.nats.url(), m2, 0, &settled.chunks()).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
     b_feed.drain().await;
 
@@ -105,11 +102,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
     // THREAD_RESOLVED and nothing changes.
     let m1_before = message_view(&ctx, &a.passport, t, m1).await;
     let facts_before = facts::count(&ctx.pool).await;
-    let stored = command(
-        &ctx,
-        &user_message(t, Some(m1), a.id, vec![user_text("more")]),
-    )
-    .await;
+    let stored = command(&ctx, &user_message(t, Some(m1), a.id, vec![text("more")])).await;
     message_refused(
         &ctx,
         stored,
@@ -118,11 +111,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
     )
     .await;
     let v1 = message_version(&ctx, &a.passport, t, m1).await;
-    let edited = command(
-        &ctx,
-        &edit_of(t, m1, a.id, v1, vec![user_text("rephrased")]),
-    )
-    .await;
+    let edited = command(&ctx, &edit_of(t, m1, a.id, v1, vec![text("rephrased")])).await;
     message_refused(
         &ctx,
         edited,
@@ -139,11 +128,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
     )
     .await;
     // And the resolution is judged before the message: an unknown one too.
-    let unknown = command(
-        &ctx,
-        &edit_of(t, Uuid::now_v7(), a.id, 1, vec![user_text("x")]),
-    )
-    .await;
+    let unknown = command(&ctx, &edit_of(t, Uuid::now_v7(), a.id, 1, vec![text("x")])).await;
     message_refused(
         &ctx,
         unknown,
@@ -272,11 +257,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
         .await;
     // And messages are accepted again; A edits and deletes again.
     let m3 = say(&ctx, t, Some(m2), &a, "thanks").await;
-    let edited = command(
-        &ctx,
-        &edit_of(t, m1, a.id, v1, vec![user_text("rephrased")]),
-    )
-    .await;
+    let edited = command(&ctx, &edit_of(t, m1, a.id, v1, vec![text("rephrased")])).await;
     message_confirmed(
         &ctx,
         edited,

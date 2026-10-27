@@ -16,11 +16,11 @@
 mod common;
 
 use common::TestContext;
-use common::content::{texts_of, user_text};
+use common::content::{text, texts_of, to_json, warning};
 use common::facts;
 use common::flows::{
     command, create_thread, edit_of, message_confirmed, message_refused, message_version,
-    message_view, redeliver, replayed_alike, say,
+    message_view, raw_edit_of, redeliver, replayed_alike, say,
 };
 use contract_threads::{MessageStatus, ReasonCode};
 
@@ -45,13 +45,13 @@ async fn t20_an_edit_from_a_stale_version_is_refused_and_overwrites_nothing() {
     const C2: &str = "the wording C2";
 
     // When the harness edits M1 from v with C1.
-    let first = command(&ctx, &edit_of(t, m1, a.id, v, vec![user_text(C1)])).await;
+    let first = command(&ctx, &edit_of(t, m1, a.id, v, vec![text(C1)])).await;
     // Then confirmed, M1 at v+1.
     message_confirmed(&ctx, first, MessageStatus::Completed, "the edit to C1").await;
     assert_eq!(message_version(&ctx, &a.passport, t, m1).await, v + 1);
 
     // When a second edit, also made from v, brings C2.
-    let stale = command(&ctx, &edit_of(t, m1, a.id, v, vec![user_text(C2)])).await;
+    let stale = command(&ctx, &edit_of(t, m1, a.id, v, vec![text(C2)])).await;
     // Then refused VERSION_CONFLICT, naming the current version v+1.
     let refused = message_refused(
         &ctx,
@@ -80,16 +80,11 @@ async fn t20_an_edit_from_a_stale_version_is_refused_and_overwrites_nothing() {
         "only the edit to C1 is recorded"
     );
 
-    // When an edit from v also carries content the rules refuse (no text).
+    // When an edit from v also carries content the rules refuse (an
+    // annotation where the library's plain blocks are due).
     let stale_invalid = command(
         &ctx,
-        &edit_of(
-            t,
-            m1,
-            a.id,
-            v,
-            vec![common::content::warning_block("note", "no text")],
-        ),
+        &raw_edit_of(t, m1, a.id, v, vec![to_json(&warning("NOTE", "no text"))]),
     )
     .await;
     // Then it is refused VERSION_CONFLICT: the version is judged before the
@@ -103,7 +98,7 @@ async fn t20_an_edit_from_a_stale_version_is_refused_and_overwrites_nothing() {
     .await;
 
     // When the same edit is sent again, made from v+1.
-    let edit_c2 = edit_of(t, m1, a.id, v + 1, vec![user_text(C2)]);
+    let edit_c2 = edit_of(t, m1, a.id, v + 1, vec![text(C2)]);
     let current = command(&ctx, &edit_c2).await;
     // Then confirmed: M1 reads C2 at v+2.
     message_confirmed(

@@ -107,7 +107,8 @@ pub async fn send<C: ThreadsCommand + Serialize>(
 }
 
 /// Sends `command` under `command_id` — published again under the same id, it
-/// is the bus redelivering one command.
+/// is the bus redelivering one command. The envelope's schema version is the
+/// command's own (`message.store` travels as v1 or v2).
 pub async fn send_as<C: ThreadsCommand + Serialize>(
     nats: &FabricTestNats,
     actor: Actor,
@@ -117,7 +118,7 @@ pub async fn send_as<C: ThreadsCommand + Serialize>(
     let envelope = IntegrationCommand::new(
         command_id,
         C::command_type(),
-        contract_threads::coords::SCHEMA_VERSION,
+        C::VERSION,
         Utc::now(),
         EventMetadata::new(actor, command_id),
         command,
@@ -126,4 +127,27 @@ pub async fn send_as<C: ThreadsCommand + Serialize>(
         .publish_command(&C::coords(), &envelope)
         .await
         .expect("the commanding service publishes its command");
+}
+
+/// Sends a command of the previous published language (`contract-threads`
+/// 0.4.0, every command v1) as `actor`, under a fresh UUIDv7; answers that id.
+/// A consumer still on `message.store` v1 sends exactly this.
+pub async fn send_v1<C>(nats: &FabricTestNats, actor: Actor, command: &C) -> Uuid
+where
+    C: contract_threads_v0_4::ThreadsCommand + Serialize,
+{
+    let command_id = Uuid::now_v7();
+    let envelope = IntegrationCommand::new(
+        command_id,
+        C::command_type(),
+        contract_threads_v0_4::coords::SCHEMA_VERSION,
+        Utc::now(),
+        EventMetadata::new(actor, command_id),
+        command,
+    );
+    nats.fabric()
+        .publish_command(&C::coords(), &envelope)
+        .await
+        .expect("the commanding service publishes its v1 command");
+    command_id
 }

@@ -19,15 +19,14 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::artifacts::{File, download_url, fetch, object_count, upload};
-use common::content::{ai_text, artifact_block, step, user_text};
+use common::content::text;
 use common::facts;
 use common::feed::{Live, removes, upsert_of};
 use common::flows::{
-    ai, answer, command, create, create_thread, creation, say, thread_confirmed, thread_refused,
-    thread_view, user_message,
+    ai, answer_attaching, command, create, create_thread, creation, say, thread_confirmed,
+    thread_refused, thread_view, user_message,
 };
 use common::{M_SET_READ_MARK, PUSH_TIMEOUT, TestContext, eventually, gql};
-use contract_threads::llm::StopReason;
 use contract_threads::{CloseThread, ClosingStatus, DeleteThread, ReasonCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -77,11 +76,7 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
     assert!(facts::types(&facts::of(&ctx.pool, "thread", t).await).contains(&"Cancelled"));
 
     // When a message is stored on T, then T is closed again as COMPLETED.
-    let message = command(
-        &ctx,
-        &user_message(t, Some(m1), a.id, vec![user_text("late")]),
-    )
-    .await;
+    let message = command(&ctx, &user_message(t, Some(m1), a.id, vec![text("late")])).await;
     let reclose = command(&ctx, &close(t, ClosingStatus::Completed, o.id)).await;
 
     // Then both are refused THREAD_NOT_OPEN, and T still reads CANCELLED, with
@@ -119,18 +114,7 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
     let runner = ctx.service_account(true);
     let file = File::csv("summary\nok\n");
     let x = upload(&ctx, &runner.passport, u, &file).await;
-    let m2 = answer(
-        &ctx,
-        u,
-        Some(m1),
-        ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("done"), artifact_block(x)],
-        )],
-    )
-    .await;
+    let m2 = answer_attaching(&ctx, u, Some(m1), ai("a1", "Analyst"), "done", x).await;
     let marked = ctx
         .run(
             &a.passport,

@@ -24,16 +24,17 @@ use conformance_scope::{ExpectedDeclaration, PlatformOnly};
 use serde_json::json;
 use uuid::Uuid;
 
-/// The tables 0.1.0's migration creates, each readable by the app role.
-const TABLES: [&str; 10] = [
+/// The tables of the specification's objects, each readable by the app role.
+/// Where a message's entries, blocks and annotations are stored is the
+/// implementation's choice (0.5.0 replaced 0.4.0's `message_item` and
+/// `message_block`): the suite reads them through `common::store`.
+const TABLES: [&str; 8] = [
     "threads.known_users",
     "threads.thread",
     "threads.thread_member",
     "threads.thread_resource",
     "threads.title_job",
     "threads.message",
-    "threads.message_item",
-    "threads.message_block",
     "threads.artifact",
     "threads.read_mark",
 ];

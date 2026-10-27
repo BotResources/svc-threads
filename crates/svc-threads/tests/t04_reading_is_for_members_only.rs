@@ -22,10 +22,9 @@ mod common;
 
 use br_core_auth::Passport;
 use common::artifacts::{File, download_answer, download_url, fetch, upload};
-use common::content::artifact_block;
 use common::feed::{Live, in_reset, thread_feed, ws_opening};
 use common::flows::{
-    ai, answer, branch_answer, command, create_thread, listed, member_ids, say, sorted,
+    ai, answer_attaching, branch_answer, command, create_thread, listed, member_ids, say, sorted,
     thread_confirmed, thread_view,
 };
 use common::{
@@ -33,7 +32,6 @@ use common::{
     person_passport,
 };
 use contract_threads::AddMembers;
-use contract_threads::llm::StopReason;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -74,18 +72,7 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
     let runner = ctx.service_account(true);
     let file = File::csv("q,n\n1,2\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
-    answer(
-        &ctx,
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        vec![common::content::step(
-            StopReason::EndTurn,
-            None,
-            vec![common::content::ai_text("here"), artifact_block(x)],
-        )],
-    )
-    .await;
+    answer_attaching(&ctx, t, Some(m1), ai("a1", "Analyst"), "here", x).await;
 
     // When A reads T, its messages, and follows it.
     let view = thread_view(&ctx, &a.passport, t).await;
