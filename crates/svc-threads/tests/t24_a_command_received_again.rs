@@ -41,7 +41,7 @@ mod common;
 use std::time::Duration;
 
 use common::commands::{Answer, commanding_service, send, send_as};
-use common::content::user_text;
+use common::content::text;
 use common::facts;
 use common::flows::{
     create_thread, deletion_of, edit_of, message_view, reopening_of, resolution_of, say,
@@ -115,7 +115,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
     let s = create_thread(&ctx, Some(&a), &[]).await;
 
     // When the harness stores M1, then sends the store again under its id.
-    let store_m1 = user_message(s, None, a.id, vec![user_text("the first wording")]);
+    let store_m1 = user_message(s, None, a.id, vec![text("the first wording")]);
     let m1 = store_m1.message_id;
     let store = send(&ctx.nats, commanding_service(), &store_m1).await;
     let first = nth_answer(&ctx, store, 1, "the store").await;
@@ -137,7 +137,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
     let to_v2 = send(
         &ctx.nats,
         commanding_service(),
-        &edit_of(s, m1, a.id, 1, vec![user_text("the second wording")]),
+        &edit_of(s, m1, a.id, 1, vec![text("the second wording")]),
     )
     .await;
     confirmed(
@@ -146,7 +146,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
     );
     // When an edit made from version 1 is refused, M1 changes, and that edit
     // is sent again under its id.
-    let stale_edit = edit_of(s, m1, a.id, 1, vec![user_text("a stale wording")]);
+    let stale_edit = edit_of(s, m1, a.id, 1, vec![text("a stale wording")]);
     let stale = send(&ctx.nats, commanding_service(), &stale_edit).await;
     let first = nth_answer(&ctx, stale, 1, "the stale edit").await;
     let (code, params) = refusal(&first, "the stale edit");
@@ -154,7 +154,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
         (code, params["current_version"].clone()),
         (ReasonCode::VersionConflict, json!(2))
     );
-    let to_v3_edit = edit_of(s, m1, a.id, 2, vec![user_text("the third wording")]);
+    let to_v3_edit = edit_of(s, m1, a.id, 2, vec![text("the third wording")]);
     let to_v3 = send(&ctx.nats, commanding_service(), &to_v3_edit).await;
     confirmed(
         &nth_answer(&ctx, to_v3, 1, "the edit to v3").await,

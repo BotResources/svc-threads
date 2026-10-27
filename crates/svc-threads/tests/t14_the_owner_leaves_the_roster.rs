@@ -25,17 +25,15 @@
 mod common;
 
 use common::artifacts::{File, download_url, fetch, upload};
-use common::content::{ai_text, artifact_block, step};
 use common::facts;
 use common::feed::{Live, removes};
 use common::flows::{
-    ai, answer, command, create_thread, mask_uuids, member_ids, message_view, say, sorted,
-    thread_confirmed, thread_refused, thread_view,
+    ai, answer_attaching, command, create_thread, mask_uuids, member_ids, message_view, say,
+    sorted, thread_confirmed, thread_refused, thread_view,
 };
 use common::{
     ACTIVE_USER_REQUIRED, Handshake, M_SET_READ_MARK, Q_THREADS, TestContext, gql, identity,
 };
-use contract_threads::llm::StopReason;
 use contract_threads::{AddMembers, DeleteThread, ReasonCode};
 use serde_json::{Value, json};
 
@@ -64,18 +62,7 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     let runner = ctx.service_account(true);
     let file = File::csv("owner\nO\n");
     let x = upload(&ctx, &runner.passport, t1, &file).await;
-    answer(
-        &ctx,
-        t1,
-        Some(o_on_t1),
-        ai("a1", "Analyst"),
-        vec![step(
-            StopReason::EndTurn,
-            None,
-            vec![ai_text("attached"), artifact_block(x)],
-        )],
-    )
-    .await;
+    answer_attaching(&ctx, t1, Some(o_on_t1), ai("a1", "Analyst"), "attached", x).await;
     let x_url = download_url(&ctx, &a.passport, t1, x)
         .await
         .expect("A reads T1's artifact");
