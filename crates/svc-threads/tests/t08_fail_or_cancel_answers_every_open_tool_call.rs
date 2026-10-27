@@ -98,6 +98,17 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
     let mut m7_chunks = r7.chunks();
     m7_chunks.push(entry_chunk(&c1_answer));
     stream::push(&nats, m7, 0, &m7_chunks).await;
+    // A cancel with no seal ends the message where its folds are: the stop is
+    // relayed once c1's result is folded, as a user sees it before stopping.
+    a_feed
+        .until("M7's result for c1 is folded", |delta| {
+            upsert_of(delta, m7).is_some_and(|view| {
+                view["entries"].as_array().is_some_and(|entries| {
+                    entries.iter().any(|e| e["kind"] == "runtime_tool_results")
+                })
+            })
+        })
+        .await;
     let cancelled = command(&ctx, &cancel(t, m7, None)).await;
 
     // Then (4) confirmed CANCELLED.
