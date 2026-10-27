@@ -465,11 +465,12 @@ dependencies = [
 
 [[package]]
 name = "br-llm-messages"
-version = "0.5.0"
-source = "git+https://github.com/BotResources/br-llm-messages-rs?tag=br-llm-messages%2Fv0.5.0#9f0a052beda362b9f9145b1a5482c4c24fbe4135"
+version = "2.0.0"
+source = "git+https://github.com/BotResources/br-llm-messages-rs?tag=br-llm-messages%2Fv2.0.0#8a138424862646ba5c9f55fc3efc4c147a871e5d"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -806,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "br-core-integration",
  "br-llm-messages",
@@ -3656,7 +3657,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svc-threads"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-graphql",
  "br-core-auth",

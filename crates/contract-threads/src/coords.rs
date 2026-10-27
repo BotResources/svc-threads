@@ -14,16 +14,26 @@ pub const THREAD_AGGREGATE: &str = "thread";
 /// The aggregate segment of the message commands and events.
 pub const MESSAGE_AGGREGATE: &str = "message";
 
-/// The schema version of every command and event of this contract.
+/// The schema version of every event of this contract, and of every command but
+/// `message.store` v2.
 pub const SCHEMA_VERSION: u8 = 1;
 
 /// `integration.cmd.threads.{aggregate}.{verb}.v1`.
 pub fn command_coords(aggregate: &'static str, verb: &'static str) -> CommandCoords {
+    versioned_command_coords(aggregate, verb, SCHEMA_VERSION)
+}
+
+/// `integration.cmd.threads.{aggregate}.{verb}.v{version}`.
+pub fn versioned_command_coords(
+    aggregate: &'static str,
+    verb: &'static str,
+    version: u8,
+) -> CommandCoords {
     CommandCoords {
         receiver: Bc::new(SERVICE).expect("`threads` is a valid bounded-context segment"),
         aggregate: Aggregate::new(aggregate).expect("a static aggregate segment of this contract"),
         verb: Verb::new(verb).expect("a static verb segment of this contract"),
-        version: SCHEMA_VERSION,
+        version,
     }
 }
 
@@ -46,9 +56,12 @@ pub trait ThreadsCommand {
     /// The verb segment, also the second half of the envelope's
     /// `command_type`.
     const VERB: &'static str;
+    /// The command's schema version: the subject's `v{N}` and the envelope's
+    /// `schema_version`.
+    const VERSION: u8 = SCHEMA_VERSION;
 
     fn coords() -> CommandCoords {
-        command_coords(Self::AGGREGATE, Self::VERB)
+        versioned_command_coords(Self::AGGREGATE, Self::VERB, Self::VERSION)
     }
 
     /// The envelope's `command_type`: `{aggregate}.{verb}`.

@@ -9,6 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.5.0 - 2026-10-27
+
+The published language of Threads 0.5 (registry patch 0.5.0): a message is a
+turn of the `br-llm-messages` 2.0 model (schema `br-llm-messages/5`).
+
+### Added
+
+- `llm` re-exports **br-llm-messages 2.0.0** (was 0.5.0): commanders build
+  turns, entries, blocks and response deltas with the exact library version
+  Threads judges them by.
+- `LibraryJson`: the library's JSON carried as is and judged by Threads
+  (`to_turn`, `to_entry`, `to_plain_block`, `to_delta`): a command or a chunk
+  whose library part the library refuses still decodes, and is answered.
+- `StoreMessageV2` (`integration.cmd.threads.message.store.v2`, `command_type`
+  `message.store`, schema version 2): `message` is a `MessageTurn` —
+  `USER` (`UserTurn { entry, annotations }`: the library's human message, its
+  human the author; `annotations` exists to be refused
+  `annotation_in_user_message`) or `AI` (`AiTurn { agent_id, author_name,
+  delivery }`, `AiDelivery::Completed { turn, annotations }` — the library's
+  `/5` turn, an AI turn of the agent or an input turn of incoming entries — or
+  `AiDelivery::Streaming`).
+- `Annotation { id, kind, content }` (`AnnotationBody`: `ARTIFACT`,
+  `THREAD_REFERENCE`, `JOB_REFERENCE`, `ERROR`, `WARNING`, their 0.4 content
+  shapes), `AnnotationKind`, `PlacedAnnotation { after_entry_id, annotation }`.
+- `ThreadsCommand::VERSION` (default 1): the subject's `v{N}` and the
+  envelope's schema version; `coords::versioned_command_coords`.
+- `TURN_CONTENT_ACCUMULATOR` (`turn_content`).
+- `v1`: the 0.4 forms of a message — `v1::StoreMessage` (`message.store` v1,
+  deprecated, converted by Threads), `v1::Block`, `v1::BlockBody`, `v1::Item`,
+  `v1::StepItem`, `v1::BlockKind`, … — the 0.4 library's content as raw JSON.
+
+### Changed
+
+- **Breaking:** `Chunk` is `DELTA { delta }` (a library `ResponseDelta`),
+  `ENTRY { entry }` (a whole entry other than a model response) or
+  `ANNOTATION { after_entry_id, annotation }`; `ChunkFrame::new` names the
+  accumulator `turn_content`. `seal_hash` hashes as before.
+- **Breaking:** `EditMessage` carries `content`, the human message's new plain
+  blocks (the library's JSON), instead of `blocks`. (Threads still accepts the
+  0.4 `blocks` on the same offer.)
+- **Breaking:** `MessageInvalidError` is the 2.0 vocabulary: the 19 codes of
+  the library's `ErrorCode` under their own names (`MessageInvalidError::
+  of_library`), `library_refusal`, and Threads' own codes (`turn_id_mismatch`,
+  `not_a_user_turn`, `annotation_in_user_message`, `annotation_entry_unknown`,
+  `author_mismatch`, `closure_not_completed`, `parent_not_in_thread`,
+  `chunk_unreadable`, `response_in_entry_chunk`, `response_still_producing`,
+  `closure_by_writer`, `streaming_v1`, `v1_not_convertible`).
+
+### Removed
+
+- **Breaking:** `StoreMessage`, `NewMessage`, `UserMessage`, `AiMessage`,
+  `AiAuthor`, `Block`, `BlockBody`, `LibraryBlock`, `Item`, `StepItem`,
+  `ToolResultsItem`, `Citation`, `ChunkPart`, `LibraryEvent`, `BlockKind`,
+  `LibraryValueError` and `MESSAGE_CONTENT_ACCUMULATOR` at the crate root
+  (the 0.4 store forms live on under `v1`).
+
+### Unchanged
+
+- Thread commands, `CompleteMessage`, `FailMessage`, `CancelMessage`,
+  `DeleteMessage`, `StreamSeal`, the four answer events, `ReasonCode`,
+  `MessageStatus`, the members KV value, `TitleJobConfig`.
+
 ## 0.4.0 - 2026-10-20
 
 ### Added
