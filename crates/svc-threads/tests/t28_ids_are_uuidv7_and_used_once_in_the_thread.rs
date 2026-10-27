@@ -29,7 +29,7 @@ use common::flows::{
     raw_whole_message, store, streaming_message, user_entry_message, user_message, whole_message,
 };
 use contract_threads::llm::{ModelResponse, ResponseEnding, ResponseMetadata, Turn, TurnEntry};
-use contract_threads::{MessageStatus, NewTurn, ReasonCode, StoreMessageV2};
+use contract_threads::{MessageStatus, MessageTurn, ReasonCode, StoreMessageV2};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -124,7 +124,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     // STREAMING, and whole, its turn naming that agent.
     let v4 = Uuid::new_v4();
     let mut opened = as_m2(streaming_message(t, Some(m1), &analyst));
-    if let NewTurn::Ai(message) = &mut opened.message {
+    if let MessageTurn::Ai(message) = &mut opened.message {
         message.agent_id = v4;
     }
     refused(
@@ -140,7 +140,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )));
     whole["agent"] = Value::String(v4.to_string());
     let mut foreign_agent = raw_whole_message(t, Some(m1), m2, &analyst, whole, Vec::new());
-    if let NewTurn::Ai(message) = &mut foreign_agent.message {
+    if let MessageTurn::Ai(message) = &mut foreign_agent.message {
         message.agent_id = v4;
     }
     refused(

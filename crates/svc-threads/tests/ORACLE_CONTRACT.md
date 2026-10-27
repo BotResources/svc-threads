@@ -5,31 +5,39 @@ The registry's sealed patch 0.5.0 is the canon: its offers fix the wire of
 word for word. This file names the Rust symbols and the GraphQL fields the
 suite compiles and asserts against where the registry names none. The suite
 does not compile until `contract-threads` 0.5.0 exposes them. A rename here is
-an alignment of the suite, never a change of what it asserts.
+an alignment of the suite, never a change of what it asserts. The type names
+follow the implementation in progress where its wire agrees with the offers;
+where the two differ, the suite follows the offer: the `USER` form carries
+`entry`, annotations travel as `{ after_entry_id, annotation }` inside the
+`AI` form and in the `ANNOTATION` chunk, and an `Annotation` is `{ id, kind,
+content }`.
 
 ## `contract-threads` 0.5.0
 
 - `pub use br_llm_messages as llm;` re-exports **br-llm-messages 2.0.0**. The
   suite builds every library value with the library's own constructors and
   serializes it with the library's `Serialize`.
+- `LibraryJson`, the library's JSON carried as is (`#[serde(transparent)]`
+  over a `serde_json::Value`), with `from_json(Value)` and `as_json()`.
+  Threads judges it; decoding a command never fails on it.
 - `ThreadsCommand` gains `const VERSION: u8` (default `1`). `coords()` and the
   envelope's schema version use it. `StoreMessageV2::VERSION == 2`.
 - `StoreMessageV2 { message_id, thread_id, parent_message_id: Option<Uuid>,
   job_id: Option<Uuid>, acting_user_id: Option<Uuid>, impersonator_id:
-  Option<Uuid>, message: NewTurn }`. It is `ThreadsCommand` with aggregate
+  Option<Uuid>, message: MessageTurn }`. It is `ThreadsCommand` with aggregate
   `message`, verb `store`, version 2, so it travels on
   `integration.cmd.threads.message.store.v2` with `command_type`
   `message.store`.
-- `NewTurn` is tagged by `"kind"`:
-  - `User(UserTurn)` is `"USER"`, with `UserTurn { entry: serde_json::Value,
+- `MessageTurn` is tagged by `"kind"`:
+  - `User(UserTurn)` is `"USER"`, with `UserTurn { entry: LibraryJson,
     annotations: Vec<PlacedAnnotation> }`. `entry` is the library's tagged
     turn-entry JSON (`{"type":"human_message", ...}`). `annotations` is
     `#[serde(default, skip_serializing_if = "Vec::is_empty")]`. It exists only
     to be refused `MESSAGE_INVALID` / `annotation_in_user_message` (T05).
-  - `Ai(AiTurnMessage)` is `"AI"`, with `AiTurnMessage { agent_id: Uuid,
-    author_name: String, #[serde(flatten)] delivery: TurnDelivery }`.
-- `TurnDelivery` is tagged by `"status"`:
-  - `Completed { turn: serde_json::Value, annotations: Vec<PlacedAnnotation> }`
+  - `Ai(AiTurn)` is `"AI"`, with `AiTurn { agent_id: Uuid,
+    author_name: String, #[serde(flatten)] delivery: AiDelivery }`.
+- `AiDelivery` is tagged by `"status"`:
+  - `Completed { turn: LibraryJson, annotations: Vec<PlacedAnnotation> }`
     is `"COMPLETED"`. `turn` is the library's `/5` turn JSON. A whole AI turn
     carries its own closure (T27). `annotations` defaults to empty.
   - `Streaming` is `"STREAMING"`.
@@ -41,16 +49,16 @@ an alignment of the suite, never a change of what it asserts.
   `Error(Notice)` `"ERROR"` and `Warning(Notice)` `"WARNING"`. `ArtifactRef {
   artifact_id }`, `ThreadRef { thread_id }`, `JobRef { job_id }` and `Notice {
   code, text: Option<String> }` keep their 0.4 shapes.
-- `Chunk` is tagged by `"kind"`, with variants `Delta { delta:
-  serde_json::Value }` `"DELTA"` (a library `ResponseDelta`), `Entry { entry:
-  serde_json::Value }` `"ENTRY"` (a library turn entry) and `Annotation {
-  after_entry_id: Uuid, annotation: Annotation }` `"ANNOTATION"`.
+- `Chunk` is tagged by `"kind"`, with variants `Delta { delta: LibraryJson }`
+  `"DELTA"` (a library `ResponseDelta`), `Entry { entry: LibraryJson }`
+  `"ENTRY"` (a library turn entry) and `Annotation { after_entry_id: Uuid,
+  annotation: Annotation }` `"ANNOTATION"`.
 - `ChunkFrame { accumulator, key, seq, chunk }`. `ChunkFrame::new(message_id,
   seq, chunk)` sets `accumulator` to `TURN_CONTENT_ACCUMULATOR`
   (`"turn_content"`). `subject()` and `msg_id()` are as in 0.4. `seal_hash(&[Chunk])`
   hashes as in 0.4.
 - `EditMessage { message_id, thread_id, acting_user_id, expected_version,
-  content: Vec<serde_json::Value> }`. Each item of `content` is the library's
+  content: Vec<LibraryJson> }`. Each item of `content` is the library's
   plain-block JSON.
 - Unchanged from 0.4: `CompleteMessage`, `FailMessage`, `CancelMessage`,
   `DeleteMessage`, `StreamSeal`, every thread command, the four answer events,

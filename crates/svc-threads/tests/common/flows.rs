@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use br_core_auth::Passport;
 use contract_threads::llm::{Conversation, PlainBlock, ProjectedThread, Turn, TurnEntry};
 use contract_threads::{
-    AiTurnMessage, CompleteMessage, CreateThread, DeleteMessage, EditMessage,
-    MessageCommandConfirmed, MessageCommandRefused, MessageStatus, NewTurn, PlacedAnnotation,
+    AiDelivery, AiTurn, CompleteMessage, CreateThread, DeleteMessage, EditMessage, LibraryJson,
+    MessageCommandConfirmed, MessageCommandRefused, MessageStatus, MessageTurn, PlacedAnnotation,
     ReasonCode, ReopenThread, ResolveThread, StoreMessageV2, StreamSeal, ThreadCommandConfirmed,
-    ThreadCommandRefused, ThreadsCommand, TurnDelivery, UserTurn,
+    ThreadCommandRefused, ThreadsCommand, UserTurn,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -250,7 +250,7 @@ fn storing(
     thread: Uuid,
     parent: Option<Uuid>,
     message_id: Uuid,
-    message: NewTurn,
+    message: MessageTurn,
 ) -> StoreMessageV2 {
     StoreMessageV2 {
         message_id,
@@ -285,8 +285,8 @@ pub fn user_entry_message(
         thread,
         parent,
         Uuid::now_v7(),
-        NewTurn::User(UserTurn {
-            entry: content::to_json(entry),
+        MessageTurn::User(UserTurn {
+            entry: LibraryJson::from_json(content::to_json(entry)),
             annotations: Vec::new(),
         }),
     );
@@ -347,10 +347,13 @@ pub fn raw_whole_message(
         thread,
         parent,
         message,
-        NewTurn::Ai(AiTurnMessage {
+        MessageTurn::Ai(AiTurn {
             agent_id: agent.uuid(),
             author_name: agent.name.clone(),
-            delivery: TurnDelivery::Completed { turn, annotations },
+            delivery: AiDelivery::Completed {
+                turn: LibraryJson::from_json(turn),
+                annotations,
+            },
         }),
     )
 }
@@ -361,10 +364,10 @@ pub fn streaming_message(thread: Uuid, parent: Option<Uuid>, agent: &Agent) -> S
         thread,
         parent,
         Uuid::now_v7(),
-        NewTurn::Ai(AiTurnMessage {
+        MessageTurn::Ai(AiTurn {
             agent_id: agent.uuid(),
             author_name: agent.name.clone(),
-            delivery: TurnDelivery::Streaming,
+            delivery: AiDelivery::Streaming,
         }),
     )
 }
@@ -500,7 +503,7 @@ pub fn raw_edit_of(
         thread_id: thread,
         acting_user_id: acting,
         expected_version,
-        content,
+        content: content.into_iter().map(LibraryJson::from_json).collect(),
     }
 }
 

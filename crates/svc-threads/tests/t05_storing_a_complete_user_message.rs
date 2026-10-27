@@ -45,7 +45,7 @@ use common::flows::{
 };
 use common::{TestContext, identity, store};
 use contract_threads::llm::{EntryId, HumanMessage, IncomingEntry, InputTurn, Turn, TurnEntry};
-use contract_threads::{CloseThread, ClosingStatus, MessageStatus, NewTurn, ReasonCode};
+use contract_threads::{CloseThread, ClosingStatus, MessageStatus, MessageTurn, ReasonCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -221,10 +221,10 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     for (message_id, entry_json, error, what) in cases {
         let mut refused = user_message(t, Some(m1), a.id, vec![text("placeholder")]);
         refused.message_id = message_id;
-        let NewTurn::User(user) = &mut refused.message else {
+        let MessageTurn::User(user) = &mut refused.message else {
             unreachable!("a user message")
         };
-        user.entry = entry_json;
+        user.entry = contract_threads::LibraryJson::from_json(entry_json);
         let refused_command = command(&ctx, &refused).await;
 
         // Then each is refused MESSAGE_INVALID, naming the library's code, and
@@ -245,9 +245,9 @@ async fn t05_a_complete_user_message_is_stored_checked_by_the_library_and_never_
     // When a user message holds an annotation.
     let mut annotated = user_message(t, Some(m1), a.id, vec![text("noted")]);
     let annotated_id = annotated.message_id;
-    if let NewTurn::User(user) = &mut annotated.message {
+    if let MessageTurn::User(user) = &mut annotated.message {
         let after: TurnEntry =
-            serde_json::from_value(user.entry.clone()).expect("the library's entry");
+            serde_json::from_value(user.entry.as_json().clone()).expect("the library's entry");
         user.annotations = vec![content::after(&after, warning("NOTE", "a user's note"))];
     }
     let annotated_command = command(&ctx, &annotated).await;

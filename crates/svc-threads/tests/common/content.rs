@@ -20,7 +20,8 @@ use contract_threads::llm::{
     TextBlock, ThinkingBlock, ToolName, Turn, TurnClosure, TurnEntry, TurnId,
 };
 use contract_threads::{
-    Annotation, AnnotationBody, ArtifactRef, Chunk, Notice, PlacedAnnotation, ThreadRef,
+    Annotation, AnnotationBody, ArtifactRef, Chunk, LibraryJson, Notice, PlacedAnnotation,
+    ThreadRef,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -490,14 +491,14 @@ impl Streamed {
 
 pub fn delta_chunk(delta: &ResponseDelta) -> Chunk {
     Chunk::Delta {
-        delta: to_json(delta),
+        delta: LibraryJson::from_json(to_json(delta)),
     }
 }
 
 /// A whole entry, as one chunk.
 pub fn entry_chunk(entry: &TurnEntry) -> Chunk {
     Chunk::Entry {
-        entry: to_json(entry),
+        entry: LibraryJson::from_json(to_json(entry)),
     }
 }
 
