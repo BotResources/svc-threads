@@ -10,17 +10,20 @@
 //!
 //! A `STREAMING` message shows the content its stream folded so far, read from
 //! the engine's accumulated lane: the view is the engine's low-level projector,
-//! the one that receives the chunk reader (`view::Projector` does not). Its
-//! status is always its row's: a stream the library refused shows what folded
-//! before the refused chunk until the stream watch stores the failure, so that
-//! what a member sees and what the facts and answers say never disagree.
+//! the one that receives the chunk reader (`view::Projector` does not). The
+//! stream is judged as its close will judge it, the ids other messages hold
+//! included ([`closing::judge_streams`], one read for every stream of the
+//! frame), at load: the projection itself is pure. Its status is always its
+//! row's: a stream the library refused shows what folded before the refused
+//! chunk until the stream watch stores the failure, so that what a member sees
+//! and what the facts and answers say never disagree.
 //!
 //! ENGINE GAP (br-service-engine v0.4.2): the chunk reader reads one stream per
 //! call. A frame reads the streams of the `STREAMING` messages it renders
 //! concurrently, one read each (typically one per thread); the engine would
 //! need a batched `ChunkReader::states`.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -40,12 +43,11 @@ use service_engine::session::WindowParams;
 use service_engine::visibility::Visibility;
 use service_engine::wire::Noun;
 use service_engine::{JsonScalar, KeyCeiling, Page};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::closing::turn_of;
+use super::closing;
 use super::content::Content;
-use super::draft::TurnDraft;
 use super::state::{Message, MessageAuthor, MessageState};
 use super::store::{self, MessageStore};
 use super::stream::{MessageStream, TurnContent};
@@ -324,11 +326,41 @@ impl MessagesWindow {
     }
 }
 
-/// What a frame loads: the messages, and the folded stream of each one that
-/// streams.
+/// What a frame loads: the messages, and the content of each one that streams,
+/// its stream judged under it.
 pub struct MessageFacts {
     rows: BTreeMap<Uuid, MessageState>,
-    streams: BTreeMap<Uuid, TurnDraft>,
+    streams: BTreeMap<Uuid, Content>,
+}
+
+/// The facts of a frame: the messages (five statements), the streams of those
+/// that stream, read concurrently, and one read of the identities to judge
+/// them.
+async fn read_facts(
+    conn: &mut PgConnection,
+    chunks: &service_engine::accumulator::ChunkReader,
+    keys: &[Uuid],
+) -> Result<MessageFacts, EngineError> {
+    let rows: BTreeMap<Uuid, MessageState> = MessageStore::read_many(&mut *conn, keys)
+        .await?
+        .into_iter()
+        .collect();
+    let streaming: Vec<&MessageState> = rows
+        .values()
+        .filter(|message| message.status == MessageStatus::Streaming)
+        .collect();
+    let drafts = try_join_all(streaming.iter().map(|message| async move {
+        Ok::<_, EngineError>(chunks.state::<TurnContent>(&message.id).await?.state)
+    }))
+    .await?;
+    let pairs: Vec<_> = streaming.iter().copied().zip(drafts.iter()).collect();
+    let judged = closing::judge_streams(conn, &pairs).await?;
+    let streams = streaming
+        .iter()
+        .zip(judged)
+        .map(|(message, judged)| Ok((message.id, judged.content()?)))
+        .collect::<Result<_, EngineError>>()?;
+    Ok(MessageFacts { rows, streams })
 }
 
 static NOUNS: [NounName; 2] = [<Message as Noun>::NAME, <MessageStream as Noun>::NAME];
@@ -342,25 +374,18 @@ impl MessagesView {
     /// The view of one message, its stream's content included: the one
     /// projection of every entry point.
     ///
-    /// A streaming message shows what its stream holds, judged under the
-    /// message as its close will judge it: drafts included.
+    /// A streaming message shows what its stream holds (`streamed`), judged
+    /// under the message as its close will judge it: drafts included.
     pub fn render(
         message: &MessageState,
-        stream: Option<&TurnDraft>,
+        streamed: Option<&Content>,
         principal: &ThreadsPrincipal,
     ) -> Result<MessageView, EngineError> {
-        let streamed = match (message.status, stream) {
-            (MessageStatus::Streaming, Some(stream)) => {
-                let (turn, agent, author) = turn_of(message)?;
-                Some(
-                    stream
-                        .judge(turn, agent, &author, &HashSet::new())?
-                        .content()?,
-                )
-            }
-            _ => None,
+        let shown = match (message.status, streamed) {
+            (MessageStatus::Streaming, Some(streamed)) => streamed,
+            _ => &message.content,
         };
-        let entries = entry_views(message, streamed.as_ref().unwrap_or(&message.content))?;
+        let entries = entry_views(message, shown)?;
         Ok(MessageView {
             id: message.id,
             thread_id: message.thread_id,
@@ -457,30 +482,13 @@ impl Projector for MessagesView {
         Box::pin(async move {
             let keys = scope.keys().to_vec();
             let chunks = scope.chunks();
-            let rows = match scope {
+            match scope {
                 LoadScope::Bulk { pg, .. } => {
                     let mut conn = pg.acquire().await.map_err(EngineError::from)?;
-                    MessageStore::read_many(&mut conn, &keys).await?
+                    read_facts(&mut conn, chunks, &keys).await
                 }
-                LoadScope::PerPrincipal { conn, .. } => {
-                    MessageStore::read_many(conn, &keys).await?
-                }
-            };
-            let rows: BTreeMap<Uuid, MessageState> = rows.into_iter().collect();
-            let streaming: Vec<Uuid> = rows
-                .values()
-                .filter(|message| message.status == MessageStatus::Streaming)
-                .map(|message| message.id)
-                .collect();
-            let streams = try_join_all(streaming.iter().map(|id| async move {
-                let held = chunks.state::<TurnContent>(id).await?;
-                Ok::<_, EngineError>((*id, held.state))
-            }))
-            .await?;
-            Ok(MessageFacts {
-                rows,
-                streams: streams.into_iter().collect(),
-            })
+                LoadScope::PerPrincipal { conn, .. } => read_facts(conn, chunks, &keys).await,
+            }
         })
     }
 
@@ -547,7 +555,7 @@ mod tests {
 
     use super::*;
     use crate::principal::tests::{active, person};
-    use crate::slices::message::draft;
+    use crate::slices::message::draft::{self, TurnDraft};
     use crate::slices::message::state::tests::message_in;
 
     fn literal<T: EnumType + PartialEq + Copy>(shown: T) -> &'static str {
@@ -604,7 +612,13 @@ mod tests {
                 serde_json::to_value(chunk).unwrap(),
             );
         }
-        let view = MessagesView::render(&message, Some(&stream), &member).unwrap();
+        let (turn, agent, author) = closing::turn_of(&message).unwrap();
+        let streamed = stream
+            .judge(turn, agent, &author, &std::collections::HashSet::new())
+            .unwrap()
+            .content()
+            .unwrap();
+        let view = MessagesView::render(&message, Some(&streamed), &member).unwrap();
         assert_eq!(view.status, MessageStatusView::Streaming);
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].kind, "model_response");

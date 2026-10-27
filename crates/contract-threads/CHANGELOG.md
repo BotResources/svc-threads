@@ -53,9 +53,18 @@ turn of the `br-llm-messages` 2.0 model (schema `br-llm-messages/5`).
   the library's `ErrorCode` under their own names (`MessageInvalidError::
   of_library`), `library_refusal`, and Threads' own codes (`turn_id_mismatch`,
   `not_a_user_turn`, `annotation_in_user_message`, `annotation_entry_unknown`,
-  `author_mismatch`, `closure_not_completed`, `parent_not_in_thread`,
-  `chunk_unreadable`, `response_in_entry_chunk`, `response_still_producing`,
-  `closure_by_writer`, `streaming_v1`, `v1_not_convertible`).
+  `author_mismatch`, `human_message_in_ai_message`, `nul_character`,
+  `parent_not_in_thread`, `chunk_unreadable`, `response_in_entry_chunk`,
+  `response_still_producing`, `closure_by_writer`, `streaming_v1`,
+  `v1_not_convertible`).
+- `StoreMessageV2`: a whole AI turn closed by its writer is stored as the
+  library accepts it, its closure giving the message's status (`completed`,
+  `budget_exhausted` → `COMPLETED`; `cancelled` → `CANCELLED`; `failed`,
+  `interrupted` → `FAILED`). An id of an entry, a block or a citation that is
+  not a UUIDv7 is `ID_NOT_UUIDV7`; a reference that is none stays
+  `MESSAGE_INVALID`. The documented refusal orders of `CompleteMessage`,
+  `FailMessage` and `CancelMessage` name `ARTIFACT_NOT_READY` before
+  `STREAM_MISMATCH`.
 
 ### Removed
 

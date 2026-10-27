@@ -13,31 +13,40 @@
 //! annotation. Each AI turn carries its agent's id and name, each human message
 //! its user's id; the current display names come with the members.
 //!
-//! What the agent context holds is read in one statement
-//! ([`CONTEXT_QUERY`]): the active branch's recursive walk joined to the entry
-//! and block rows — whole for the input turns and the named agent's own turns;
-//! for another agent's AI turn, only its turn row, its model responses' entry
-//! rows (their payload not read: the library accepts them without their ending
-//! on this door) with their root text, image and structured content blocks,
-//! and its incoming entries. A message still streaming holds its content in the
-//! accumulated lane: its stream is judged as its close will judge it, its
+//! What the agent context holds is read in one statement ([`context_query`]):
+//! the active branch's recursive walk joined to the entry and block rows —
+//! whole for the input turns and the named agent's own turns; for another
+//! agent's AI turn, only its turn row, its model responses' entry rows (their
+//! payload blanked where they are selected, never read: the library accepts
+//! them without their ending on this door) with their root plain blocks (the
+//! library's text, image and structured content), and its incoming entries —
+//! the library's kinds, bound from the library. A message still streaming holds
+//! its content in the accumulated lane: the streams of the branch are read
+//! concurrently and judged as their close will judge them, the ids other
+//! messages hold included ([`judge_streams`], one read for every stream), their
 //! complete entries reduced the same way, and the response another agent is
 //! still producing given to the library as pending.
+//!
+//! A message that closes between the statement and the read of its stream
+//! leaves a sealed — empty — stream behind a turn row still `STREAMING`: the
+//! statuses of the streaming messages are read again once their streams are
+//! read, and the branch is read once more when one closed meanwhile.
 //!
 //! ENGINE GAP (br-service-engine v0.4.2): a GraphQL resolver reaches the
 //! accumulated lane only through a projector's load, so the context is a raw
 //! projector ([`ContextView`]) read once through `Query::fetch_window`; and the
-//! chunk reader reads one stream per call (one per message still streaming on
-//! the branch, typically none or one).
+//! chunk reader reads one stream per call: the streams of a branch (typically
+//! none or one) are read concurrently, one read each. The engine would need a
+//! batched `ChunkReader::states(&[key])`.
 
 use std::collections::{BTreeSet, HashSet};
 
 use contract_threads::MessageStatus;
 use contract_threads::llm::{
     AgentId, BlockRecord, ContentBlockKind, ConversationId, EntryRecord, PendingResponse,
-    RecordSet, ResponseDraft, Turn, TurnEntryKind, TurnKind, TurnRecord,
+    RecordSet, RepresentationState, ResponseDraft, Turn, TurnEntryKind, TurnKind, TurnRecord,
 };
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, try_join_all};
 use serde::{Deserialize, Serialize};
 use service_engine::error::EngineError;
 use service_engine::impact::ForeignKey;
@@ -54,7 +63,7 @@ use uuid::Uuid;
 use crate::access;
 use crate::fault::{corrupt, encode};
 use crate::principal::ThreadsPrincipal;
-use crate::slices::message::closing::turn_of;
+use crate::slices::message::closing::judge_streams;
 use crate::slices::message::state::{MessageAuthor, MessageState};
 use crate::slices::message::store::{block_of_row, entry_of_row};
 use crate::slices::message::stream::TurnContent;
@@ -201,20 +210,42 @@ impl Projector for ContextView {
     }
 }
 
-/// The incoming entry kinds of the library: what an agent context keeps whole
-/// of another agent's turn.
-const INCOMING_KINDS: &str = "'human_message', 'agent_request', 'agent_mail', \
-     'request_accepted', 'queue_position', 'task_started', 'task_completed', 'task_failed'";
+/// The library's incoming entry kinds (`$3`): what an agent context keeps
+/// whole of another agent's turn.
+fn incoming_kinds() -> Vec<&'static str> {
+    TurnEntryKind::ALL
+        .iter()
+        .filter(|kind| kind.is_incoming())
+        .map(|kind| kind.as_str())
+        .collect()
+}
+
+/// The library's plain block kinds (`$4`): what an agent context keeps of
+/// another agent's response, at its root.
+fn plain_kinds() -> Vec<&'static str> {
+    ContentBlockKind::ALL
+        .iter()
+        .filter(|kind| kind.is_plain())
+        .map(|kind| kind.as_str())
+        .collect()
+}
 
 /// The one statement of a context: the active branch of `$1` read for the
-/// agent `$2` (none: whole). Its rows are turn, entry and block rows in one
-/// column set, ordered by the branch from its first message, then by their
-/// place in their message. A message is left out when deleted, cancelled, or
-/// failed before its first entry; an interrupted response is never read; of
-/// another agent's AI turn, only its model responses (payload not read) with
-/// their root text, image and structured content blocks, and its incoming
-/// entries are.
+/// agent `$2` (none: whole), the library's incoming entry kinds `$3` and plain
+/// block kinds `$4`. Its rows are turn, entry and block rows in one column set,
+/// ordered by the branch from its first message, then by their place in their
+/// message. A message is left out when deleted, cancelled, or failed before
+/// its first entry; an interrupted response is never read; of another agent's
+/// AI turn, only its model responses (their payload blanked in the `entry`
+/// selection itself, so never read) with their root plain blocks, and its
+/// incoming entries are.
 pub fn context_query() -> String {
+    let response = TurnEntryKind::ModelResponse.as_str();
+    let closure = TurnEntryKind::TurnClosure.as_str();
+    let complete = RepresentationState::Complete.as_str();
+    let ai_turn = TurnKind::AITurn.as_str();
+    let cancelled = MessageStatus::Cancelled.as_str();
+    let failed = MessageStatus::Failed.as_str();
     format!(
         "WITH RECURSIVE tip AS ( \
              SELECT m.id FROM threads.message m WHERE m.thread_id = $1 \
@@ -228,18 +259,22 @@ pub fn context_query() -> String {
          ), turn AS ( \
              SELECT m.id, b.depth, m.status, m.turn_kind, m.author_user_id, m.author_agent_id, \
                     m.author_ai_name, m.observed_at, \
-                    (m.turn_kind = 'ai_turn' AND $2::uuid IS NOT NULL \
+                    (m.turn_kind = '{ai_turn}' AND $2::uuid IS NOT NULL \
                      AND m.author_agent_id <> $2) AS foreign_turn \
              FROM branch b JOIN threads.message m ON m.id = b.id \
-             WHERE NOT m.deleted AND m.status <> 'CANCELLED' \
-               AND (m.status <> 'FAILED' OR EXISTS ( \
+             WHERE NOT m.deleted AND m.status <> '{cancelled}' \
+               AND (m.status <> '{failed}' OR EXISTS ( \
                    SELECT 1 FROM threads.message_entry f \
-                   WHERE f.message_id = m.id AND f.kind <> 'turn_closure')) \
+                   WHERE f.message_id = m.id AND f.kind <> '{closure}')) \
          ), entry AS ( \
-             SELECT e.*, t.depth, t.foreign_turn FROM turn t \
-             JOIN threads.message_entry e ON e.message_id = t.id \
-             WHERE e.state = 'complete' \
-               AND (NOT t.foreign_turn OR e.kind = 'model_response' OR e.kind IN ({INCOMING_KINDS})) \
+             SELECT e.id, e.message_id, e.position, e.kind, e.state, e.sender_kind, \
+                    e.sender_id, e.author, e.observed_at, \
+                    CASE WHEN t.foreign_turn AND e.kind = '{response}' THEN '{{}}'::jsonb \
+                         ELSE e.payload END AS payload, \
+                    t.depth, t.foreign_turn \
+             FROM turn t JOIN threads.message_entry e ON e.message_id = t.id \
+             WHERE e.state = '{complete}' \
+               AND (NOT t.foreign_turn OR e.kind = '{response}' OR e.kind = ANY($3)) \
          ) \
          SELECT 0 AS row_kind, t.depth, t.id AS message_id, t.id, 0 AS position, \
                 t.status AS kind, t.turn_kind AS state, NULL::text AS sender_kind, \
@@ -249,19 +284,15 @@ pub fn context_query() -> String {
          FROM turn t \
          UNION ALL \
          SELECT 1, e.depth, e.message_id, e.id, e.position, e.kind, e.state, e.sender_kind, \
-                e.sender_id, e.author, e.observed_at, \
-                CASE WHEN e.foreign_turn AND e.kind = 'model_response' THEN '{{}}'::jsonb \
-                     ELSE e.payload END, \
-                NULL, NULL, NULL \
+                e.sender_id, e.author, e.observed_at, e.payload, NULL, NULL, NULL \
          FROM entry e \
          UNION ALL \
          SELECT 2, e.depth, b.message_id, b.id, b.position, b.kind, b.state, NULL, NULL, NULL, \
                 b.observed_at, b.payload, b.entry_id, b.parent_id, b.call_id \
          FROM entry e JOIN threads.entry_block b ON b.entry_id = e.id \
-         WHERE b.state = 'complete' \
-           AND (NOT e.foreign_turn OR e.kind <> 'model_response' \
-                OR (b.parent_id IS NULL \
-                    AND b.kind IN ('text', 'image', 'structured_content'))) \
+         WHERE b.state = '{complete}' \
+           AND (NOT e.foreign_turn OR e.kind <> '{response}' \
+                OR (b.parent_id IS NULL AND b.kind = ANY($4))) \
          ORDER BY 2 DESC, 1, 5"
     )
 }
@@ -270,6 +301,27 @@ pub fn context_query() -> String {
 struct BranchTurn {
     message: MessageState,
     foreign: bool,
+}
+
+/// What a context reads of the active branch: its turns, the records the agent
+/// context holds of them, and another agent's responses still produced.
+#[derive(Default)]
+struct Branch {
+    turns: Vec<BranchTurn>,
+    entries: Vec<EntryRecord>,
+    blocks: Vec<BlockRecord>,
+    drafts: Vec<ResponseDraft>,
+}
+
+impl Branch {
+    /// The messages of the branch that were still streaming when it was read.
+    fn streaming(&self) -> Vec<uuid::Uuid> {
+        self.turns
+            .iter()
+            .filter(|turn| turn.message.status == MessageStatus::Streaming)
+            .map(|turn| turn.message.id)
+            .collect()
+    }
 }
 
 /// The context of `key`, `None` for a thread that does not exist.
@@ -291,20 +343,86 @@ async fn read(
         .map(AgentId::from_uuid)
         .transpose()
         .map_err(corrupt)?;
+    let mut branch = read_branch(conn, chunks, key, agent).await?;
+    // A stream sealed between the statement and its read is empty: its message
+    // closed meanwhile, its rows now hold its content. Read once more.
+    if closed_meanwhile(conn, &branch.streaming()).await? {
+        branch = read_branch(conn, chunks, key, agent).await?;
+    }
+    let records = branch
+        .turns
+        .iter()
+        .map(|turn| turn.message.turn_record())
+        .collect::<Result<Vec<TurnRecord>, _>>()?;
+    let set = RecordSet::new()
+        .with_turns(records)
+        .with_entries(branch.entries)
+        .with_blocks(branch.blocks);
+    let conversation = ConversationId::from_uuid(key.thread).map_err(corrupt)?;
+    let read = match agent {
+        Some(agent) => {
+            let pending: Vec<PendingResponse<'_>> =
+                branch.drafts.iter().map(PendingResponse::from).collect();
+            let projected = set
+                .into_projected_thread_pending(conversation, agent, &pending)
+                .map_err(|error| store_fault(key.thread, &error))?;
+            Read::Projected(
+                serde_json::to_value(&projected)
+                    .map_err(|source| encode("an agent context", source))?,
+            )
+        }
+        None => {
+            let whole = set
+                .into_conversation(conversation)
+                .map_err(|error| store_fault(key.thread, &error))?;
+            Read::Whole(
+                serde_json::to_value(&whole).map_err(|source| encode("a conversation", source))?,
+            )
+        }
+    };
+    Ok(Some(context_of(&thread, read)))
+}
+
+/// Whether one of `streaming` is no longer `STREAMING`. One statement.
+async fn closed_meanwhile(
+    conn: &mut PgConnection,
+    streaming: &[uuid::Uuid],
+) -> Result<bool, EngineError> {
+    if streaming.is_empty() {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM threads.message WHERE id = ANY($1) AND status <> $2)",
+    )
+    .bind(streaming)
+    .bind(MessageStatus::Streaming.as_str())
+    .fetch_one(conn)
+    .await?)
+}
+
+/// The active branch as the agent context holds it: the one statement, then
+/// the streams of the messages still streaming, read concurrently and judged
+/// together.
+async fn read_branch(
+    conn: &mut PgConnection,
+    chunks: &service_engine::accumulator::ChunkReader,
+    key: &ContextKey,
+    agent: Option<AgentId>,
+) -> Result<Branch, EngineError> {
     let rows = sqlx::query(&context_query())
         .bind(key.thread)
         .bind(key.agent)
+        .bind(incoming_kinds())
+        .bind(plain_kinds())
         .fetch_all(&mut *conn)
         .await?;
-    let mut turns: Vec<BranchTurn> = Vec::new();
-    let mut entries: Vec<EntryRecord> = Vec::new();
-    let mut blocks: Vec<BlockRecord> = Vec::new();
+    let mut branch = Branch::default();
     for row in &rows {
         let row_kind: i32 = row.try_get("row_kind")?;
         match row_kind {
-            0 => turns.push(turn_of_row(row, agent)?),
-            1 => entries.push(entry_of_row(row)?),
-            2 => blocks.push(block_of_row(row)?),
+            0 => branch.turns.push(turn_of_row(row, agent)?),
+            1 => branch.entries.push(entry_of_row(row)?),
+            2 => branch.blocks.push(block_of_row(row)?),
             other => {
                 return Err(corrupt(UnknownStoredValue {
                     column: "context.row_kind",
@@ -314,14 +432,25 @@ async fn read(
         }
     }
     // A message still streaming holds its turn in the accumulated lane.
-    let mut drafts: Vec<ResponseDraft> = Vec::new();
-    for turn in turns
+    let streaming: Vec<&BranchTurn> = branch
+        .turns
         .iter()
         .filter(|turn| turn.message.status == MessageStatus::Streaming)
-    {
-        let stream = chunks.state::<TurnContent>(&turn.message.id).await?.state;
-        let (id, agent_id, author) = turn_of(&turn.message)?;
-        let judged = stream.judge(id, agent_id, &author, &HashSet::new())?;
+        .collect();
+    let streams = try_join_all(streaming.iter().map(|turn| async move {
+        Ok::<_, EngineError>(chunks.state::<TurnContent>(&turn.message.id).await?.state)
+    }))
+    .await?;
+    let pairs: Vec<_> = streaming
+        .iter()
+        .map(|turn| &turn.message)
+        .zip(streams.iter())
+        .collect();
+    let judged = judge_streams(conn, &pairs).await?;
+    let mut entries = Vec::new();
+    let mut blocks = Vec::new();
+    let mut drafts = Vec::new();
+    for (turn, judged) in streaming.iter().zip(judged) {
         let set = RecordSet::from_turn(&Turn::AITurn(judged.turn.clone())).map_err(corrupt)?;
         let kept: HashSet<_> = set
             .entries()
@@ -349,37 +478,10 @@ async fn read(
             drafts.push(producing.clone());
         }
     }
-    let records = turns
-        .iter()
-        .map(|turn| turn.message.turn_record())
-        .collect::<Result<Vec<TurnRecord>, _>>()?;
-    let set = RecordSet::new()
-        .with_turns(records)
-        .with_entries(entries)
-        .with_blocks(blocks);
-    let conversation = ConversationId::from_uuid(key.thread).map_err(corrupt)?;
-    let read = match agent {
-        Some(agent) => {
-            let pending: Vec<PendingResponse<'_>> =
-                drafts.iter().map(PendingResponse::from).collect();
-            let projected = set
-                .into_projected_thread_pending(conversation, agent, &pending)
-                .map_err(|error| store_fault(key.thread, &error))?;
-            Read::Projected(
-                serde_json::to_value(&projected)
-                    .map_err(|source| encode("an agent context", source))?,
-            )
-        }
-        None => {
-            let whole = set
-                .into_conversation(conversation)
-                .map_err(|error| store_fault(key.thread, &error))?;
-            Read::Whole(
-                serde_json::to_value(&whole).map_err(|source| encode("a conversation", source))?,
-            )
-        }
-    };
-    Ok(Some(context_of(&thread, read)))
+    branch.entries.extend(entries);
+    branch.blocks.extend(blocks);
+    branch.drafts = drafts;
+    Ok(branch)
 }
 
 /// What a context keeps of another agent's turn: its model responses and its
@@ -389,21 +491,14 @@ fn reduced_entry(kind: TurnEntryKind) -> bool {
 }
 
 /// What a context keeps of the blocks of another agent's entry: a model
-/// response's root text, image and structured content; an incoming entry's
-/// blocks whole.
+/// response's root plain blocks (text, image, structured content); an incoming
+/// entry's blocks whole.
 fn reduced_block(set: &RecordSet, block: &BlockRecord) -> bool {
     let of_response = set
         .entries()
         .iter()
         .any(|entry| entry.id() == block.entry() && entry.kind() == TurnEntryKind::ModelResponse);
-    !of_response
-        || (block.parent().is_none()
-            && matches!(
-                block.kind(),
-                ContentBlockKind::Text
-                    | ContentBlockKind::Image
-                    | ContentBlockKind::StructuredContent
-            ))
+    !of_response || (block.parent().is_none() && block.kind().is_plain())
 }
 
 /// A conversation Threads stored that the library cannot read back: a fault of
@@ -523,6 +618,26 @@ mod tests {
             query.contains("'{}'::jsonb"),
             "another agent's response payload is not read"
         );
+        let selection = &query[query.find("entry AS").unwrap()..query.find("SELECT 0").unwrap()];
+        assert!(
+            !selection.contains("e.*") && selection.contains("CASE WHEN t.foreign_turn"),
+            "the entry selection names its columns and blanks a foreign payload itself"
+        );
+        assert!(query.contains("ANY($3)") && query.contains("ANY($4)"));
+    }
+
+    #[test]
+    fn the_kinds_the_context_keeps_are_the_librarys() {
+        let incoming = incoming_kinds();
+        assert_eq!(
+            incoming.len(),
+            TurnEntryKind::ALL
+                .iter()
+                .filter(|k| k.is_incoming())
+                .count()
+        );
+        assert!(incoming.contains(&"agent_mail") && !incoming.contains(&"model_response"));
+        assert_eq!(plain_kinds(), ["text", "image", "structured_content"]);
     }
 
     #[test]

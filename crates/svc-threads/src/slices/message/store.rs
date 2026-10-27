@@ -429,6 +429,23 @@ pub async fn held_ids(
     .await?)
 }
 
+/// Of `ids`, those a message already declared, each with the message that
+/// declared it: one statement, whatever the number of ids.
+pub async fn holders(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid)>, EngineError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT id, message_id FROM threads.message_identity WHERE id = ANY($1) ORDER BY id",
+    )
+    .bind(ids)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The thread a message belongs to, if it exists.
 pub async fn thread_of(
     conn: &mut PgConnection,

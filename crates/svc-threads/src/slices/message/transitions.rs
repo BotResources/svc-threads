@@ -141,7 +141,9 @@ pub struct NewMessage {
     pub parent_message_id: Option<Uuid>,
     pub author: MessageAuthor,
     pub job_id: Option<Uuid>,
-    /// `COMPLETED` with its content, or `STREAMING` with none yet.
+    /// `STREAMING` with no content yet; given whole, `COMPLETED` — or, for a
+    /// whole AI turn its writer closed, the status its closure gives
+    /// (`CANCELLED`, `FAILED`) — with its content.
     pub status: MessageStatus,
     pub turn_kind: TurnKind,
     pub observed_at: Option<ObservedAt>,
@@ -175,7 +177,7 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
         },
         meta,
     )?)];
-    if new.status == MessageStatus::Completed {
+    if new.status != MessageStatus::Streaming {
         pending.push(MessageChange::ContentWritten);
     }
     Ok(MessageState {
@@ -372,6 +374,51 @@ mod tests {
                 .unwrap_err()
                 .code,
             ReasonCode::NotTheAuthor
+        );
+    }
+
+    #[test]
+    fn a_message_given_whole_writes_its_content_whatever_its_closure_and_a_stream_none() {
+        let author = Uuid::now_v7();
+        let id = Uuid::now_v7();
+        let stored = |status: MessageStatus| {
+            store(
+                NewMessage {
+                    id,
+                    thread_id: Uuid::now_v7(),
+                    parent_message_id: None,
+                    author: MessageAuthor::User {
+                        user_id: author,
+                        display_name: None,
+                        in_roster: true,
+                    },
+                    job_id: None,
+                    status,
+                    turn_kind: TurnKind::InputTurn,
+                    observed_at: None,
+                    content: said(id, author, "words"),
+                    created_at: Utc::now(),
+                },
+                &meta(),
+            )
+            .unwrap()
+        };
+        for status in [
+            MessageStatus::Completed,
+            MessageStatus::Cancelled,
+            MessageStatus::Failed,
+        ] {
+            assert!(
+                stored(status)
+                    .pending
+                    .contains(&MessageChange::ContentWritten),
+                "{status:?}"
+            );
+        }
+        assert!(
+            !stored(MessageStatus::Streaming)
+                .pending
+                .contains(&MessageChange::ContentWritten)
         );
     }
 

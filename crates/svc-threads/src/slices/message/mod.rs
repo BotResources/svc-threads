@@ -7,7 +7,8 @@
 //!   and its unsaved changes;
 //! - `content`: a message's content as the library's records, and the
 //!   refusals of the library's rules;
-//! - `derived`: the ids Threads derives (a closure, a conversion's entries);
+//! - `derived`: the ids a conversion from the 0.4 form derives (its entries,
+//!   the closure of an upgraded message);
 //! - `draft`: a stream's turn as its chunks fold, judged and closed;
 //! - `stream`: the `turn_content` accumulator of `STREAMING_threads`;
 //! - `v1`: the 0.4 form, converted to the 2.0 model;

@@ -21,14 +21,18 @@
 //!
 //! Closing the turn is Threads': a closure pushed on the stream is refused,
 //! and the closure a close appends is a new entry under a UUIDv7 Threads
-//! mints.
+//! mints when it closes — freshly, never derived (only the upgrade derives the
+//! closure of a message it converts, [`super::derived`]). A completion its
+//! redelivery judges again mints another: the first one's transaction either
+//! committed (the redelivery is answered from the command's claim) or rolled
+//! back with its closure.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
-    AITurn, AgentId, Author, BlockId, ClosureReason, ContentBlock, DeltaOp, DeltaOutcome,
-    DraftPhase, EntryId, Error, InterruptionReason, PlainBlock, RecordSet, ResponseDelta,
-    ResponseDraft, TurnClosure, TurnEntry, TurnEntryKind, TurnId,
+    AITurn, AgentId, Author, BlockId, ClosureReason, DeltaOp, DeltaOutcome, DraftPhase, EntryId,
+    Error, InterruptionReason, RecordSet, ResponseDelta, ResponseDraft, Turn, TurnClosure,
+    TurnEntry, TurnEntryKind, TurnId,
 };
 use contract_threads::{Chunk, MessageInvalidError, MessageStatus, PlacedAnnotation};
 use service_engine::error::EngineError;
@@ -115,12 +119,21 @@ pub fn fold(draft: &mut TurnDraft, seq: u64, raw: serde_json::Value) {
     if draft.refusal.is_some() {
         return;
     }
-    let folded = match serde_json::from_value::<Chunk>(raw) {
-        Ok(chunk) => draft.fold_chunk(chunk),
-        Err(_) => Err(StreamRefusal::threads(
-            MessageInvalidError::ChunkUnreadable,
+    // U+0000 the library accepts in a text, Postgres cannot keep: refused at
+    // the chunk, so that the stream never holds what its close could not store.
+    let folded = if super::content::holds_nul(&raw) {
+        Err(StreamRefusal::threads(
+            MessageInvalidError::NulCharacter,
             None,
-        )),
+        ))
+    } else {
+        match serde_json::from_value::<Chunk>(raw) {
+            Ok(chunk) => draft.fold_chunk(chunk),
+            Err(_) => Err(StreamRefusal::threads(
+                MessageInvalidError::ChunkUnreadable,
+                None,
+            )),
+        }
     };
     if let Err(mut refusal) = folded {
         refusal.seq = Some(seq);
@@ -305,8 +318,9 @@ impl TurnDraft {
         };
         let mut seen: HashSet<Uuid> = HashSet::from([turn.as_uuid()]);
         let mut entries: HashSet<Uuid> = HashSet::new();
+        let declared = self.declared_by_entry()?;
         for item in &self.items {
-            let ids = item_ids(item)?;
+            let ids = item_ids(item, &declared)?;
             if let Some(clash) = ids.iter().find(|id| seen.contains(id) || held.contains(id)) {
                 judged.cut(StreamRefusal {
                     seq: None,
@@ -373,10 +387,28 @@ impl TurnDraft {
     }
 }
 
-/// The ids an item declares.
-fn item_ids(item: &Item) -> Result<Vec<Uuid>, EngineError> {
+impl TurnDraft {
+    /// The ids each entry the stream holds whole declares, read off the
+    /// library's records of the probe turn — which every such entry joined
+    /// when it folded.
+    fn declared_by_entry(&self) -> Result<HashMap<Uuid, Vec<Uuid>>, EngineError> {
+        let Some(probe) = &self.probe else {
+            return Ok(HashMap::new());
+        };
+        let content =
+            Content::of_turn(&Turn::AITurn(probe.clone()), Vec::new()).map_err(corrupt)?;
+        Ok(content.identities_by_entry())
+    }
+}
+
+/// The ids an item declares: an entry's as its records declare them, a
+/// response's as its draft snapshot's records do, an annotation its own.
+fn item_ids(item: &Item, declared: &HashMap<Uuid, Vec<Uuid>>) -> Result<Vec<Uuid>, EngineError> {
     Ok(match item {
-        Item::Entry { entry, .. } => entry_ids(entry),
+        Item::Entry { entry, .. } => declared
+            .get(&entry.id().as_uuid())
+            .cloned()
+            .unwrap_or_else(|| vec![entry.id().as_uuid()]),
         Item::Response(draft) => {
             let snapshot = draft.to_snapshot().map_err(corrupt)?;
             let mut ids = vec![snapshot.entry().id().as_uuid()];
@@ -388,43 +420,6 @@ fn item_ids(item: &Item) -> Result<Vec<Uuid>, EngineError> {
         }
         Item::Annotation(placed) => vec![placed.annotation.id],
     })
-}
-
-/// The ids an entry declares: its own, its blocks' (children included) and its
-/// text blocks' citations'.
-pub fn entry_ids(entry: &TurnEntry) -> Vec<Uuid> {
-    let mut ids = vec![entry.id().as_uuid()];
-    match entry {
-        TurnEntry::HumanMessage(message) => plain_ids(message.content(), &mut ids),
-        TurnEntry::AgentRequest(request) => plain_ids(request.content(), &mut ids),
-        TurnEntry::AgentMail(mail) => plain_ids(mail.content(), &mut ids),
-        TurnEntry::ModelResponse(response) => {
-            for block in response.blocks() {
-                ids.push(block.id().as_uuid());
-                if let ContentBlock::Text(text) = block {
-                    ids.extend(text.citations().iter().map(|c| c.id().as_uuid()));
-                }
-                plain_ids(block.children(), &mut ids);
-            }
-        }
-        TurnEntry::RuntimeToolResults(results) => {
-            for result in results.results() {
-                ids.push(result.id().as_uuid());
-                plain_ids(result.content(), &mut ids);
-            }
-        }
-        _ => {}
-    }
-    ids
-}
-
-fn plain_ids(blocks: &[PlainBlock], ids: &mut Vec<Uuid>) {
-    for block in blocks {
-        ids.push(block.id().as_uuid());
-        if let PlainBlock::Text(text) = block {
-            ids.extend(text.citations().iter().map(|c| c.id().as_uuid()));
-        }
-    }
 }
 
 /// An item of a judged stream.
@@ -542,7 +537,8 @@ pub struct Closed {
 
 /// Closes a judged stream: a response still produced is interrupted (kept for
 /// members, never sent to a runner), then the turn is closed with the
-/// library's closure under its derived id. A completion the library accepts —
+/// library's closure, a new entry under a UUIDv7 Threads mints. A completion
+/// the library accepts —
 /// nothing refused, no response still produced, the turn closable completed
 /// (no tool call without its result) — is `COMPLETED`; a cancel `CANCELLED`;
 /// anything else `FAILED`, closed failed — or interrupted, when its writer

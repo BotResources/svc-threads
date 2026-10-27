@@ -8,7 +8,8 @@
 -- The 0.4 decomposition — `message_item`, and `message_block` under it — is
 -- kept as it is, read only by the upgrade that runs at boot before the service
 -- is ready (src/slices/message/upgrade.rs): it converts each message once, one
--- transaction per message, and marks it `content_schema = 'br-llm-messages/5'`.
+-- transaction per batch of messages, and marks it
+-- `content_schema = 'br-llm-messages/5'`.
 -- Threads never writes the 0.4 tables otherwise — but deleting or editing a
 -- message removes its 0.4 rows, so that no previous content survives anywhere.
 -- A later version drops them.
@@ -16,7 +17,10 @@
 -- ── the turn row ────────────────────────────────────────────────────────────
 -- `content_schema` is the conversion's marker: every message stored by 0.4 or
 -- earlier is `br-llm-messages/3` until the upgrade converts it; a message
--- stored by 0.5 names `br-llm-messages/5` (no default: the writer says which).
+-- stored by 0.5 names `br-llm-messages/5`, written explicitly. The default
+-- stays `br-llm-messages/3` on purpose: a 0.4 pod brought back after this
+-- migration (a rollback) inserts without naming the column, so the messages it
+-- stores are marked for conversion, and the next 0.5 boot converts them.
 -- `turn_kind` is the library's turn kind, known once converted. The AI author
 -- is the library's agent id (`author_agent_id`, a UUIDv7) and its name
 -- (`author_ai_name`); `author_ai_id`, the 0.4 free-text id, is read by the
@@ -28,7 +32,6 @@ ALTER TABLE threads.message
     ADD COLUMN turn_kind text CHECK (turn_kind IN ('input_turn', 'ai_turn')),
     ADD COLUMN author_agent_id uuid,
     ADD COLUMN observed_at text;
-ALTER TABLE threads.message ALTER COLUMN content_schema DROP DEFAULT;
 
 ALTER TABLE threads.message DROP CONSTRAINT message_one_author;
 ALTER TABLE threads.message ADD CONSTRAINT message_one_author CHECK (

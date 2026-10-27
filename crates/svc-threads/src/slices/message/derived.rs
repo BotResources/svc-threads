@@ -1,7 +1,11 @@
-//! The ids Threads derives itself — a turn's closure, and the entries and
-//! blocks a conversion from the 0.4 form creates — deterministically, so that a
-//! command received again, or an upgrade resumed after a crash, derives the same
-//! id and never a second object.
+//! The ids a conversion from the 0.4 form creates — the entries and blocks the
+//! 0.4 form had no id for (`message.store` v1, and the upgrade), and the
+//! closure of a message the upgrade converts — derived deterministically, so
+//! that a v1 command received again, or an upgrade resumed after a crash,
+//! derives the same id and never a second object.
+//!
+//! Only a conversion derives. The closure a close or a whole AI turn gets at
+//! runtime is minted fresh ([`super::draft::close`]).
 //!
 //! A derived id is a UUIDv7 that keeps its source id's 48-bit timestamp (so it
 //! sorts beside its source) and takes its random bits from
@@ -10,7 +14,7 @@
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// The role of the closure of a message's turn.
+/// The role of the closure of a message the upgrade converts.
 pub const CLOSURE: &str = "closure";
 /// The role of the human message of a 0.4 user message.
 pub const HUMAN_MESSAGE: &str = "human_message";

@@ -19,7 +19,11 @@
 //! The library content travels as the library's JSON ([`LibraryJson`]): what
 //! the library refuses is refused `MESSAGE_INVALID`, its `error` param naming
 //! the library's error code (with `object_id` and `location` when the library
-//! gives them); an id the library refuses as no UUIDv7 is `ID_NOT_UUIDV7`.
+//! gives them); an id the caller supplies for a new object — a message's, an
+//! entry's, a block's, a citation's, an annotation's — that is no UUIDv7 is
+//! `ID_NOT_UUIDV7`, while a reference that is none (an agent, a human, the call
+//! a result answers) is the library's `MESSAGE_INVALID`. A string holding
+//! U+0000 is `MESSAGE_INVALID` (`nul_character`): the store cannot keep it.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -54,12 +58,21 @@ macro_rules! message_command {
 /// Refused, in this order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
 /// `THREAD_RESOLVED`, `ID_NOT_UUIDV7` (the message id), `KEY_REUSED` (the
 /// message id), `MESSAGE_NOT_FOUND` (a parent nobody stored),
-/// `MESSAGE_INVALID` (what the library refuses — an agent id that is not a
-/// UUIDv7 included — a parent of another thread, a user message holding an
-/// annotation, …), `ID_NOT_UUIDV7` (an annotation's id), `NOT_A_MEMBER` (a
-/// human outside the thread), `KEY_REUSED` (an id of the turn or of its
-/// annotations another message already holds), `ARTIFACT_NOT_READY`. No fact
-/// carries content.
+/// `MESSAGE_INVALID` (a parent of another thread; an agent id that is not a
+/// UUIDv7), then the content: `ID_NOT_UUIDV7` (an id of an entry, a block or a
+/// citation that is not a UUIDv7), `MESSAGE_INVALID` (what else the library
+/// refuses, a user message holding an annotation, an AI message holding a
+/// human message, a string holding U+0000, …), `ID_NOT_UUIDV7` (an
+/// annotation's id), `NOT_A_MEMBER` (a human outside the thread), `KEY_REUSED`
+/// (an annotation's id its turn names too, or an id of the turn or of its
+/// annotations another message already holds), `ARTIFACT_NOT_READY`. An id
+/// the turn names twice is the library's `MESSAGE_INVALID` (`reused_identity`).
+/// No fact carries content.
+///
+/// A whole AI turn is stored as the library accepts it: closed by its writer,
+/// its closure gives the message's status (`completed` or `budget_exhausted`
+/// → `COMPLETED`, `cancelled` → `CANCELLED`, `failed` or `interrupted` →
+/// `FAILED`); holding no closure, Threads closes it completed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreMessageV2 {
     /// The message's id, which is its turn's id.
@@ -135,10 +148,10 @@ pub struct AiTurn {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum AiDelivery {
-    /// The whole turn — an AI turn of `agent_id` under `author_name`, closed
-    /// completed (Threads closes it so when it holds no closure), or an input
-    /// turn holding incoming entries — and its annotations, each after one of
-    /// its entries.
+    /// The whole turn — an AI turn of `agent_id` under `author_name`, its
+    /// closure giving the message's status (Threads closes it completed when
+    /// it holds none), or an input turn holding incoming entries other than a
+    /// human message — and its annotations, each after one of its entries.
     #[serde(rename = "COMPLETED")]
     Completed {
         turn: LibraryJson,
@@ -163,11 +176,22 @@ pub struct StreamSeal {
 }
 
 /// `message.complete` — a `STREAMING` message sealed at the declared last
-/// chunk, its turn closed completed. Refused `MESSAGE_NOT_FOUND`,
-/// `MESSAGE_NOT_STREAMING`, `STREAM_MISMATCH` (the writer may send a corrected
-/// completion). A stream the library cannot complete — a response still
-/// producing, a tool call without its result — fails the message instead
-/// (confirmed `FAILED`).
+/// chunk, its turn closed completed. A stream the library cannot complete — a
+/// response still producing, a tool call without its result — fails the
+/// message instead (confirmed `FAILED`).
+///
+/// Refused, in this order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN` (a resolved
+/// thread still completes a message already `STREAMING`), `MESSAGE_NOT_FOUND`,
+/// `MESSAGE_NOT_STREAMING`, `ARTIFACT_NOT_READY` (an `ARTIFACT` annotation the
+/// stream holds when the completion is judged names an artifact that is not
+/// ready: judged before the seal, so that the refusal changes nothing — a
+/// stream also holding chunks past `last_seq` is therefore refused
+/// `ARTIFACT_NOT_READY` before `STREAM_MISMATCH`), `STREAM_MISMATCH` (the
+/// digest, a chunk past `last_seq`, a chunk missing below it once the
+/// ingestion lag is waited out; the writer may send a corrected completion).
+/// An annotation the seal reaches but the stream did not yet hold when the
+/// completion was judged is judged again on the command's redelivery: a
+/// completion never drops an `ARTIFACT` annotation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompleteMessage {
     pub message_id: Uuid,
@@ -183,8 +207,10 @@ message_command!(CompleteMessage, "complete");
 /// members, never to a runner); a tool call without a result stays
 /// unanswered, as the library allows on an abnormal closure. With a seal, the
 /// stream is sealed at its last chunk after the digest check; without, on what
-/// arrived. Refused `MESSAGE_NOT_FOUND`, `MESSAGE_NOT_STREAMING`,
-/// `STREAM_MISMATCH`.
+/// arrived. Refused, in this order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+/// `MESSAGE_NOT_FOUND`, `MESSAGE_NOT_STREAMING`, `STREAM_MISMATCH`. Closing on
+/// what arrived, a fail or a cancel cannot be refused for an artifact: an
+/// `ARTIFACT` annotation whose artifact is not ready is not kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailMessage {
     pub message_id: Uuid,

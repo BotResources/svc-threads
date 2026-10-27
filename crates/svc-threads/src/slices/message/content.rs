@@ -8,7 +8,7 @@
 //! every turn before it is stored; its refusals are answered with its own error
 //! code ([`refusal_of`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
     BlockRecord, ContentBlockKind, EntryRecord, Error, ErrorCode, RecordSet, RepresentationState,
@@ -101,6 +101,24 @@ impl Content {
         ids
     }
 
+    /// The ids each entry declares, by entry: its own, its blocks' (children
+    /// included) and their citations' — read off the library's records, so
+    /// that what counts as an id is the library's decomposition.
+    pub fn identities_by_entry(&self) -> HashMap<Uuid, Vec<Uuid>> {
+        let mut by_entry: HashMap<Uuid, Vec<Uuid>> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.id().as_uuid(), vec![entry.id().as_uuid()]))
+            .collect();
+        for block in &self.blocks {
+            if let Some(ids) = by_entry.get_mut(&block.entry().as_uuid()) {
+                ids.push(block.id().as_uuid());
+                ids.extend(citation_ids(block));
+            }
+        }
+        by_entry
+    }
+
     /// The artifacts its `ARTIFACT` annotations name.
     pub fn artifacts(&self) -> Vec<Uuid> {
         self.annotations
@@ -161,9 +179,9 @@ pub fn refusal_of(error: &Error) -> Refusal {
     }
 }
 
-/// The refusal of content whose ids the caller minted for new objects: an id
-/// the library refuses as no UUIDv7 is `ID_NOT_UUIDV7`, anything else the
-/// library's `MESSAGE_INVALID`.
+/// The refusal of content whose every id the caller minted for a new object —
+/// plain blocks, which reference nothing: an id the library refuses as no
+/// UUIDv7 is `ID_NOT_UUIDV7`, anything else the library's `MESSAGE_INVALID`.
 pub fn minted_refusal_of(error: &Error) -> Refusal {
     match error.code() {
         ErrorCode::InvalidIdentity => {
@@ -179,6 +197,87 @@ pub fn minted_refusal_of(error: &Error) -> Refusal {
         }
         _ => refusal_of(error),
     }
+}
+
+/// The refusal of a turn or an entry the library refuses, read from the
+/// caller's JSON: an id it declares for a new object (an entry's, a block's, a
+/// citation's) that is no UUIDv7 is `ID_NOT_UUIDV7`; a reference that is none
+/// (an agent, a human, the call a result answers), and anything else, the
+/// library's `MESSAGE_INVALID`.
+///
+/// The library names the id it refused, not its role, and its location stops
+/// at the entry. The role is read off the library's own decomposition: in a
+/// copy of the JSON every UUID the library would refuse is replaced by a fresh
+/// UUIDv7 stand-in, and `declared` answers the ids the copy declares, as the
+/// library reads it; the refused id is a declared one when its stand-in is. A
+/// malformed id the library cannot name, or a copy it still refuses for
+/// another reason, cannot be placed: the library's `MESSAGE_INVALID`.
+pub fn declared_refusal_of(
+    json: &serde_json::Value,
+    error: &Error,
+    declared: impl FnOnce(serde_json::Value) -> Option<Vec<Uuid>>,
+) -> Refusal {
+    let (ErrorCode::InvalidIdentity, Some(refused)) = (error.code(), error.object_id()) else {
+        return refusal_of(error);
+    };
+    let mut probe = json.clone();
+    let mut stand_ins = HashMap::new();
+    stand_in_refused_ids(&mut probe, &mut stand_ins);
+    let Some(stand_in) = stand_ins.get(&refused).copied() else {
+        return refusal_of(error);
+    };
+    match declared(probe) {
+        Some(ids) if ids.contains(&stand_in) => minted_refusal_of(error),
+        _ => refusal_of(error),
+    }
+}
+
+/// Replaces, in place, every string of `value` that is a UUID the library
+/// refuses as an id (not a UUIDv7) by a fresh UUIDv7, the same one for every
+/// occurrence of an id.
+fn stand_in_refused_ids(value: &mut serde_json::Value, stand_ins: &mut HashMap<Uuid, Uuid>) {
+    match value {
+        serde_json::Value::String(text) => {
+            if let Ok(id) = Uuid::try_parse(text)
+                && contract_threads::llm::BlockId::from_uuid(id).is_err()
+            {
+                let stand_in = *stand_ins.entry(id).or_insert_with(Uuid::now_v7);
+                *text = stand_in.to_string();
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                stand_in_refused_ids(item, stand_ins);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                stand_in_refused_ids(item, stand_ins);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a string of `value`, or a key, holds U+0000.
+pub fn holds_nul(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => text.contains('\0'),
+        serde_json::Value::Array(items) => items.iter().any(holds_nul),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, item)| key.contains('\0') || holds_nul(item)),
+        _ => false,
+    }
+}
+
+/// `MESSAGE_INVALID` (`nul_character`) when what a command carries holds
+/// U+0000. The library accepts it in a text, but Postgres refuses it in `text`
+/// and `jsonb`: the store would fail on a terminal fault and the command stay
+/// unanswered, so it is refused when judged.
+pub fn nul_refusal<T: serde::Serialize>(carried: &T) -> Option<Refusal> {
+    let value = serde_json::to_value(carried).ok()?;
+    holds_nul(&value).then(|| invalid(MessageInvalidError::NulCharacter))
 }
 
 #[cfg(test)]

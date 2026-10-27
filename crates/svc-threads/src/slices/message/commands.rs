@@ -16,10 +16,16 @@
 //!
 //! A store judges, in this order: the thread, the message id (`ID_NOT_UUIDV7`,
 //! `KEY_REUSED`), its parent (`MESSAGE_NOT_FOUND`, `MESSAGE_INVALID`), its
-//! content by the library's rules (`MESSAGE_INVALID`, the library's code) and
-//! its annotations (`ID_NOT_UUIDV7`, `MESSAGE_INVALID`), its author
-//! (`NOT_A_MEMBER`), the ids its content declares (`KEY_REUSED`), the artifacts
-//! it names (`ARTIFACT_NOT_READY`).
+//! content — a string holding U+0000, then the library's rules: an id it
+//! declares for a new object that is no UUIDv7 `ID_NOT_UUIDV7`, anything else
+//! `MESSAGE_INVALID` under the library's code — and its annotations
+//! (`ID_NOT_UUIDV7`, `MESSAGE_INVALID`), its author (`NOT_A_MEMBER`), the ids
+//! its content declares (`KEY_REUSED`), the artifacts it names
+//! (`ARTIFACT_NOT_READY`).
+//!
+//! A `message.store` v1 gets the answers Threads 0.4 gave it: its user author
+//! is judged a member before its content, and its block ids are judged as 0.4
+//! judged them (each a UUIDv7, each named once) before anything is converted.
 
 use std::collections::HashSet;
 
@@ -27,8 +33,9 @@ use contract_threads::llm::{
     AgentId, Author, ClosureReason, IncomingEntry, InputTurn, ObservedAt, Turn, TurnId, TurnKind,
 };
 use contract_threads::{
-    AiDelivery, CancelMessage, CompleteMessage, DeleteMessage, FailMessage, MessageInvalidError,
-    MessageStatus, MessageTurn, PlacedAnnotation, ReasonCode, StoreMessageV2, StreamSeal, v1,
+    AiDelivery, CancelMessage, CompleteMessage, DeleteMessage, FailMessage, LibraryJson,
+    MessageInvalidError, MessageStatus, MessageTurn, PlacedAnnotation, ReasonCode, StoreMessageV2,
+    StreamSeal, v1,
 };
 use futures_util::future::BoxFuture;
 use service_engine::SealHash;
@@ -37,7 +44,9 @@ use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Reaction;
 use uuid::Uuid;
 
-use super::content::{Content, first_repeated, invalid, refusal_of};
+use super::content::{
+    Content, declared_refusal_of, first_repeated, invalid, nul_refusal, refusal_of,
+};
 use super::draft::{self, CloseKind, TurnDraft};
 use super::state::{Message, MessageAuthor, MessageState};
 use super::stream::TurnContent;
@@ -203,26 +212,50 @@ fn judge_annotations(content: &Content, annotations: &[PlacedAnnotation]) -> Res
     Ok(())
 }
 
-/// A whole AI turn ends completed: Threads closes it when it holds no closure,
-/// and a closure it holds must be the completed one.
-fn closed_completed(turn: Turn) -> Result<Turn, Refusal> {
+/// The status of a message whose writer closed its turn: Threads stores every
+/// closure the library accepts, and gives none a behaviour of its own.
+fn status_of_closure(closure: &ClosureReason) -> Result<MessageStatus, Refusal> {
+    Ok(match closure {
+        ClosureReason::Completed { .. } | ClosureReason::BudgetExhausted { .. } => {
+            MessageStatus::Completed
+        }
+        ClosureReason::Cancelled { .. } => MessageStatus::Cancelled,
+        ClosureReason::Failed { .. } | ClosureReason::Interrupted { .. } => MessageStatus::Failed,
+        // `ClosureReason` is non-exhaustive: a closure of a later library has
+        // no status in this build.
+        _ => return Err(invalid(MessageInvalidError::LibraryRefusal)),
+    })
+}
+
+/// A whole turn as it is stored, and its message's status: an AI turn its
+/// writer closed keeps its closure, which gives the status; one holding none
+/// is closed completed by Threads, under a UUIDv7 it mints. An input turn has
+/// no closure: `COMPLETED`.
+fn closed_whole(turn: Turn) -> Result<(Turn, MessageStatus), Refusal> {
     let Turn::AITurn(mut ai) = turn else {
-        return Ok(turn);
+        return Ok((turn, MessageStatus::Completed));
     };
-    if ai.is_closed() {
-        return match ai.state().closure() {
-            Some(ClosureReason::Completed { .. }) => Ok(Turn::AITurn(ai)),
-            _ => Err(invalid(MessageInvalidError::ClosureNotCompleted)),
-        };
+    if let Some(closure) = ai.state().closure() {
+        let status = status_of_closure(closure)?;
+        return Ok((Turn::AITurn(ai), status));
     }
     let closure = draft::closure_entry(Uuid::now_v7(), ClosureReason::completed())
         .map_err(|_| invalid(MessageInvalidError::LibraryRefusal))?;
     ai.push_entry(closure).map_err(|error| refusal_of(&error))?;
-    Ok(Turn::AITurn(ai))
+    Ok((Turn::AITurn(ai), MessageStatus::Completed))
+}
+
+/// The ids a turn read from `json` declares, its own included: what
+/// [`declared_refusal_of`] places a refused id among.
+fn declared_by_turn(json: serde_json::Value) -> Option<Vec<Uuid>> {
+    let turn = LibraryJson::from_json(json).to_turn().ok()?;
+    let mut ids = Content::of_turn(&turn, Vec::new()).ok()?.identities();
+    ids.push(turn.id().as_uuid());
+    Some(ids)
 }
 
 fn whole(
-    turn: Turn,
+    (turn, status): (Turn, MessageStatus),
     author: MessageAuthor,
     annotations: Vec<PlacedAnnotation>,
 ) -> Result<Judged, Refusal> {
@@ -230,7 +263,7 @@ fn whole(
     judge_annotations(&content, &annotations)?;
     Ok(Judged {
         author,
-        status: MessageStatus::Completed,
+        status,
         turn_kind: turn.kind(),
         observed_at: turn.observed_at().cloned(),
         content: Content {
@@ -242,32 +275,68 @@ fn whole(
 
 /// A user's human message, as the input turn under the message's id holding
 /// it.
-fn user_turn(
-    message_id: Uuid,
-    entry: &contract_threads::LibraryJson,
-) -> Result<(Turn, Uuid), Refusal> {
-    let entry = entry.to_entry().map_err(|error| refusal_of(&error))?;
-    let entry = IncomingEntry::try_from(entry).map_err(|error| refusal_of(&error))?;
+fn user_turn(message_id: Uuid, entry: &LibraryJson) -> Result<(Turn, Uuid), Refusal> {
+    let turn = TurnId::from_uuid(message_id).map_err(|error| refusal_of(&error))?;
+    let parsed = entry.to_entry().map_err(|error| {
+        declared_refusal_of(entry.as_json(), &error, |probe| {
+            let entry = IncomingEntry::try_from(LibraryJson::from_json(probe).to_entry().ok()?);
+            let turn = InputTurn::new(turn, vec![entry.ok()?]).ok()?;
+            Some(
+                Content::of_turn(&turn.into(), Vec::new())
+                    .ok()?
+                    .identities(),
+            )
+        })
+    })?;
+    let entry = IncomingEntry::try_from(parsed).map_err(|error| refusal_of(&error))?;
     let IncomingEntry::HumanMessage(human) = &entry else {
         return Err(invalid(MessageInvalidError::NotAUserTurn));
     };
     let author = human.human().as_uuid();
-    let turn = TurnId::from_uuid(message_id).map_err(|error| refusal_of(&error))?;
     let turn = InputTurn::new(turn, vec![entry]).map_err(|error| refusal_of(&error))?;
     Ok((turn.into(), author))
 }
 
+/// Whether `turn` is an input turn holding a human message: a human message
+/// travels in a user message only, whose author is judged a member.
+fn holds_a_human_message(turn: &Turn) -> bool {
+    match turn {
+        Turn::InputTurn(input) => input
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, IncomingEntry::HumanMessage(_))),
+        _ => false,
+    }
+}
+
+/// What a store carries that the store cannot keep: a string holding U+0000.
+fn unstorable(body: &StoreBody<'_>) -> Option<Refusal> {
+    match body {
+        StoreBody::V2(message) => nul_refusal(message),
+        StoreBody::V1(message) => nul_refusal(message),
+    }
+}
+
 fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refusal> {
+    // An AI message's agent id is judged first; the rest of what a store
+    // carries is content, judged by the library once it holds no U+0000.
+    let storable = || unstorable(body).map_or(Ok(()), Err);
     match body {
         StoreBody::V2(MessageTurn::User(user)) => {
+            storable()?;
             let (turn, human) = user_turn(message_id, &user.entry)?;
             if !user.annotations.is_empty() {
                 return Err(invalid(MessageInvalidError::AnnotationInUserMessage));
             }
-            whole(turn, user_author(human), Vec::new())
+            whole(
+                (turn, MessageStatus::Completed),
+                user_author(human),
+                Vec::new(),
+            )
         }
         StoreBody::V2(MessageTurn::Ai(ai)) => {
             let (agent, author) = ai_author(ai.agent_id, &ai.author_name)?;
+            storable()?;
             let message_author = MessageAuthor::Agent {
                 agent,
                 name: author.clone(),
@@ -281,7 +350,9 @@ fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refus
                     content: Content::default(),
                 }),
                 AiDelivery::Completed { turn, annotations } => {
-                    let turn = turn.to_turn().map_err(|error| refusal_of(&error))?;
+                    let turn = turn.to_turn().map_err(|error| {
+                        declared_refusal_of(turn.as_json(), &error, declared_by_turn)
+                    })?;
                     if turn.id().as_uuid() != message_id {
                         return Err(invalid(MessageInvalidError::TurnIdMismatch));
                     }
@@ -290,34 +361,41 @@ fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refus
                     {
                         return Err(invalid(MessageInvalidError::AuthorMismatch));
                     }
-                    whole(
-                        closed_completed(turn)?,
-                        message_author,
-                        annotations.to_vec(),
-                    )
+                    if holds_a_human_message(&turn) {
+                        return Err(invalid(MessageInvalidError::HumanMessageInAiMessage));
+                    }
+                    whole(closed_whole(turn)?, message_author, annotations.to_vec())
                 }
             }
         }
         StoreBody::V1(v1::NewMessage::User(user)) => {
+            storable()?;
+            super::v1::precheck(&user.blocks)?;
             let (turn, annotations) =
                 super::v1::user_turn(message_id, user.author_user_id, &user.blocks)
                     .map_err(|fault| fault.refusal())?;
             if !annotations.is_empty() {
                 return Err(invalid(MessageInvalidError::AnnotationInUserMessage));
             }
-            whole(turn.into(), user_author(user.author_user_id), Vec::new())
+            whole(
+                (turn.into(), MessageStatus::Completed),
+                user_author(user.author_user_id),
+                Vec::new(),
+            )
         }
         StoreBody::V1(v1::NewMessage::Ai(ai)) => {
             let agent = AgentId::parse(&ai.author.id).map_err(|error| refusal_of(&error))?;
             let (agent, author) = ai_author(agent.as_uuid(), &ai.author.name)?;
+            storable()?;
             match &ai.delivery {
                 v1::AiDelivery::Streaming => Err(invalid(MessageInvalidError::StreamingV1)),
                 v1::AiDelivery::Completed { items } => {
+                    super::v1::precheck(super::v1::item_blocks(items))?;
                     let (turn, annotations) =
                         super::v1::ai_turn(message_id, agent, author.clone(), items)
                             .map_err(|fault| fault.refusal())?;
                     whole(
-                        closed_completed(turn.into())?,
+                        closed_whole(turn.into())?,
                         MessageAuthor::Agent {
                             agent,
                             name: author,
@@ -345,13 +423,14 @@ async fn store_message(
 ) -> Result<Verdict, Fault> {
     let mut thread = refuse_on!(writable_thread(cx, command.thread_id).await?);
     refuse_on!(crate::command::minted("message_id", command.message_id));
-    let held_message = cx
-        .load::<MessageState>(&command.message_id)
+    // Every message declares its own id among its identities: one read tells
+    // a message stored under the id, or an id another message's content holds.
+    // Two stores racing past it meet at the identity's key: the loser's
+    // unique violation is retried (`Fault::disposition`), and its redelivery
+    // reads the winner's id here.
+    let held_message = !store::held_ids(cx.connection(), &[command.message_id], None)
         .await?
-        .is_some()
-        || !store::held_ids(cx.connection(), &[command.message_id], None)
-            .await?
-            .is_empty();
+        .is_empty();
     if held_message || command.message_id == thread.id {
         return Ok(Err(
             Refusal::new(ReasonCode::KeyReused).with("message_id", command.message_id)
@@ -372,6 +451,15 @@ async fn store_message(
             }
             Some(_) => {}
         }
+    }
+    // A v1 user message names its author outside its content: judged a member
+    // first, as Threads 0.4 judged it.
+    if let StoreBody::V1(v1::NewMessage::User(user)) = &command.body
+        && !thread.is_member(user.author_user_id)
+    {
+        return Ok(Err(
+            Refusal::new(ReasonCode::NotAMember).with("user_id", user.author_user_id)
+        ));
     }
     let judged = refuse_on!(judge_content(command.message_id, &command.body));
     if let MessageAuthor::User { user_id, .. } = &judged.author
@@ -629,8 +717,9 @@ async fn delete_message(
 #[cfg(test)]
 mod tests {
     use contract_threads::llm::{
-        AITurn, BlockId, ContentBlock, EntryId, HumanId, HumanMessage, ModelResponse, PlainBlock,
-        ResponseEnding, ResponseMetadata, TextBlock, TurnEntry,
+        AITurn, AgentMail, BlockId, ContentBlock, ConversationId, EntryId, HumanId, HumanMessage,
+        ModelResponse, PlainBlock, ResponseEnding, ResponseMetadata, TextBlock, TurnEntry,
+        TurnEntryKind,
     };
     use contract_threads::{AiTurn, Annotation, AnnotationBody, LibraryJson, Notice, UserTurn};
 
@@ -791,6 +880,240 @@ mod tests {
         let refused = judge(message, &MessageTurn::Ai(ai)).unwrap_err();
         assert_eq!(refused.code, ReasonCode::MessageInvalid);
         assert_eq!(error_of(&refused), "invalid_identity");
+    }
+
+    fn closed_by(message: Uuid, agent: AgentId, closure: ClosureReason) -> MessageTurn {
+        let MessageTurn::Ai(ai) = answered(
+            message,
+            agent,
+            EntryId::from_uuid(v7()).unwrap(),
+            Vec::new(),
+        ) else {
+            unreachable!()
+        };
+        let AiDelivery::Completed { turn, .. } = ai.delivery else {
+            unreachable!()
+        };
+        let Turn::AITurn(mut turn) = turn.to_turn().unwrap() else {
+            unreachable!()
+        };
+        turn.push_entry(draft::closure_entry(v7(), closure).unwrap())
+            .unwrap();
+        MessageTurn::Ai(AiTurn {
+            agent_id: agent.as_uuid(),
+            author_name: "Analyst".into(),
+            delivery: AiDelivery::Completed {
+                turn: LibraryJson::of(&Turn::AITurn(turn)).unwrap(),
+                annotations: Vec::new(),
+            },
+        })
+    }
+
+    #[test]
+    fn a_whole_ai_turn_its_writer_closed_is_stored_under_the_status_its_closure_gives() {
+        let message = v7();
+        let agent = AgentId::from_uuid(v7()).unwrap();
+        for (closure, status) in [
+            (ClosureReason::completed(), MessageStatus::Completed),
+            (ClosureReason::budget_exhausted(), MessageStatus::Completed),
+            (ClosureReason::cancelled(), MessageStatus::Cancelled),
+            (
+                ClosureReason::failed("tool_down").unwrap(),
+                MessageStatus::Failed,
+            ),
+            (ClosureReason::interrupted(), MessageStatus::Failed),
+        ] {
+            let judged = judge(message, &closed_by(message, agent, closure.clone()))
+                .unwrap_or_else(|refused| panic!("{closure:?} refused: {refused:?}"));
+            assert_eq!(judged.status, status, "{closure:?}");
+            let kinds: Vec<_> = judged.content.entries.iter().map(|e| e.kind()).collect();
+            assert_eq!(
+                kinds,
+                [TurnEntryKind::ModelResponse, TurnEntryKind::TurnClosure],
+                "the writer's closure is kept, none added: {closure:?}"
+            );
+        }
+    }
+
+    fn input_turn_of_an_ai(message: Uuid, entry: TurnEntry) -> MessageTurn {
+        let incoming = IncomingEntry::try_from(entry).unwrap();
+        let turn: Turn = InputTurn::new(TurnId::from_uuid(message).unwrap(), vec![incoming])
+            .unwrap()
+            .into();
+        MessageTurn::Ai(AiTurn {
+            agent_id: v7(),
+            author_name: "Analyst".into(),
+            delivery: AiDelivery::Completed {
+                turn: LibraryJson::of(&turn).unwrap(),
+                annotations: Vec::new(),
+            },
+        })
+    }
+
+    #[test]
+    fn an_ai_message_holding_a_human_message_is_invalid_and_other_incoming_entries_are_stored() {
+        let message = v7();
+        let human = HumanMessage::new(
+            EntryId::from_uuid(v7()).unwrap(),
+            HumanId::from_uuid(v7()).unwrap(),
+            vec![PlainBlock::try_from(text("hi")).unwrap()],
+        )
+        .unwrap();
+        let refused = judge(message, &input_turn_of_an_ai(message, human.into())).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::MessageInvalid);
+        assert_eq!(error_of(&refused), "human_message_in_ai_message");
+        let mail = AgentMail::new(
+            EntryId::from_uuid(v7()).unwrap(),
+            AgentId::from_uuid(v7()).unwrap(),
+            Author::new("Critic").unwrap(),
+            ConversationId::from_uuid(v7()).unwrap(),
+            vec![PlainBlock::try_from(text("a note")).unwrap()],
+        )
+        .unwrap();
+        let judged = judge(message, &input_turn_of_an_ai(message, mail.into())).unwrap();
+        assert_eq!(judged.turn_kind, TurnKind::InputTurn);
+        assert_eq!(judged.status, MessageStatus::Completed);
+    }
+
+    /// A user message whose JSON has `id` swapped for a UUIDv4 at `path`.
+    fn user_with_v4_at(human: Uuid, path: &[&str]) -> (MessageTurn, Uuid) {
+        let mut entry = human_entry(human, v7()).into_json();
+        let v4 = Uuid::new_v4();
+        let mut at = &mut entry;
+        for step in path {
+            at = match step.parse::<usize>() {
+                Ok(index) => &mut at[index],
+                Err(_) => &mut at[*step],
+            };
+        }
+        *at = serde_json::Value::String(v4.to_string());
+        let turn = MessageTurn::User(UserTurn {
+            entry: LibraryJson::from_json(entry),
+            annotations: Vec::new(),
+        });
+        (turn, v4)
+    }
+
+    #[test]
+    fn an_id_declared_for_a_new_object_that_is_no_uuidv7_is_id_not_uuidv7_and_a_reference_is_invalid()
+     {
+        let (message, human) = (v7(), v7());
+        for path in [&["id"][..], &["content", "0", "id"][..]] {
+            let (turn, v4) = user_with_v4_at(human, path);
+            let refused = judge(message, &turn).unwrap_err();
+            assert_eq!(refused.code, ReasonCode::IdNotUuidV7, "{path:?}");
+            assert_eq!(refused.params["id"], serde_json::json!(v4), "{path:?}");
+        }
+        let (turn, _) = user_with_v4_at(human, &["human"]);
+        let refused = judge(message, &turn).unwrap_err();
+        assert_eq!(
+            refused.code,
+            ReasonCode::MessageInvalid,
+            "a human is a reference"
+        );
+        assert_eq!(error_of(&refused), "invalid_identity");
+
+        let agent = AgentId::from_uuid(v7()).unwrap();
+        let MessageTurn::Ai(ai) = answered(
+            message,
+            agent,
+            EntryId::from_uuid(v7()).unwrap(),
+            Vec::new(),
+        ) else {
+            unreachable!()
+        };
+        let AiDelivery::Completed { turn, .. } = &ai.delivery else {
+            unreachable!()
+        };
+        let swapped = |path: &[&str]| {
+            let mut json = turn.as_json().clone();
+            let mut at = &mut json;
+            for step in path {
+                at = match step.parse::<usize>() {
+                    Ok(index) => &mut at[index],
+                    Err(_) => &mut at[*step],
+                };
+            }
+            *at = serde_json::Value::String(Uuid::new_v4().to_string());
+            MessageTurn::Ai(AiTurn {
+                delivery: AiDelivery::Completed {
+                    turn: LibraryJson::from_json(json),
+                    annotations: Vec::new(),
+                },
+                ..ai.clone()
+            })
+        };
+        let refused = judge(message, &swapped(&["entries", "0", "id"])).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7, "an entry id");
+        let refused =
+            judge(message, &swapped(&["entries", "0", "content", "0", "id"])).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7, "a block id");
+        let refused = judge(message, &swapped(&["agent"])).unwrap_err();
+        assert_eq!(
+            refused.code,
+            ReasonCode::MessageInvalid,
+            "the turn's agent is a reference"
+        );
+    }
+
+    #[test]
+    fn a_store_carrying_nul_is_invalid_before_the_library_reads_it() {
+        let (message, human) = (v7(), v7());
+        let said = HumanMessage::new(
+            EntryId::from_uuid(v7()).unwrap(),
+            HumanId::from_uuid(human).unwrap(),
+            vec![PlainBlock::try_from(text("a\u{0}b")).unwrap()],
+        )
+        .unwrap();
+        let turn = MessageTurn::User(UserTurn {
+            entry: LibraryJson::of(&TurnEntry::from(said)).unwrap(),
+            annotations: Vec::new(),
+        });
+        let refused = judge(message, &turn).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::MessageInvalid);
+        assert_eq!(error_of(&refused), "nul_character");
+    }
+
+    #[test]
+    fn a_v1_message_meets_the_0_4_judgement_of_its_block_ids_before_it_is_converted() {
+        let block = |id: Uuid| -> v1::Block {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "kind": "TEXT", "content": { "type": "text", "text": "hi" }
+            }))
+            .unwrap()
+        };
+        let id = v7();
+        let user = |blocks: Vec<v1::Block>| {
+            v1::NewMessage::User(v1::UserMessage {
+                author_user_id: v7(),
+                blocks,
+            })
+        };
+        let refused =
+            judge_content(v7(), &StoreBody::V1(&user(vec![block(id), block(id)]))).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::KeyReused);
+        assert_eq!(refused.params["block_id"], serde_json::json!(id));
+        let refused =
+            judge_content(v7(), &StoreBody::V1(&user(vec![block(Uuid::new_v4())]))).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7);
+        let ai = v1::NewMessage::Ai(v1::AiMessage {
+            author: v1::AiAuthor {
+                id: v7().to_string(),
+                name: "Analyst".into(),
+            },
+            delivery: v1::AiDelivery::Completed {
+                items: vec![v1::Item::Step(v1::StepItem {
+                    stop_reason: serde_json::json!({ "type": "end_turn" }),
+                    usage: None,
+                    model: None,
+                    blocks: vec![block(Uuid::new_v4())],
+                })],
+            },
+        });
+        assert_eq!(
+            judge_content(v7(), &StoreBody::V1(&ai)).unwrap_err().code,
+            ReasonCode::IdNotUuidV7
+        );
     }
 
     #[test]

@@ -65,9 +65,28 @@ pub async fn run() -> Result<(), EngineError> {
 /// synchronous `register`, on the boot task (`block_in_place`), on its own
 /// pool of the app role. The engine would need a `BootPlan` step the boot awaits
 /// before it serves, or a service readiness input.
+///
+/// While it runs, nothing listens: `/livez` and `/readyz` both fail, so the
+/// rollout's startup probe must cover the upgrade (README, *Deploy*). With an
+/// asynchronous boot step the engine could keep `/livez` up and `/readyz` down
+/// for the duration instead.
+///
+/// `block_in_place` needs the multi-threaded Tokio runtime (`#[tokio::main]`'s
+/// default, which `main` uses): on a current-thread runtime it panics. The
+/// flavour is checked first, so that a runtime built otherwise fails the boot
+/// with a configuration error instead.
 fn upgrade_before_ready() -> Result<(), EngineError> {
     let url = std::env::var(DATABASE_URL)
         .map_err(|_| EngineError::Config(format!("{DATABASE_URL} must be set for serve")))?;
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|_| EngineError::Config("serve runs on a Tokio runtime".into()))?;
+    if runtime.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        return Err(EngineError::Config(
+            "serve needs the multi-threaded Tokio runtime: the upgrade blocks the boot task \
+             in place"
+                .into(),
+        ));
+    }
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             let pool = service_engine::connect_pool(&url).await?;

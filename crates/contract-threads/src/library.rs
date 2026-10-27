@@ -33,38 +33,42 @@ impl LibraryJson {
         self.0
     }
 
-    /// The text the library parses, so that its own JSON rules (an explicit
-    /// `null`, a duplicate key, a number out of range) are the ones applied.
-    fn text(&self) -> Result<String, Error> {
-        // Encoding a JSON value never fails; the library parses the text back
-        // and judges it.
-        Ok(serde_json::to_string(&self.0).unwrap_or_default())
+    /// The text the library parses: the library reads its values from text, so
+    /// that its own rules on the JSON it is given (an explicit `null`, a value
+    /// of the wrong shape) are the ones applied.
+    ///
+    /// What the library judges is the JSON value this crate decoded, not the
+    /// sender's bytes: a key the sender wrote twice is already collapsed to its
+    /// last value, and a number `serde_json` cannot hold already failed the
+    /// decode of the whole command or chunk. Encoding a JSON value never fails.
+    fn text(&self) -> String {
+        serde_json::to_string(&self.0).unwrap_or_default()
     }
 
     /// Read as a turn, by the library's rules.
     pub fn to_turn(&self) -> Result<Turn, Error> {
-        Turn::from_json(&self.text()?)
+        Turn::from_json(&self.text())
     }
 
     /// Read as an entry of an AI turn, by the library's rules.
     pub fn to_entry(&self) -> Result<TurnEntry, Error> {
-        TurnEntry::from_json(&self.text()?)
+        TurnEntry::from_json(&self.text())
     }
 
     /// Read as a plain block (text, image, structured content), by the
     /// library's rules.
     pub fn to_plain_block(&self) -> Result<PlainBlock, Error> {
-        PlainBlock::from_json(&self.text()?)
+        PlainBlock::from_json(&self.text())
     }
 
     /// Read as a response delta, by the library's rules.
     pub fn to_delta(&self) -> Result<ResponseDelta, Error> {
-        ResponseDelta::from_json(&self.text()?)
+        ResponseDelta::from_json(&self.text())
     }
 
     /// The library's opaque form of the JSON.
     pub fn to_opaque(&self) -> Result<OpaqueJson, Error> {
-        OpaqueJson::parse(&self.text()?)
+        OpaqueJson::parse(&self.text())
     }
 }
 

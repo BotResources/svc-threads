@@ -23,8 +23,12 @@
 //!   library's citation of a text block) and cannot be converted.
 //!
 //! The turn is returned open: closing it is the caller's.
+//!
+//! A command in the 0.4 form ([`precheck`]) first meets the judgement of its
+//! block ids Threads 0.4 made — each a UUIDv7, each named once — so that a
+//! sender still on 0.4 gets the answers it always got.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
     AITurn, AgentId, Author, BlockId, ContentBlock, EntryId, Error, ExternalId, HumanId,
@@ -34,7 +38,9 @@ use contract_threads::llm::{
     TextBlock, ThinkingBlock, ToolName, TurnEntry, TurnId, Usage,
 };
 use contract_threads::v1::{Block, BlockBody, Item};
-use contract_threads::{Annotation, AnnotationBody, MessageInvalidError, PlacedAnnotation};
+use contract_threads::{
+    Annotation, AnnotationBody, MessageInvalidError, PlacedAnnotation, ReasonCode,
+};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -93,6 +99,30 @@ impl From<Error> for V1Fault {
     fn from(error: Error) -> Self {
         Self::Library(error)
     }
+}
+
+// ── the 0.4 judgement of the ids ────────────────────────────────────────────
+
+/// The 0.4 judgement of a 0.4 message's block ids, in their order, before
+/// anything is converted: each a UUIDv7 (`ID_NOT_UUIDV7`, naming the
+/// `block_id` field), each named once (`KEY_REUSED`, naming the `block_id`).
+pub fn precheck<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Result<(), Refusal> {
+    let mut seen = HashSet::new();
+    for block in blocks {
+        crate::command::minted("block_id", block.id)?;
+        if !seen.insert(block.id) {
+            return Err(Refusal::new(ReasonCode::KeyReused).with("block_id", block.id));
+        }
+    }
+    Ok(())
+}
+
+/// The blocks of a 0.4 AI message's items, in order.
+pub fn item_blocks(items: &[Item]) -> impl Iterator<Item = &Block> {
+    items.iter().flat_map(|item| match item {
+        Item::Step(step) => step.blocks.iter(),
+        Item::ToolResults(results) => results.blocks.iter(),
+    })
 }
 
 // ── the JSON the 0.4 library wrote ──────────────────────────────────────────
@@ -567,6 +597,38 @@ mod tests {
         assert_eq!(
             ai_turn(Uuid::now_v7(), agent(), analyst(), &items).unwrap_err(),
             V1Fault::not_convertible(orphan.id)
+        );
+    }
+
+    #[test]
+    fn the_0_4_judgement_of_the_ids_comes_first_in_their_order() {
+        let text = || block("TEXT", json!({ "type": "text", "text": "hi" }));
+        let first = text();
+        assert_eq!(precheck([&first, &text()]), Ok(()));
+        let mut v4 = text();
+        v4.id = Uuid::new_v4();
+        let refused = precheck([&first, &v4, &first]).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7);
+        assert_eq!(refused.params["field"], "block_id");
+        assert_eq!(refused.params["id"], json!(v4.id));
+        let refused = precheck([&first, &text(), &first, &v4]).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::KeyReused);
+        assert_eq!(refused.params["block_id"], json!(first.id));
+        let items = vec![
+            Item::Step(StepItem {
+                stop_reason: json!({ "type": "end_turn" }),
+                usage: None,
+                model: None,
+                blocks: vec![first.clone()],
+            }),
+            Item::ToolResults(ToolResultsItem {
+                blocks: vec![first.clone()],
+            }),
+        ];
+        assert_eq!(
+            precheck(item_blocks(&items)).unwrap_err().code,
+            ReasonCode::KeyReused,
+            "an id is named once across the items"
         );
     }
 

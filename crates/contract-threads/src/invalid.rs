@@ -50,8 +50,13 @@ wire_enum! {
         AnnotationEntryUnknown => "annotation_entry_unknown",
         /// An AI turn whose agent or author is not the one the command names.
         AuthorMismatch => "author_mismatch",
-        /// A whole AI turn closed otherwise than completed.
-        ClosureNotCompleted => "closure_not_completed",
+        /// An AI message whose turn is an input turn holding a human message:
+        /// a human message travels in a user message only, whose author is a
+        /// member.
+        HumanMessageInAiMessage => "human_message_in_ai_message",
+        /// A string holding U+0000, which the store cannot keep (Postgres
+        /// refuses it in `text` and `jsonb`).
+        NulCharacter => "nul_character",
         /// The parent is not a message of the thread.
         ParentNotInThread => "parent_not_in_thread",
         // ── Threads' own rules on a stream ──────────────────────────────────

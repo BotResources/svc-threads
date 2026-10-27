@@ -25,7 +25,9 @@ use service_engine::pipeline::Reaction;
 use uuid::Uuid;
 
 use super::commands::{Verdict, message_of, refuse_on, writable_thread};
-use super::content::{Content, first_repeated, invalid, minted_refusal_of, refusal_of};
+use super::content::{
+    Content, first_repeated, invalid, minted_refusal_of, nul_refusal, refusal_of,
+};
 use super::state::{Message, MessageState};
 use super::{MessageCause, message_cause, store};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
@@ -102,11 +104,20 @@ impl ThreadsCommand for EditWire {
 }
 
 /// The new content of an edit: its plain blocks, read by the library — the 0.4
-/// `blocks` converted when `content` is absent. A block id the library refuses
-/// as no UUIDv7 is `ID_NOT_UUIDV7`.
+/// `blocks` converted when `content` is absent, after the 0.4 judgement of
+/// their ids ([`super::v1::precheck`]). A block id the library refuses as no
+/// UUIDv7 is `ID_NOT_UUIDV7`; a string holding U+0000 is `MESSAGE_INVALID`.
 fn new_blocks(command: &EditWire) -> Result<Vec<PlainBlock>, Refusal> {
+    let unstorable = match &command.blocks {
+        Some(blocks) if command.content.is_empty() => nul_refusal(blocks),
+        _ => nul_refusal(&command.content),
+    };
+    if let Some(refusal) = unstorable {
+        return Err(refusal);
+    }
     match (&command.blocks, command.content.is_empty()) {
         (Some(blocks), true) => {
+            super::v1::precheck(blocks)?;
             let (content, annotations) =
                 super::v1::user_content(blocks, Uuid::nil()).map_err(|fault| fault.refusal())?;
             if !annotations.is_empty() {
@@ -290,6 +301,43 @@ mod tests {
         let blocks = new_blocks(&edit).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(EditWire::coords(), contract_threads::EditMessage::coords());
+    }
+
+    #[test]
+    fn the_0_4_blocks_of_an_edit_meet_the_0_4_judgement_of_their_ids() {
+        let id = Uuid::now_v7();
+        let edit = |blocks: serde_json::Value| -> EditWire {
+            serde_json::from_value(serde_json::json!({
+                "message_id": Uuid::now_v7(),
+                "thread_id": Uuid::now_v7(),
+                "acting_user_id": Uuid::now_v7(),
+                "expected_version": 1,
+                "blocks": blocks,
+            }))
+            .unwrap()
+        };
+        let text = |id: Uuid| serde_json::json!({ "id": id, "kind": "TEXT", "content": { "type": "text", "text": "hi" } });
+        let twice = edit(serde_json::json!([text(id), text(id)]));
+        assert_eq!(new_blocks(&twice).unwrap_err().code, ReasonCode::KeyReused);
+        let v4 = edit(serde_json::json!([text(Uuid::new_v4())]));
+        let refused = new_blocks(&v4).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::IdNotUuidV7);
+        assert_eq!(refused.params["field"], "block_id");
+    }
+
+    #[test]
+    fn a_string_holding_nul_is_refused_before_the_library_reads_it() {
+        let edit: EditWire = serde_json::from_value(serde_json::json!({
+            "message_id": Uuid::now_v7(),
+            "thread_id": Uuid::now_v7(),
+            "acting_user_id": Uuid::now_v7(),
+            "expected_version": 1,
+            "content": [{ "type": "text", "id": Uuid::now_v7(), "text": "a\u{0}b" }]
+        }))
+        .unwrap();
+        let refused = new_blocks(&edit).unwrap_err();
+        assert_eq!(refused.code, ReasonCode::MessageInvalid);
+        assert_eq!(refused.params["error"], "nul_character");
     }
 
     #[test]

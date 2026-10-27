@@ -1,7 +1,7 @@
 use contract_threads::llm::{
     BlockStart, ClosureReason, ContentBlock, DeltaOp, Finalization, HumanId, HumanMessage,
-    ResponseEnding, ResponseMetadata, RuntimeToolResult, RuntimeToolResults, TextBlock, ToolName,
-    TurnEntry,
+    PlainBlock, ResponseEnding, ResponseMetadata, RuntimeToolResult, RuntimeToolResults, TextBlock,
+    ToolName, TurnEntry,
 };
 use contract_threads::{Annotation, AnnotationBody, ArtifactRef, LibraryJson};
 
@@ -445,4 +445,49 @@ fn a_cancel_keeps_the_results_of_one_call_of_two_and_answers_none_for_the_other(
         ]
     );
     assert_eq!(closure_of(&closed.content), "cancelled");
+}
+
+#[test]
+fn an_id_a_whole_entry_declares_deep_in_its_blocks_is_read_off_its_records() {
+    let mut writer = Writer::new();
+    let call = writer.calling_response();
+    let child = BlockId::from_uuid(v7()).unwrap();
+    let result = RuntimeToolResult::new(
+        BlockId::from_uuid(v7()).unwrap(),
+        call,
+        ToolName::new("search").unwrap(),
+        false,
+        vec![PlainBlock::try_from(TextBlock::new(child, "found").unwrap()).unwrap()],
+    )
+    .unwrap();
+    let results = RuntimeToolResults::new(EntryId::from_uuid(v7()).unwrap(), vec![result]).unwrap();
+    writer.entry(results.into());
+    assert_eq!(writer.draft.refusal(), None);
+    let judged = writer.judged_holding(&HashSet::from([child.as_uuid()]));
+    assert_eq!(judged.turn.entries().len(), 1, "cut at the results entry");
+    let refusal = judged.refusal.unwrap();
+    assert_eq!(refusal.code, "reused_identity");
+    assert_eq!(refusal.object_id, Some(child.as_uuid()));
+}
+
+#[test]
+fn a_chunk_holding_nul_is_refused_and_nothing_after_it_folds() {
+    let mut writer = Writer::new();
+    writer.text_response(&["fine"], Some(ResponseEnding::finished()));
+    let entry = EntryId::from_uuid(v7()).unwrap();
+    let block = BlockId::from_uuid(v7()).unwrap();
+    writer.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+    writer.delta(entry, DeltaOp::block_started(block, BlockStart::text()));
+    writer.delta(entry, DeltaOp::text_appended(block, "a\u{0}b"));
+    let refusal = writer.draft.refusal().cloned().unwrap();
+    assert_eq!(refusal.code, "nul_character");
+    assert_eq!(refusal.seq, Some(7), "the eighth chunk");
+    let closed = writer.closed(CloseKind::Complete);
+    assert_eq!(closed.status, MessageStatus::Failed);
+    assert!(
+        !serde_json::to_string(&closed.content.blocks)
+            .unwrap()
+            .contains("\\u0000"),
+        "what the close stores holds no U+0000"
+    );
 }
