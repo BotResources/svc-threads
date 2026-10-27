@@ -405,3 +405,44 @@ fn an_unreadable_chunk_is_refused() {
     fold(&mut draft, 0, serde_json::to_value(chunk).unwrap());
     assert_eq!(draft.refusal().unwrap().code, "invalid_content");
 }
+
+#[test]
+fn a_cancel_keeps_the_results_of_one_call_of_two_and_answers_none_for_the_other() {
+    let mut writer = Writer::new();
+    let entry = EntryId::from_uuid(v7()).unwrap();
+    writer.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+    let mut calls = Vec::new();
+    for query in [r#"{"q":"one"}"#, r#"{"q":"two"}"#] {
+        let call = BlockId::from_uuid(v7()).unwrap();
+        writer.delta(
+            entry,
+            DeltaOp::block_started(
+                call,
+                BlockStart::runtime_tool_call(Some(ToolName::new("search").unwrap()), None),
+            ),
+        );
+        writer.delta(entry, DeltaOp::json_appended(call, query));
+        writer.delta(
+            entry,
+            DeltaOp::block_finalized(call, Finalization::accumulated()),
+        );
+        calls.push(call);
+    }
+    writer.delta(
+        entry,
+        DeltaOp::response_completed(ResponseEnding::tool_use()),
+    );
+    writer.results(calls[0]);
+    assert_eq!(writer.draft.refusal(), None);
+    let closed = writer.closed(CloseKind::Cancel);
+    assert_eq!(closed.status, MessageStatus::Cancelled);
+    assert_eq!(
+        kinds(&closed.content),
+        [
+            ("model_response", "complete"),
+            ("runtime_tool_results", "complete"),
+            ("turn_closure", "complete")
+        ]
+    );
+    assert_eq!(closure_of(&closed.content), "cancelled");
+}

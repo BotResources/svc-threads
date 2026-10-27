@@ -56,6 +56,8 @@ struct CreatedFact<'a> {
     job_id: Option<Uuid>,
     status: &'static str,
     turn_kind: &'a str,
+    /// The entries of a message given whole (none for a stream opened).
+    entries: Vec<EntryFact>,
 }
 
 #[derive(Serialize)]
@@ -97,7 +99,16 @@ pub(super) fn block_shapes(content: &Content, entry: usize) -> Vec<BlockShape> {
 /// One `EntryAdded` per entry of `content` but its closure, whose fact is the
 /// message's end (`Completed`, `Failed`, `Cancelled`).
 fn entry_facts(content: &Content, meta: &FactMeta) -> Result<Vec<Fact>, EngineError> {
-    let mut facts = Vec::new();
+    entry_shapes(content)
+        .into_iter()
+        .map(|shape| Fact::new(ENTRY_ADDED, &shape, meta))
+        .collect()
+}
+
+/// What a fact says of each entry of `content` but its closure: its position,
+/// kind and state, its blocks' and annotations' — never their content.
+fn entry_shapes(content: &Content) -> Vec<EntryFact> {
+    let mut shapes = Vec::new();
     for (position, entry) in content.entries.iter().enumerate() {
         if entry.kind() == TurnEntryKind::TurnClosure {
             continue;
@@ -112,19 +123,15 @@ fn entry_facts(content: &Content, meta: &FactMeta) -> Result<Vec<Fact>, EngineEr
                 kind: placed.annotation.kind().as_str(),
             })
             .collect();
-        facts.push(Fact::new(
-            ENTRY_ADDED,
-            &EntryFact {
-                position,
-                kind: entry.kind().as_str(),
-                state: entry.state().as_str(),
-                blocks: block_shapes(content, position),
-                annotations,
-            },
-            meta,
-        )?);
+        shapes.push(EntryFact {
+            position,
+            kind: entry.kind().as_str(),
+            state: entry.state().as_str(),
+            blocks: block_shapes(content, position),
+            annotations,
+        });
     }
-    Ok(facts)
+    shapes
 }
 
 /// What a `message.store` stores, once judged.
@@ -142,8 +149,9 @@ pub struct NewMessage {
     pub created_at: DateTime<Utc>,
 }
 
-/// A message stored at version 1: `Created`, and `EntryAdded` for every entry
-/// of a message given whole.
+/// A message stored at version 1: `Created`, which carries the shapes of the
+/// entries of a message given whole (`EntryAdded` records an entry a stream
+/// adds).
 pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineError> {
     let author = match &new.author {
         MessageAuthor::User { user_id, .. } => AuthorShape {
@@ -163,12 +171,10 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
             job_id: new.job_id,
             status: new.status.as_str(),
             turn_kind: new.turn_kind.as_str(),
+            entries: entry_shapes(&new.content),
         },
         meta,
     )?)];
-    for fact in entry_facts(&new.content, meta)? {
-        pending.push(MessageChange::Recorded(fact));
-    }
     if new.status == MessageStatus::Completed {
         pending.push(MessageChange::ContentWritten);
     }
@@ -387,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn no_fact_carries_content_nor_a_name() {
+    fn created_carries_the_shapes_of_the_entries_and_no_content_nor_a_name() {
         let author = Uuid::now_v7();
         let id = Uuid::now_v7();
         let message = store(
@@ -411,10 +417,12 @@ mod tests {
         )
         .unwrap();
         let facts = message.pending_facts();
+        assert_eq!(facts.len(), 1, "a message given whole is one fact");
         assert_eq!(facts[0].event_type, CREATED);
-        assert_eq!(facts[1].event_type, ENTRY_ADDED);
-        assert_eq!(facts[1].payload["kind"], "human_message");
-        assert_eq!(facts[1].payload["blocks"][0]["kind"], "text");
+        let entry = &facts[0].payload["entries"][0];
+        assert_eq!(entry["position"], 0);
+        assert_eq!(entry["kind"], "human_message");
+        assert_eq!(entry["blocks"][0]["kind"], "text");
         for fact in facts {
             let payload = fact.payload.to_string();
             assert!(!payload.contains("a secret"), "{payload}");

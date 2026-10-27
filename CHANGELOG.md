@@ -95,9 +95,11 @@ changelog).
   `ItemView`, `ItemKind`, `BlockView` types and the 0.4 `BlockKind` enum are
   gone; `EntryState`, `TurnKind`, `AnnotationKind`, `EntryView`,
   `AnnotationView` are new.
-- The message facts are `Created`, `EntryAdded` (one per entry but the
-  closure), `Completed` / `Failed` (its `reason`, the library's code for a
-  refused stream) / `Cancelled`, `Edited`, `Deleted`.
+- The message facts are `Created` (author, parent, job, status, turn kind, and
+  the kinds and positions of the entries of a message given whole, their blocks
+  and annotations — never their content), `EntryAdded` (one per entry a stream
+  adds, but the closure), `Completed` / `Failed` (its `reason`, the library's
+  code for a refused stream) / `Cancelled`, `Edited`, `Deleted`.
 
 ### Security
 

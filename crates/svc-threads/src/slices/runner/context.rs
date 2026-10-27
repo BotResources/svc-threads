@@ -257,7 +257,7 @@ pub fn context_query() -> String {
          UNION ALL \
          SELECT 2, e.depth, b.message_id, b.id, b.position, b.kind, b.state, NULL, NULL, NULL, \
                 b.observed_at, b.payload, b.entry_id, b.parent_id, b.call_id \
-         FROM entry e JOIN threads.message_block b ON b.entry_id = e.id \
+         FROM entry e JOIN threads.entry_block b ON b.entry_id = e.id \
          WHERE b.state = 'complete' \
            AND (NOT e.foreign_turn OR e.kind <> 'model_response' \
                 OR (b.parent_id IS NULL \
