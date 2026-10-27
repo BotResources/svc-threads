@@ -145,6 +145,12 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # The job runs as root inside br-arc-runner but the checkout is owned by
+      # the host's runner user: without this every git command below dies with
+      # "detected dubious ownership" (see svc-auth#44).
+      - name: trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
