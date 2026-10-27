@@ -25,6 +25,10 @@
 //! unanswered, as the library allows. The closure is Threads' own entry, its
 //! id minted by Threads.
 //!
+//! The fact log records each closure as the end fact itself: M7's opening, its
+//! two entries and `Cancelled`; M8's opening first and `Failed` last. The text
+//! of the response M8 never finished is in no fact.
+//!
 //! Channels: the answers (4), the messages as a member reads them (2), the live
 //! feed (3), a runner's context loaded by the library, the fact log.
 
@@ -39,7 +43,7 @@ use common::flows::{
     ai, answer, command, completion, context, conversation_of, create_thread, message_confirmed,
     message_refused, message_view, open_stream, say, turn_ids,
 };
-use common::{QUIET_WINDOW, TestContext, stream};
+use common::{QUIET_WINDOW, TestContext, facts, stream};
 use contract_threads::llm::{ResponseEnding, RuntimeToolResult, TurnEntry};
 use contract_threads::{CancelMessage, FailMessage, MessageStatus, ReasonCode, StreamSeal};
 use uuid::Uuid;
@@ -76,7 +80,8 @@ fn answered(view: &serde_json::Value) -> Vec<RuntimeToolResult> {
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_interrupted() {
+async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_tool_calls_unanswered()
+ {
     // Given T with member A, A's question M1, a runner, and A following T.
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
@@ -99,13 +104,17 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
     m7_chunks.push(entry_chunk(&c1_answer));
     stream::push(&nats, m7, 0, &m7_chunks).await;
     // A cancel with no seal ends the message where its folds are: the stop is
-    // relayed once c1's result is folded, as a user sees it before stopping.
+    // relayed once the response and c1's result are both folded COMPLETE, as a
+    // user sees them before stopping.
     a_feed
-        .until("M7's result for c1 is folded", |delta| {
+        .until("M7's response and result for c1 are folded", |delta| {
             upsert_of(delta, m7).is_some_and(|view| {
-                view["entries"].as_array().is_some_and(|entries| {
-                    entries.iter().any(|e| e["kind"] == "runtime_tool_results")
-                })
+                let complete = |kind: &str| {
+                    entries_of(view)
+                        .iter()
+                        .any(|e| e["kind"] == kind && e["state"] == "COMPLETE")
+                };
+                complete("model_response") && complete("runtime_tool_results")
             })
         })
         .await;
@@ -149,6 +158,14 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
         })
         .await;
 
+    // And the facts record M7's opening, its two entries and the cancellation
+    // as its end.
+    assert_eq!(
+        facts::types(&facts::of(&ctx.pool, "message", m7).await),
+        vec!["Created", "EntryAdded", "EntryAdded", "Cancelled"],
+        "M7's facts"
+    );
+
     // When M7 is cancelled again.
     let again = command(&ctx, &cancel(t, m7, None)).await;
     // Then refused MESSAGE_NOT_STREAMING.
@@ -166,7 +183,7 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
     let m8 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
     let mut r8 = Streamed::start(m8, None);
     let c3 = r8.call("search", &["{\"q\":\"three\"}"]);
-    r8.call("search", &["{\"q\":\"four\"}"]);
+    let c4 = r8.call("search", &["{\"q\":\"four\"}"]);
     r8.complete(ResponseEnding::tool_use());
     let c3_answer = results(vec![result_of(&r8.runtime_call(c3), "found three", false)]);
     let mut unfinished = Streamed::start(m8, None);
@@ -199,6 +216,22 @@ async fn t08_a_cancelled_or_failed_message_answers_every_open_tool_call_as_inter
         draft_text(unfinished.draft()),
         "members read the interrupted response as the library folded it"
     );
+    // And c4 stays unanswered: the library loads the turn, closed, c4 its one
+    // outstanding call.
+    let m8_state = turn_of(&sealed).as_ai().expect("an AI turn").state();
+    assert!(m8_state.is_closed());
+    assert_eq!(m8_state.outstanding_runtime_calls(), &[c4]);
+    // And the facts record M8's opening first and its failure last; no fact
+    // carries the text of the response it never finished.
+    let m8_facts = facts::of(&ctx.pool, "message", m8).await;
+    let m8_types = facts::types(&m8_facts);
+    assert_eq!(
+        m8_types.first(),
+        Some(&"Created"),
+        "M8's facts: {m8_types:?}"
+    );
+    assert_eq!(m8_types.last(), Some(&"Failed"), "M8's facts: {m8_types:?}");
+    facts::assert_no_fact_carries(&ctx.pool, "so far, the answer is", "M8's unfinished text").await;
 
     // When a chunk beyond last_seq arrives after the seal.
     let late = Streamed::start(m8, None);

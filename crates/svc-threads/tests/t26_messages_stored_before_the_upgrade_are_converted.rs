@@ -18,12 +18,31 @@
 //! > version again changes nothing. With a stored message that cannot be
 //! > converted (an AI author id that is not a UUIDv7), the new version does not
 //! > become ready and names the message, and no message is converted half-way.
+//! > After the upgrade, A deletes a converted user message and B edits another
+//! > one: the deleted text and the text before the edit are found nowhere in
+//! > the store, neither in the converted rows nor in the rows the previous
+//! > version wrote. The upgrade is all or nothing: while one stored message
+//! > cannot be converted, no message is converted.
 //!
 //! The previous version is the release `svc-threads` 0.4.0 itself, built from
 //! its tag (`common::previous`), commanded with `contract-threads` 0.4.0: the
 //! suite writes no row. "Keeps its status" holds for every message but the
 //! STREAMING one, which the gesture itself names FAILED; its version is kept
 //! all the same, as every message's.
+//!
+//! "Read as turns of the library" is read content for content: each converted
+//! entry's blocks equal the library's own construction from the very inputs
+//! the previous version was given — the texts, the thinking and its signature,
+//! the tool's name and arguments, the human's id, the step's stop reason as the
+//! response's ending (`AwaitingToolResults` is `tool_use`, `EndTurn` is
+//! `finished`). What the conversion mints and the gesture leaves to it — an
+//! entry's id, the id of a tool result's inner text, the replay format a
+//! signature is filed under — is taken from what Threads answers.
+//!
+//! "Found nowhere in the store" is `common::store::assert_nowhere`: every table
+//! of the `threads` schema — the rows the previous version wrote and those the
+//! conversion wrote alike — and the engine's tables a content passes through;
+//! the texts, and the 0.4 block ids that carried them.
 //!
 //! "No message is converted half-way" is read on the store, table by table:
 //! every row the previous version stored keeps, column for column, what it
@@ -38,19 +57,24 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::artifacts::{File, download_url, fetch, upload};
-use common::content::{closure_kind, complete_entry, entries_of, kinds_of, turn_of};
+use common::content::{
+    closure_kind, complete_entry, entries_of, kinds_of, opaque, text_as, to_json, turn_of,
+};
 use common::facts;
 use common::flows::{
-    command, context, conversation_of, create, creation, message_confirmed, message_view,
-    thread_confirmed, thread_view, turn_ids, uuid_of,
+    command, context, conversation_of, create, creation, deletion_of, edit_of, message_confirmed,
+    message_version, message_view, thread_confirmed, thread_view, turn_ids, uuid_of,
 };
 use common::previous::{
     self, ai_message, ai_text, artifact_block, author, block_ids_0_4, calling_step, command_v1,
-    edit_of, message_view_0_4, step, streaming_message, thinking, tool_call, tool_result,
-    tool_results, user_message, user_text,
+    message_view_0_4, step, streaming_message, thinking, tool_call, tool_result, tool_results,
+    user_message, user_text, user_text_as,
 };
 use common::{M_SET_READ_MARK, Person, TestContext, store};
-use contract_threads::llm::{ContentBlock, ReplayPayload, TurnEntry};
+use contract_threads::llm::{
+    BlockId, ContentBlock, ModelResponse, ReplayMaterial, ReplayPayload, ResponseEnding,
+    RuntimeToolCall, RuntimeToolResult, TextBlock, ThinkingBlock, ToolName, TurnEntry,
+};
 use contract_threads::{FailMessage, MessageStatus};
 use contract_threads_v0_4::llm::StopReason;
 use serde_json::{Value, json};
@@ -78,6 +102,43 @@ fn ids_held(view: &Value) -> BTreeSet<Uuid> {
     let mut ids = BTreeSet::new();
     walk(&view["entries"], &mut ids);
     ids
+}
+
+/// A block id the scenario minted, as the library's.
+fn block(id: Uuid) -> BlockId {
+    BlockId::from_uuid(id).expect("a UUIDv7 block id")
+}
+
+/// A response's text block under `id`, as the library builds it.
+fn text_block(id: Uuid, text: &str) -> ContentBlock {
+    ContentBlock::from(TextBlock::new(block(id), text).expect("a scenario's text"))
+}
+
+/// The tool `search`, as the library names it.
+fn search() -> ToolName {
+    ToolName::new("search").expect("a tool name")
+}
+
+/// The model response that is entry `index` of `view`.
+fn response_at(view: &Value, index: usize) -> ModelResponse {
+    match complete_entry(&entries_of(view)[index]) {
+        TurnEntry::ModelResponse(response) => response,
+        other => panic!("entry {index} is a model response, got {other:?}: {view}"),
+    }
+}
+
+/// `view`, a user message, holds the human message of `user` whose content is
+/// `expected`, block for block.
+fn assert_human(view: &Value, user: Uuid, expected: Vec<contract_threads::llm::PlainBlock>) {
+    let TurnEntry::HumanMessage(human) = complete_entry(&entries_of(view)[0]) else {
+        panic!("a human message: {view}");
+    };
+    assert_eq!(human.human().as_uuid(), user, "the human id: {view}");
+    assert_eq!(
+        to_json(&human.content()),
+        to_json(&expected),
+        "the human message's content, block for block: {view}"
+    );
 }
 
 /// A stored v1 command, confirmed with `status`.
@@ -134,9 +195,11 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     const SIGNATURE: &str = "c2lnbmF0dXJlPT0=";
 
     // M1, A's user message;
+    const QUESTION: &str = "what were the Q3 figures?";
+    let m1_block = Uuid::now_v7();
     let m1 = stored_v1(
         &ctx,
-        &user_message(t, None, a.id, vec![user_text("what were the Q3 figures?")]),
+        &user_message(t, None, a.id, vec![user_text_as(m1_block, QUESTION)]),
         MessageStatus::Completed,
         "M1",
     )
@@ -149,11 +212,13 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         ai_text("let me look"),
         tool_call("c1", "search", json!({ "q": "q3" })),
     );
-    let (thought_id, called_id) = (thought.id, called.id);
+    let (thought_id, said_id, called_id) = (thought.id, said.id, called.id);
     let answered = tool_result("c1", "search", "42");
     let answered_id = answered.id;
     let attaching = artifact_block(x);
     let attaching_id = attaching.id;
+    let concluded = ai_text("Q3 was 42.");
+    let concluded_id = concluded.id;
     let m2 = stored_v1(
         &ctx,
         &ai_message(
@@ -167,11 +232,7 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
                     vec![thought, said, called],
                 ),
                 tool_results(vec![answered]),
-                step(
-                    StopReason::EndTurn,
-                    None,
-                    vec![ai_text("Q3 was 42."), attaching],
-                ),
+                step(StopReason::EndTurn, None, vec![concluded, attaching]),
             ],
         ),
         MessageStatus::Completed,
@@ -224,31 +285,42 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     .await;
     message_confirmed(&ctx, deleted, MessageStatus::Completed, "M4 deleted").await;
     // M5, B's user message, edited;
+    let first_wording = Uuid::now_v7();
     let m5 = stored_v1(
         &ctx,
-        &user_message(t, Some(m4), b.id, vec![user_text("first wording")]),
+        &user_message(
+            t,
+            Some(m4),
+            b.id,
+            vec![user_text_as(first_wording, "first wording")],
+        ),
         MessageStatus::Completed,
         "M5",
     )
     .await;
+    let second_wording = Uuid::now_v7();
     let edited = command_v1(
         &ctx,
-        &edit_of(t, m5, b.id, 1, vec![user_text("second wording")]),
+        &previous::edit_of(
+            t,
+            m5,
+            b.id,
+            1,
+            vec![user_text_as(second_wording, "second wording")],
+        ),
     )
     .await;
     message_confirmed(&ctx, edited, MessageStatus::Completed, "M5 edited").await;
     // M6, a fork: another answer to M1;
+    let another = ai_text("another take");
+    let another_id = another.id;
     let m6 = stored_v1(
         &ctx,
         &ai_message(
             t,
             Some(m1),
             analyst(),
-            vec![step(
-                StopReason::EndTurn,
-                None,
-                vec![ai_text("another take")],
-            )],
+            vec![step(StopReason::EndTurn, None, vec![another])],
         ),
         MessageStatus::Completed,
         "M6",
@@ -336,6 +408,7 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     // closures.
     assert_eq!(v1["turnKind"], "INPUT_TURN");
     assert_eq!(kinds_of(&v1), vec!["human_message"]);
+    assert_human(&v1, a.id, vec![text_as(m1_block, QUESTION)]);
     turn_of(&v1);
     assert_eq!(v2["turnKind"], "AI_TURN");
     assert_eq!(
@@ -372,12 +445,65 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         matches!(replay.payload(), ReplayPayload::Text { value, .. } if value == SIGNATURE),
         "the signature, byte for byte"
     );
+    // The first response is the library's, block for block, from the step's
+    // own inputs: the thinking and its signature, the text, the call of
+    // `search` with its arguments; AwaitingToolResults is tool_use.
+    let expected_first = vec![
+        ContentBlock::from(
+            ThinkingBlock::new(block(thought_id), THOUGHT)
+                .expect("a thinking")
+                .with_replay(ReplayMaterial::new(
+                    replay.format().clone(),
+                    ReplayPayload::text(SIGNATURE),
+                )),
+        ),
+        text_block(said_id, "let me look"),
+        ContentBlock::from(
+            RuntimeToolCall::new(block(called_id), search(), opaque(&json!({ "q": "q3" })))
+                .expect("a runtime tool call"),
+        ),
+    ];
+    assert_eq!(
+        to_json(&first.blocks()),
+        to_json(&expected_first),
+        "M2's first response, block for block: {v2}"
+    );
+    assert_eq!(first.ending(), &ResponseEnding::tool_use());
     // The tool result answers the call by the call's block id.
     let TurnEntry::RuntimeToolResults(results) = complete_entry(&entries_of(&v2)[1]) else {
         panic!("M2's tool results: {v2}");
     };
     assert_eq!(results.results()[0].id().as_uuid(), answered_id);
     assert_eq!(results.results()[0].call().as_uuid(), called_id);
+    // The result is the library's, from the item's inputs: answering the call
+    // of `search`, not an error, its text "42".
+    let inner = results.results()[0].content();
+    assert_eq!(inner.len(), 1, "one text in the result: {v2}");
+    assert_eq!(inner[0].id().as_uuid().get_version_num(), 7);
+    let expected_result = vec![
+        RuntimeToolResult::new(
+            block(answered_id),
+            block(called_id),
+            search(),
+            false,
+            vec![text_as(inner[0].id().as_uuid(), "42")],
+        )
+        .expect("a runtime tool result"),
+    ];
+    assert_eq!(
+        to_json(&results.results()),
+        to_json(&expected_result),
+        "M2's tool result, as the library builds it: {v2}"
+    );
+    // The second response: its text, EndTurn as finished, no model.
+    let second = response_at(&v2, 2);
+    assert_eq!(
+        to_json(&second.blocks()),
+        to_json(&vec![text_block(concluded_id, "Q3 was 42.")]),
+        "M2's second response, block for block: {v2}"
+    );
+    assert_eq!(second.ending(), &ResponseEnding::finished());
+    assert_eq!(second.model(), None);
     // The ARTIFACT block, an annotation after its entry, under its id.
     assert_eq!(
         entries_of(&v2)[2]["annotations"],
@@ -397,14 +523,30 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     };
     assert_eq!(interrupted.results()[0].call().as_uuid(), m3_call);
     assert!(interrupted.results()[0].is_error());
+    assert_eq!(interrupted.results()[0].tool_name(), &search());
+    let calling = response_at(&v3, 0);
+    assert_eq!(
+        to_json(&calling.blocks()),
+        to_json(&vec![ContentBlock::from(
+            RuntimeToolCall::new(block(m3_call), search(), opaque(&json!({})))
+                .expect("a runtime tool call"),
+        )]),
+        "M3's response: the call of `search`, its arguments `{{}}`: {v3}"
+    );
+    assert_eq!(calling.ending(), &ResponseEnding::tool_use());
     turn_of(&v3);
     // M4, deleted: no content. M5, edited: its new content. M6, the fork.
     assert_eq!(v4["entries"], json!([]));
-    assert_eq!(
-        common::content::texts_of(&v5),
-        vec!["second wording".to_string()]
-    );
+    assert_eq!(kinds_of(&v5), vec!["human_message"]);
+    assert_human(&v5, b.id, vec![text_as(second_wording, "second wording")]);
     assert_eq!(kinds_of(&v6), vec!["model_response", "turn_closure"]);
+    let fork = response_at(&v6, 0);
+    assert_eq!(
+        to_json(&fork.blocks()),
+        to_json(&vec![text_block(another_id, "another take")]),
+        "M6's response, block for block: {v6}"
+    );
+    assert_eq!(fork.ending(), &ResponseEnding::finished());
     turn_of(&v6);
     // M7, STREAMING before: FAILED, its turn closed interrupted.
     assert_eq!(v7["status"], "FAILED", "{v7}");
@@ -476,6 +618,44 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         assert_eq!(&message_view(&ctx, &o.passport, t, *message).await, view);
     }
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
+
+    // When, after the upgrade, A deletes M1, a converted user message, and B
+    // edits M5, another one, with new content.
+    let deleted = command(&ctx, &deletion_of(t, m1, a.id)).await;
+    message_confirmed(&ctx, deleted, MessageStatus::Completed, "A deletes M1").await;
+    let version = message_version(&ctx, &b.passport, t, m5).await;
+    let edited = command(
+        &ctx,
+        &edit_of(
+            t,
+            m5,
+            b.id,
+            version,
+            vec![common::content::text("third wording")],
+        ),
+    )
+    .await;
+    message_confirmed(&ctx, edited, MessageStatus::Completed, "B edits M5").await;
+    assert_eq!(
+        common::content::texts_of(&message_view(&ctx, &b.passport, t, m5).await),
+        vec!["third wording".to_string()]
+    );
+
+    // Then the deleted text and the texts before the edit are found nowhere
+    // in the store — neither in the converted rows nor in the rows the
+    // previous version wrote — nor are the 0.4 block ids that carried them.
+    for gone in [QUESTION, "second wording", "first wording"] {
+        store::assert_nowhere(&ctx.pool, gone, &[], "a text deleted or edited away").await;
+    }
+    for gone in [m1_block, second_wording, first_wording] {
+        store::assert_nowhere(
+            &ctx.pool,
+            &gone.to_string(),
+            &["fact"],
+            "a 0.4 block deleted or edited away",
+        )
+        .await;
+    }
 
     ctx.teardown().await;
 }

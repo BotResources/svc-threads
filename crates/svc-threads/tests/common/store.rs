@@ -6,6 +6,13 @@
 //!
 //! Read-only, `SELECT` on the app role, over every table of the `threads`
 //! schema. The suite never writes a row.
+//!
+//! "Anywhere" is literal: [`rows_holding`] and [`assert_nowhere`] also read
+//! the engine's tables a message's content can pass through in the
+//! `service_engine` schema — the event log and its snapshots, the accumulator's
+//! chunks, a dead letter's payload. The snapshots ([`snapshot`],
+//! [`snapshot_json`]) stay on the `threads` schema: they compare Threads' own
+//! state across a boot, which the engine's bookkeeping is free to move.
 
 use std::collections::BTreeMap;
 
@@ -34,6 +41,34 @@ pub async fn rows(pool: &PgPool, table: &str) -> Vec<String> {
     rows
 }
 
+/// The tables of the `service_engine` schema a message's content can pass
+/// through, each with how a row of it is read as text: whole as its JSON, or —
+/// for a dead letter — its payload alone, the bytes the engine could not
+/// handle, read as text (`escape` keeps ASCII as is).
+const ENGINE_TABLES: [(&str, &str); 4] = [
+    ("event_log", "row_to_json(t)::text"),
+    ("event_snapshot", "row_to_json(t)::text"),
+    ("accumulator_chunk", "row_to_json(t)::text"),
+    ("dead_letter", "encode(t.payload, 'escape')"),
+];
+
+/// Every row of the engine's `table`, read as `read`.
+async fn engine_rows(pool: &PgPool, table: &str, read: &str) -> Vec<String> {
+    sqlx::query_scalar(&format!("SELECT {read} FROM service_engine.\"{table}\" t"))
+        .fetch_all(pool)
+        .await
+        .unwrap_or_else(|e| panic!("the app role reads service_engine.{table}: {e}"))
+}
+
+/// Whether `except` names `table`: by its bare name for a table of the
+/// `threads` schema, by its qualified name for any.
+fn excepted(except: &[&str], schema: &str, table: &str) -> bool {
+    let qualified = format!("{schema}.{table}");
+    except
+        .iter()
+        .any(|name| *name == qualified || (schema == "threads" && *name == table))
+}
+
 /// Every row of every table, by table.
 pub async fn snapshot(pool: &PgPool) -> BTreeMap<String, Vec<String>> {
     let mut snapshot = BTreeMap::new();
@@ -44,17 +79,30 @@ pub async fn snapshot(pool: &PgPool) -> BTreeMap<String, Vec<String>> {
     snapshot
 }
 
-/// The rows, of any table but those of `except`, whose JSON text holds
-/// `needle`: `(table, row)`.
+/// The rows, of any table of the `threads` schema and of the engine's tables
+/// a content passes through, but those of `except`, whose text holds
+/// `needle`: `(schema.table, row)`. A table of `except` is named bare
+/// (`"fact"`) for the `threads` schema, qualified for either
+/// (`"service_engine.event_log"`).
 pub async fn rows_holding(pool: &PgPool, needle: &str, except: &[&str]) -> Vec<(String, String)> {
     let mut found = Vec::new();
     for table in tables(pool).await {
-        if except.contains(&table.as_str()) {
+        if excepted(except, "threads", &table) {
             continue;
         }
         for row in rows(pool, &table).await {
             if row.contains(needle) {
-                found.push((table.clone(), row));
+                found.push((format!("threads.{table}"), row));
+            }
+        }
+    }
+    for (table, read) in ENGINE_TABLES {
+        if excepted(except, "service_engine", table) {
+            continue;
+        }
+        for row in engine_rows(pool, table, read).await {
+            if row.contains(needle) {
+                found.push((format!("service_engine.{table}"), row));
             }
         }
     }
