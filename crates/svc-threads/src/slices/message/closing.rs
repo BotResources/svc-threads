@@ -225,6 +225,7 @@ mod tests {
     use service_engine::name::AccumulatorName;
 
     use super::super::close::CloseKind;
+    use super::super::closure::Named;
 
     use super::*;
 
@@ -234,14 +235,14 @@ mod tests {
         let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
         let whole = [
             Closing::of(CloseKind::Complete),
-            Closing::naming(CloseKind::Fail, Some(ClosureReason::completed())),
-            Closing::naming(CloseKind::Fail, Some(ClosureReason::budget_exhausted())),
+            Closing::naming(CloseKind::Fail, Some(Named::of(ClosureReason::completed()).unwrap())),
+            Closing::naming(CloseKind::Fail, Some(Named::of(ClosureReason::budget_exhausted()).unwrap())),
         ];
         let droppable = [
             Closing::of(CloseKind::Fail),
             Closing::of(CloseKind::Cancel),
             Closing::of(CloseKind::Watch),
-            Closing::naming(CloseKind::Fail, Some(ClosureReason::interrupted())),
+            Closing::naming(CloseKind::Fail, Some(Named::of(ClosureReason::interrupted()).unwrap())),
         ];
         for closing in whole.iter().chain(droppable.iter()) {
             assert_eq!(unready(closing, &[]), Unready::None, "{closing:?}");

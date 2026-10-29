@@ -1,11 +1,12 @@
 use contract_threads::MessageStatus;
 use contract_threads::llm::{ClosureReason, ResponseEnding};
 
+use super::super::closure::Named;
 use super::*;
 use crate::slices::message::draft::tests::{Writer, closure_of, kinds, v7};
 
 fn named(kind: CloseKind, reason: ClosureReason) -> Closing {
-    Closing::naming(kind, Some(reason))
+    Closing::naming(kind, Some(Named::of(reason).unwrap()))
 }
 
 fn closed(writer: &Writer, closing: &Closing) -> Closed {
@@ -179,6 +180,9 @@ fn a_stream_the_library_refused_fails_whatever_reason_is_named() {
         assert_eq!(closed.status, MessageStatus::Failed);
         assert_eq!(closed.reason, Some("stream_target_error"));
         assert_eq!(closed.closure, Kind::Failed);
+        let response = closed.content.entries.first().unwrap();
+        let payload = serde_json::to_value(response.payload()).unwrap();
+        assert_eq!(payload["interruption"]["kind"], "failed");
     }
 }
 

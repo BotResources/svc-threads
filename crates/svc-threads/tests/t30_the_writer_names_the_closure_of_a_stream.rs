@@ -1,16 +1,21 @@
 mod common;
 
-use common::content::{Streamed, closure_kind, closure_of, to_json};
+use common::artifacts::{File, post, request_upload};
+use common::content::{
+    Streamed, annotation_chunk, annotations_of, artifact, closure_kind, closure_of, to_json,
+    warning,
+};
 use common::facts::{self, Fact};
+use common::feed::{Live, upsert_of};
 use common::flows::{
     ai, await_message, command, completion, create_thread, message_confirmed, message_refused,
-    open_stream, say,
+    message_view, open_stream, say,
 };
-use common::{TestContext, stream};
+use common::{SHORT_STREAM_IDLE, TestContext, Windows, stream};
 use contract_threads::llm::{ClosureReason, ResponseEnding};
 use contract_threads::{
-    CompleteMessageV2, FailMessage, FailMessageV2, LibraryJson, MessageStatus, ReasonCode,
-    StreamSeal,
+    CancelMessage, CompleteMessageV2, FailMessage, FailMessageV2, LibraryJson, MessageStatus,
+    ReasonCode, StreamSeal,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -266,9 +271,10 @@ async fn t30_completed_still_needs_a_whole_turn_named_or_not() {
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t30_the_status_follows_the_reason_a_failure_names() {
     let ctx = TestContext::setup().await;
-    let a = ctx.enrol("ada").await;
-    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let (a, b) = (ctx.enrol("ada").await, ctx.enrol("bob").await);
+    let t = create_thread(&ctx, Some(&a), &[&b]).await;
     let m1 = say(&ctx, t, None, &a, "Go on").await;
+    let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
 
     let cases = [
         (
@@ -301,6 +307,17 @@ async fn t30_the_status_follows_the_reason_a_failure_names() {
         let sent = fail_v2(&ctx, t, &s, closure).await;
         message_confirmed(&ctx, sent, status, kind).await;
         ended_as(&ctx, &a, t, s.message, status, kind, detail).await;
+        let wanted = status.to_string();
+        let delivered = b_feed
+            .until("the closure reaches B's feed", |delta| {
+                upsert_of(delta, s.message).is_some_and(|view| {
+                    view["status"] == json!(wanted) && closure_kind(view).as_deref() == Some(kind)
+                })
+            })
+            .await;
+        let view = upsert_of(&delivered, s.message).expect("an Upsert of the message");
+        let reason = to_json(&closure_of(view).expect("a closure"));
+        assert_eq!(reason["detail"].as_str(), detail, "{view}");
     }
 
     ctx.teardown().await;
@@ -344,7 +361,7 @@ async fn t30_a_closure_the_library_cannot_read_is_refused_and_the_message_stays_
         facts::of(&ctx.pool, "message", s.message).await.len(),
         before
     );
-    let view = common::flows::message_view(&ctx, &a.passport, t, s.message).await;
+    let view = message_view(&ctx, &a.passport, t, s.message).await;
     assert_eq!(view["status"], "STREAMING", "{view}");
 
     let sent = fail_v2(
@@ -439,6 +456,206 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
         None,
     )
     .await;
+
+    ctx.teardown().await;
+}
+
+const NOTE: &str = "careful";
+
+async fn naming_unready(
+    ctx: &TestContext,
+    thread: Uuid,
+    parent: Uuid,
+    unready: Uuid,
+    sealed: bool,
+) -> (Uuid, Option<StreamSeal>) {
+    let message = open_stream(ctx, thread, Some(parent), ai("a1", "Analyst")).await;
+    let mut answer = Streamed::start(message, None);
+    answer.text(&["the report follows"], true);
+    answer.complete(ResponseEnding::finished());
+    let mut chunks = answer.chunks();
+    chunks.push(annotation_chunk(answer.entry, warning("NOTE", NOTE)));
+    chunks.push(annotation_chunk(answer.entry, artifact(unready)));
+    let (last_seq, hash) = stream::push(&ctx.nats.url(), message, 0, &chunks).await;
+    (message, sealed.then_some(StreamSeal { last_seq, hash }))
+}
+
+async fn waiting(ctx: &TestContext, thread: Uuid, parent: Uuid, unready: Uuid) -> Streaming {
+    let (message, seal) = naming_unready(ctx, thread, parent, unready, true).await;
+    Streaming {
+        message,
+        seal: seal.expect("a sealed stream"),
+    }
+}
+
+async fn requested_not_attached(ctx: &TestContext, artifact: Uuid) {
+    assert_eq!(
+        facts::types(&facts::of(&ctx.pool, "artifact", artifact).await),
+        vec!["Requested"],
+        "the artifact is not attached"
+    );
+}
+
+fn kept_only_the_note(view: &serde_json::Value) {
+    let annotations = annotations_of(view);
+    assert_eq!(annotations.len(), 1, "only the note stays: {view}");
+    assert_eq!(annotations[0].1["kind"], "WARNING", "{view}");
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t30_a_closing_that_gives_completed_is_refused_while_the_artifact_is_not_ready_and_the_stream_stays_open()
+ {
+    let ctx = TestContext::setup().await;
+    let a = ctx.enrol("ada").await;
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    let runner = ctx.service_account(true);
+    let file = File::csv("quarter,revenue\nQ3,42\n");
+    let z = Uuid::now_v7();
+    let access = request_upload(&ctx, &runner.passport, t, z, &file).await;
+    let s = waiting(&ctx, t, m1, z).await;
+
+    let complete = |closure| CompleteMessageV2 {
+        message_id: s.message,
+        thread_id: t,
+        seal: s.seal.clone(),
+        closure,
+        acting_user_id: None,
+    };
+    let fail = |closure| FailMessageV2 {
+        message_id: s.message,
+        thread_id: t,
+        seal: Some(s.seal.clone()),
+        closure,
+        acting_user_id: None,
+    };
+    let sent = [
+        command(&ctx, &complete(None)).await,
+        command(&ctx, &complete(naming(&budget()))).await,
+        command(&ctx, &fail(naming(&ClosureReason::completed()))).await,
+        command(&ctx, &fail(naming(&budget()))).await,
+    ];
+    for command_id in sent {
+        message_refused(
+            &ctx,
+            command_id,
+            ReasonCode::ArtifactNotReady,
+            "a closing that gives COMPLETED, the artifact not ready",
+        )
+        .await;
+    }
+    let view = message_view(&ctx, &a.passport, t, s.message).await;
+    assert_eq!(view["status"], "STREAMING", "{view}");
+    assert!(closure_kind(&view).is_none(), "{view}");
+    requested_not_attached(&ctx, z).await;
+
+    let status = post(&access, &file.bytes).await;
+    assert!((200..300).contains(&status), "the store takes the bytes");
+    let sent = command(&ctx, &complete(None)).await;
+    message_confirmed(
+        &ctx,
+        sent,
+        MessageStatus::Completed,
+        "the same stream, the artifact ready",
+    )
+    .await;
+    assert_eq!(
+        facts::types(&facts::of(&ctx.pool, "artifact", z).await),
+        vec!["Requested", "Attached"]
+    );
+
+    ctx.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_and_keeps_the_rest() {
+    let ctx = TestContext::setup().await;
+    let a = ctx.enrol("ada").await;
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    let runner = ctx.service_account(true);
+    let z = Uuid::now_v7();
+    request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
+
+    let fail_v1 = waiting(&ctx, t, m1, z).await;
+    let sent = command(
+        &ctx,
+        &FailMessage {
+            message_id: fail_v1.message,
+            thread_id: t,
+            seal: Some(fail_v1.seal),
+            acting_user_id: None,
+        },
+    )
+    .await;
+    message_confirmed(&ctx, sent, MessageStatus::Failed, "fail").await;
+
+    let fail_v2 = waiting(&ctx, t, m1, z).await;
+    let sent = command(
+        &ctx,
+        &FailMessageV2 {
+            message_id: fail_v2.message,
+            thread_id: t,
+            seal: Some(fail_v2.seal),
+            closure: naming(&ClosureReason::interrupted()),
+            acting_user_id: None,
+        },
+    )
+    .await;
+    message_confirmed(&ctx, sent, MessageStatus::Failed, "fail naming interrupted").await;
+
+    let cancel = waiting(&ctx, t, m1, z).await;
+    let sent = command(
+        &ctx,
+        &CancelMessage {
+            message_id: cancel.message,
+            thread_id: t,
+            seal: Some(cancel.seal),
+            acting_user_id: None,
+        },
+    )
+    .await;
+    message_confirmed(&ctx, sent, MessageStatus::Cancelled, "cancel").await;
+
+    for message in [fail_v1.message, fail_v2.message, cancel.message] {
+        let view = message_view(&ctx, &a.passport, t, message).await;
+        kept_only_the_note(&view);
+    }
+    requested_not_attached(&ctx, z).await;
+
+    ctx.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t30_a_silence_drops_the_annotation_of_an_artifact_not_ready_and_keeps_the_rest() {
+    let ctx = TestContext::setup_with(Windows {
+        stream_idle: Some(SHORT_STREAM_IDLE),
+        ..Windows::default()
+    })
+    .await;
+    let a = ctx.enrol("ada").await;
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    let runner = ctx.service_account(true);
+    let z = Uuid::now_v7();
+    request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
+    let (message, _) = naming_unready(&ctx, t, m1, z, false).await;
+
+    tokio::time::sleep(SHORT_STREAM_IDLE * 2).await;
+    let view = await_message(&ctx, &a.passport, t, message, "failed by silence", |view| {
+        view["status"] == "FAILED"
+    })
+    .await;
+    assert_eq!(
+        closure_kind(&view).as_deref(),
+        Some("interrupted"),
+        "{view}"
+    );
+    kept_only_the_note(&view);
+    requested_not_attached(&ctx, z).await;
 
     ctx.teardown().await;
 }

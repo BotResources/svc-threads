@@ -1,8 +1,8 @@
 use contract_threads::llm::{ClosureReason, InterruptionReason};
-use contract_threads::{LibraryJson, MessageStatus};
+use contract_threads::{LibraryJson, MessageInvalidError, MessageStatus};
 
 use super::close::CloseKind;
-use super::content::refusal_of;
+use super::content::{invalid, refusal_of};
 use crate::command::Refusal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,18 @@ impl Kind {
         }
     }
 
+    pub fn parse(wire: &str) -> Option<Self> {
+        [
+            Kind::Completed,
+            Kind::BudgetExhausted,
+            Kind::Cancelled,
+            Kind::Interrupted,
+            Kind::Failed,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == wire)
+    }
+
     pub fn status(self) -> MessageStatus {
         match self {
             Kind::Completed | Kind::BudgetExhausted => MessageStatus::Completed,
@@ -57,14 +69,29 @@ impl Kind {
     }
 }
 
-pub fn parse(json: &LibraryJson) -> Result<ClosureReason, Refusal> {
-    json.to_closure_reason().map_err(|error| refusal_of(&error))
+#[derive(Debug, Clone, PartialEq)]
+pub struct Named {
+    pub reason: ClosureReason,
+    pub kind: Kind,
+}
+
+impl Named {
+    pub fn of(reason: ClosureReason) -> Result<Self, Refusal> {
+        match Kind::of(&reason) {
+            Some(kind) => Ok(Self { reason, kind }),
+            None => Err(invalid(MessageInvalidError::LibraryRefusal)),
+        }
+    }
+}
+
+pub fn parse(json: &LibraryJson) -> Result<Named, Refusal> {
+    Named::of(json.to_closure_reason().map_err(|error| refusal_of(&error))?)
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Closing {
     pub kind: CloseKind,
-    pub named: Option<ClosureReason>,
+    pub named: Option<Named>,
 }
 
 impl Closing {
@@ -72,13 +99,13 @@ impl Closing {
         Self { kind, named: None }
     }
 
-    pub fn naming(kind: CloseKind, named: Option<ClosureReason>) -> Self {
+    pub fn naming(kind: CloseKind, named: Option<Named>) -> Self {
         Self { kind, named }
     }
 
     pub fn requested(&self) -> Kind {
         match (&self.named, self.kind) {
-            (Some(reason), _) => Kind::of(reason).unwrap_or(Kind::Failed),
+            (Some(named), _) => named.kind,
             (None, CloseKind::Complete) => Kind::Completed,
             (None, CloseKind::Fail) => Kind::Failed,
             (None, CloseKind::Cancel) => Kind::Cancelled,
@@ -103,7 +130,7 @@ mod tests {
     use super::*;
 
     fn named(json: serde_json::Value) -> ClosureReason {
-        parse(&LibraryJson::from_json(json)).unwrap()
+        parse(&LibraryJson::from_json(json)).unwrap().reason
     }
 
     #[test]
@@ -148,6 +175,7 @@ mod tests {
             (json!({ "type": "failed", "detail": "boom" }), Kind::Failed),
         ] {
             assert_eq!(Kind::of(&named(wire)), Some(kind));
+            assert_eq!(Kind::parse(kind.as_str()), Some(kind));
             assert_eq!(
                 kind.as_str(),
                 serde_json::to_value(kind_reason(kind)).unwrap()["type"]
@@ -181,17 +209,18 @@ mod tests {
     fn only_a_completion_or_a_failure_that_gives_completed_refuses_an_unready_artifact() {
         let strict = |kind, named| Closing::naming(kind, named).strict();
         assert!(strict(CloseKind::Complete, None));
+        let reason = |reason| Some(Named::of(reason).unwrap());
         assert!(strict(
             CloseKind::Complete,
-            Some(ClosureReason::cancelled())
+            reason(ClosureReason::cancelled())
         ));
-        assert!(strict(CloseKind::Fail, Some(ClosureReason::completed())));
+        assert!(strict(CloseKind::Fail, reason(ClosureReason::completed())));
         assert!(strict(
             CloseKind::Fail,
-            Some(ClosureReason::budget_exhausted())
+            reason(ClosureReason::budget_exhausted())
         ));
         assert!(!strict(CloseKind::Fail, None));
-        assert!(!strict(CloseKind::Fail, Some(ClosureReason::interrupted())));
+        assert!(!strict(CloseKind::Fail, reason(ClosureReason::interrupted())));
         assert!(!strict(CloseKind::Cancel, None));
         assert!(!strict(CloseKind::Watch, None));
     }

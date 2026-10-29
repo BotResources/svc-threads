@@ -46,8 +46,9 @@ changelog).
 - **The title Job starts at the first message to be `COMPLETED`**, whatever its
   kind (a user message, an AI message, a request stored as an input turn, a
   stream completed by `complete` or by `fail.v2` naming a completed closure),
-  in the transaction that completes it; `triggered_by` is the acting user of
-  that storage when it has one. A message that ends `CANCELLED` or `FAILED`
+  in the transaction that completes it; `triggered_by` is the user author of the
+  stored message when a user wrote it, otherwise the acting user of the command
+  (the acting user alone when a stream is closed), when there is one. A message that ends `CANCELLED` or `FAILED`
   starts none. In 0.5 only a user message did.
 - **Agent context**: another agent's turn keeps only its model responses; what
   that agent received (notices, tasks, mails, requests, human messages) is no

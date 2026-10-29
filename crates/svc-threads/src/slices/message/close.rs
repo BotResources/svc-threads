@@ -34,12 +34,14 @@ pub struct Closed {
 
 struct Decided {
     reason: ClosureReason,
+    kind: Kind,
     threads_code: Option<&'static str>,
 }
 
 fn failed_by(code: &'static str) -> Result<Decided, EngineError> {
     Ok(Decided {
         reason: ClosureReason::failed(code).map_err(corrupt)?,
+        kind: Kind::Failed,
         threads_code: Some(code),
     })
 }
@@ -47,21 +49,25 @@ fn failed_by(code: &'static str) -> Result<Decided, EngineError> {
 fn requested(closing: &Closing) -> Result<Decided, EngineError> {
     if let Some(named) = &closing.named {
         return Ok(Decided {
-            reason: named.clone(),
+            reason: named.reason.clone(),
+            kind: named.kind,
             threads_code: None,
         });
     }
     match closing.kind {
         CloseKind::Complete => Ok(Decided {
             reason: ClosureReason::completed(),
+            kind: Kind::Completed,
             threads_code: None,
         }),
         CloseKind::Cancel => Ok(Decided {
             reason: ClosureReason::cancelled(),
+            kind: Kind::Cancelled,
             threads_code: None,
         }),
         CloseKind::Watch => Ok(Decided {
             reason: ClosureReason::interrupted(),
+            kind: Kind::Interrupted,
             threads_code: Some(reason::STREAM_IDLE),
         }),
         CloseKind::Fail => failed_by(reason::FAILED_BY_WRITER),
@@ -70,7 +76,11 @@ fn requested(closing: &Closing) -> Result<Decided, EngineError> {
 
 pub fn close(mut judged: Judged, closing: &Closing) -> Result<Closed, EngineError> {
     let closure_id = Uuid::now_v7();
-    let interruption = closing.requested().interruption();
+    let interruption = if judged.refusal.is_some() {
+        Kind::Failed.interruption()
+    } else {
+        closing.requested().interruption()
+    };
     let mut was_producing = false;
     for item in &mut judged.items {
         if let JudgedItem::Response(draft) = item
@@ -101,7 +111,7 @@ pub fn close(mut judged: Judged, closing: &Closing) -> Result<Closed, EngineErro
     } else {
         wanted
     };
-    let closure = Kind::of(&decided.reason).unwrap_or(Kind::Failed);
+    let closure = decided.kind;
     judged
         .turn
         .push_entry(closure_entry(closure_id, decided.reason)?)

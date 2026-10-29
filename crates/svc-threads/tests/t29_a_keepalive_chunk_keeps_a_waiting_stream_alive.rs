@@ -2,6 +2,7 @@ mod common;
 
 use common::content::{Streamed, closure_kind, entries_of};
 use common::facts;
+use common::feed::Live;
 use common::flows::{
     ai, await_message, command, completion, create_thread, message_confirmed, message_refused,
     message_view, open_stream, resolution_of, say, thread_confirmed,
@@ -30,6 +31,7 @@ async fn t29_keepalives_alone_keep_a_message_streaming_past_the_window_and_enter
     let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
     let opened = message_view(&ctx, &a.passport, t, m2).await;
     let facts_opened = facts::of(&ctx.pool, "message", m2).await.len();
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
     let mut sent: Vec<Chunk> = Vec::new();
     let gap = SHORT_STREAM_IDLE * 3 / 5;
@@ -49,6 +51,9 @@ async fn t29_keepalives_alone_keep_a_message_streaming_past_the_window_and_enter
         facts_opened,
         "keepalives add no fact"
     );
+    a_feed
+        .silence("keepalives change no view a live member holds")
+        .await;
 
     let mut response = Streamed::start(m2, None);
     response.text(&["the other runner answered"], true);
