@@ -462,13 +462,12 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
 
 const NOTE: &str = "careful";
 
-async fn naming_unready(
+async fn push_unready(
     ctx: &TestContext,
     thread: Uuid,
     parent: Uuid,
     unready: Uuid,
-    sealed: bool,
-) -> (Uuid, Option<StreamSeal>) {
+) -> (Uuid, StreamSeal) {
     let message = open_stream(ctx, thread, Some(parent), ai("a1", "Analyst")).await;
     let mut answer = Streamed::start(message, None);
     answer.text(&["the report follows"], true);
@@ -477,15 +476,47 @@ async fn naming_unready(
     chunks.push(annotation_chunk(answer.entry, warning("NOTE", NOTE)));
     chunks.push(annotation_chunk(answer.entry, artifact(unready)));
     let (last_seq, hash) = stream::push(&ctx.nats.url(), message, 0, &chunks).await;
-    (message, sealed.then_some(StreamSeal { last_seq, hash }))
+    (message, StreamSeal { last_seq, hash })
 }
 
 async fn waiting(ctx: &TestContext, thread: Uuid, parent: Uuid, unready: Uuid) -> Streaming {
-    let (message, seal) = naming_unready(ctx, thread, parent, unready, true).await;
-    Streaming {
+    let (message, seal) = push_unready(ctx, thread, parent, unready).await;
+    Streaming { message, seal }
+}
+
+async fn abandoned(ctx: &TestContext, thread: Uuid, parent: Uuid, unready: Uuid) -> Uuid {
+    push_unready(ctx, thread, parent, unready).await.0
+}
+
+async fn message_ledger(ctx: &TestContext, message: Uuid) -> Vec<(i64, String)> {
+    facts::of(&ctx.pool, "message", message)
+        .await
+        .into_iter()
+        .map(|fact| (fact.seq, fact.event_type))
+        .collect()
+}
+
+async fn holds_both_annotations(
+    ctx: &TestContext,
+    viewer: &common::Person,
+    thread: Uuid,
+    message: Uuid,
+) {
+    let view = await_message(
+        ctx,
+        &viewer.passport,
+        thread,
         message,
-        seal: seal.expect("a sealed stream"),
-    }
+        "the streaming view holds the note and the artifact",
+        |view| view["status"] == "STREAMING" && annotations_of(view).len() == 2,
+    )
+    .await;
+    let mut kinds: Vec<String> = annotations_of(&view)
+        .iter()
+        .map(|(_, annotation)| annotation["kind"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    kinds.sort();
+    assert_eq!(kinds, ["ARTIFACT", "WARNING"], "{view}");
 }
 
 async fn requested_not_attached(ctx: &TestContext, artifact: Uuid) {
@@ -515,44 +546,52 @@ async fn t30_a_closing_that_gives_completed_is_refused_while_the_artifact_is_not
     let z = Uuid::now_v7();
     let access = request_upload(&ctx, &runner.passport, t, z, &file).await;
     let s = waiting(&ctx, t, m1, z).await;
+    holds_both_annotations(&ctx, &a, t, s.message).await;
+    let facts_before = message_ledger(&ctx, s.message).await;
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
-    let complete = |closure| CompleteMessageV2 {
-        message_id: s.message,
-        thread_id: t,
-        seal: s.seal.clone(),
-        closure,
-        acting_user_id: None,
-    };
-    let fail = |closure| FailMessageV2 {
-        message_id: s.message,
-        thread_id: t,
-        seal: Some(s.seal.clone()),
-        closure,
-        acting_user_id: None,
-    };
     let sent = [
-        command(&ctx, &complete(None)).await,
-        command(&ctx, &complete(naming(&budget()))).await,
-        command(&ctx, &fail(naming(&ClosureReason::completed()))).await,
-        command(&ctx, &fail(naming(&budget()))).await,
+        complete_v2(&ctx, t, &s, None).await,
+        complete_v2(&ctx, t, &s, naming(&budget())).await,
+        complete_v2(&ctx, t, &s, naming(&ClosureReason::completed())).await,
+        complete_v2(&ctx, t, &s, naming(&named(ClosureReason::cancelled()))).await,
+        complete_v2(&ctx, t, &s, naming(&named(ClosureReason::interrupted()))).await,
+        complete_v2(
+            &ctx,
+            t,
+            &s,
+            naming(&ClosureReason::failed(DETAIL).expect("a detail")),
+        )
+        .await,
+        fail_v2(&ctx, t, &s, naming(&ClosureReason::completed())).await,
+        fail_v2(&ctx, t, &s, naming(&budget())).await,
     ];
     for command_id in sent {
         message_refused(
             &ctx,
             command_id,
             ReasonCode::ArtifactNotReady,
-            "a closing that gives COMPLETED, the artifact not ready",
+            "a closing that gives COMPLETED, or a completion whatever the reason, the artifact not ready",
         )
         .await;
     }
+    assert_eq!(
+        message_ledger(&ctx, s.message).await,
+        facts_before,
+        "a refused closing changes no fact"
+    );
+    a_feed
+        .silence("a refused closing changes no view a live member holds")
+        .await;
     let view = message_view(&ctx, &a.passport, t, s.message).await;
     assert_eq!(view["status"], "STREAMING", "{view}");
     assert!(closure_kind(&view).is_none(), "{view}");
+    assert_eq!(annotations_of(&view).len(), 2, "{view}");
     requested_not_attached(&ctx, z).await;
 
     let status = post(&access, &file.bytes).await;
     assert!((200..300).contains(&status), "the store takes the bytes");
-    let sent = command(&ctx, &complete(None)).await;
+    let sent = complete_v2(&ctx, t, &s, None).await;
     message_confirmed(
         &ctx,
         sent,
@@ -560,6 +599,11 @@ async fn t30_a_closing_that_gives_completed_is_refused_while_the_artifact_is_not
         "the same stream, the artifact ready",
     )
     .await;
+    a_feed
+        .until("the completion reaches the feed", |delta| {
+            upsert_of(delta, s.message).is_some_and(|view| view["status"] == "COMPLETED")
+        })
+        .await;
     assert_eq!(
         facts::types(&facts::of(&ctx.pool, "artifact", z).await),
         vec!["Requested", "Attached"]
@@ -580,6 +624,7 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
 
     let fail_v1 = waiting(&ctx, t, m1, z).await;
+    holds_both_annotations(&ctx, &a, t, fail_v1.message).await;
     let sent = command(
         &ctx,
         &FailMessage {
@@ -593,6 +638,7 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     message_confirmed(&ctx, sent, MessageStatus::Failed, "fail").await;
 
     let fail_v2 = waiting(&ctx, t, m1, z).await;
+    holds_both_annotations(&ctx, &a, t, fail_v2.message).await;
     let sent = command(
         &ctx,
         &FailMessageV2 {
@@ -607,6 +653,7 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     message_confirmed(&ctx, sent, MessageStatus::Failed, "fail naming interrupted").await;
 
     let cancel = waiting(&ctx, t, m1, z).await;
+    holds_both_annotations(&ctx, &a, t, cancel.message).await;
     let sent = command(
         &ctx,
         &CancelMessage {
@@ -642,7 +689,8 @@ async fn t30_a_silence_drops_the_annotation_of_an_artifact_not_ready_and_keeps_t
     let runner = ctx.service_account(true);
     let z = Uuid::now_v7();
     request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
-    let (message, _) = naming_unready(&ctx, t, m1, z, false).await;
+    let message = abandoned(&ctx, t, m1, z).await;
+    holds_both_annotations(&ctx, &a, t, message).await;
 
     tokio::time::sleep(SHORT_STREAM_IDLE * 2).await;
     let view = await_message(&ctx, &a.passport, t, message, "failed by silence", |view| {

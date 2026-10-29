@@ -49,8 +49,8 @@ fn failed_by(code: &'static str) -> Result<Decided, EngineError> {
 fn requested(closing: &Closing) -> Result<Decided, EngineError> {
     if let Some(named) = &closing.named {
         return Ok(Decided {
-            reason: named.reason.clone(),
-            kind: named.kind,
+            reason: named.reason().clone(),
+            kind: named.kind(),
             threads_code: None,
         });
     }
@@ -76,11 +76,7 @@ fn requested(closing: &Closing) -> Result<Decided, EngineError> {
 
 pub fn close(mut judged: Judged, closing: &Closing) -> Result<Closed, EngineError> {
     let closure_id = Uuid::now_v7();
-    let interruption = if judged.refusal.is_some() {
-        Kind::Failed.interruption()
-    } else {
-        closing.requested().interruption()
-    };
+    let interruption = closing.requested().interruption();
     let mut was_producing = false;
     for item in &mut judged.items {
         if let JudgedItem::Response(draft) = item

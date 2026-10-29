@@ -541,7 +541,7 @@ async fn read_many(
         .collect())
 }
 
-fn check_status_follows_closure(message: &MessageState) -> Result<(), EngineError> {
+pub(super) fn check_status_follows_closure(message: &MessageState) -> Result<(), EngineError> {
     if message.turn_kind != TurnKind::AITurn {
         return Ok(());
     }

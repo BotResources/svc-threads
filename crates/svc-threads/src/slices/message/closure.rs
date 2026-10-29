@@ -71,8 +71,8 @@ impl Kind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Named {
-    pub reason: ClosureReason,
-    pub kind: Kind,
+    reason: ClosureReason,
+    kind: Kind,
 }
 
 impl Named {
@@ -81,6 +81,14 @@ impl Named {
             Some(kind) => Ok(Self { reason, kind }),
             None => Err(invalid(MessageInvalidError::LibraryRefusal)),
         }
+    }
+
+    pub fn reason(&self) -> &ClosureReason {
+        &self.reason
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
     }
 }
 
@@ -108,7 +116,7 @@ impl Closing {
 
     pub fn requested(&self) -> Kind {
         match (&self.named, self.kind) {
-            (Some(named), _) => named.kind,
+            (Some(named), _) => named.kind(),
             (None, CloseKind::Complete) => Kind::Completed,
             (None, CloseKind::Fail) => Kind::Failed,
             (None, CloseKind::Cancel) => Kind::Cancelled,

@@ -171,10 +171,10 @@ fn a_stream_the_library_refused_fails_whatever_reason_is_named() {
             "never opened",
         ),
     );
-    for reason in [
-        budget("x"),
-        ClosureReason::completed(),
-        ClosureReason::cancelled(),
+    for (reason, interruption) in [
+        (budget("x"), "interrupted"),
+        (ClosureReason::completed(), "failed"),
+        (ClosureReason::cancelled(), "cancelled"),
     ] {
         let closed = closed(&writer, &named(CloseKind::Complete, reason));
         assert_eq!(closed.status, MessageStatus::Failed);
@@ -182,7 +182,34 @@ fn a_stream_the_library_refused_fails_whatever_reason_is_named() {
         assert_eq!(closed.closure, Kind::Failed);
         let response = closed.content.entries.first().unwrap();
         let payload = serde_json::to_value(response.payload()).unwrap();
-        assert_eq!(payload["interruption"]["kind"], "failed");
+        assert_eq!(payload["interruption"]["kind"], interruption);
+    }
+}
+
+#[test]
+fn a_stream_the_library_refused_is_interrupted_as_each_closer_did_in_0_5() {
+    let mut writer = Writer::new();
+    let entry = writer.text_response(&["a"], None);
+    writer.delta(
+        entry,
+        contract_threads::llm::DeltaOp::text_appended(
+            contract_threads::llm::BlockId::from_uuid(v7()).unwrap(),
+            "never opened",
+        ),
+    );
+    for (kind, interruption) in [
+        (CloseKind::Complete, "failed"),
+        (CloseKind::Fail, "failed"),
+        (CloseKind::Cancel, "cancelled"),
+        (CloseKind::Watch, "interrupted"),
+    ] {
+        let closed = closed(&writer, &Closing::of(kind));
+        assert_eq!(closed.status, MessageStatus::Failed, "{kind:?}");
+        assert_eq!(closed.reason, Some("stream_target_error"), "{kind:?}");
+        assert_eq!(closed.closure, Kind::Failed, "{kind:?}");
+        let response = closed.content.entries.first().unwrap();
+        let payload = serde_json::to_value(response.payload()).unwrap();
+        assert_eq!(payload["interruption"]["kind"], interruption, "{kind:?}");
     }
 }
 

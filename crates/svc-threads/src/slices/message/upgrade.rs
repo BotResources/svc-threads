@@ -446,6 +446,9 @@ mod tests {
     use contract_threads::{AnnotationKind, Notice};
     use serde_json::json;
 
+    use super::super::state::MessageState;
+    use super::super::state::tests::message_in;
+    use super::super::store::check_status_follows_closure;
     use super::*;
 
     fn block(kind: &str, content: serde_json::Value) -> Block {
@@ -582,6 +585,74 @@ mod tests {
         assert_eq!(first_repeated(ids), Some(twice));
         let fresh = convert(&legacy(MessageStatus::Completed)).unwrap();
         assert_eq!(first_repeated(fresh.identities(Uuid::now_v7())), None);
+    }
+
+    fn loaded(converted: &Converted) -> MessageState {
+        let mut message = message_in(&[]);
+        message.turn_kind = converted.turn_kind;
+        message.status = converted.status;
+        message.content = converted.content.clone();
+        message
+    }
+
+    #[test]
+    fn every_converted_status_loads_beside_its_closure() {
+        for legacy_status in [
+            MessageStatus::Streaming,
+            MessageStatus::Completed,
+            MessageStatus::Cancelled,
+            MessageStatus::Failed,
+        ] {
+            let converted = convert(&legacy(legacy_status)).unwrap();
+            assert_eq!(converted.turn_kind, TurnKind::AITurn);
+            assert!(
+                converted.content.closure_entry().is_some(),
+                "{legacy_status:?}"
+            );
+            let mut message = loaded(&converted);
+            assert!(
+                check_status_follows_closure(&message).is_ok(),
+                "{legacy_status:?}"
+            );
+            message.status = match converted.status {
+                MessageStatus::Completed => MessageStatus::Failed,
+                _ => MessageStatus::Completed,
+            };
+            assert!(
+                check_status_follows_closure(&message).is_err(),
+                "{legacy_status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_turn_or_a_turn_without_a_closure_is_not_checked_against_one() {
+        let user = LegacyMessage {
+            id: Uuid::now_v7(),
+            author_user_id: Some(Uuid::now_v7()),
+            author_ai_id: None,
+            author_ai_name: None,
+            status: MessageStatus::Completed,
+            deleted: false,
+            blocks: vec![block("TEXT", json!({ "type": "text", "text": "Hello" }))],
+            items: Vec::new(),
+        };
+        let mut input = loaded(&convert(&user).unwrap());
+        assert_eq!(input.turn_kind, TurnKind::InputTurn);
+        for status in [
+            MessageStatus::Streaming,
+            MessageStatus::Completed,
+            MessageStatus::Cancelled,
+            MessageStatus::Failed,
+        ] {
+            input.status = status;
+            assert!(check_status_follows_closure(&input).is_ok(), "{status:?}");
+        }
+        let mut open = message_in(&[]);
+        assert_eq!(open.turn_kind, TurnKind::AITurn);
+        assert!(open.content.closure_entry().is_none());
+        open.status = MessageStatus::Streaming;
+        assert!(check_status_follows_closure(&open).is_ok());
     }
 
     #[test]

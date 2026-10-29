@@ -2,7 +2,7 @@ mod common;
 
 use common::content::{Streamed, closure_kind, entries_of};
 use common::facts;
-use common::feed::Live;
+use common::feed::{Live, upsert_of};
 use common::flows::{
     ai, await_message, command, completion, create_thread, message_confirmed, message_refused,
     message_view, open_stream, resolution_of, say, thread_confirmed,
@@ -102,6 +102,11 @@ async fn t29_keepalives_alone_keep_a_message_streaming_past_the_window_and_enter
         "the sealed stream",
     )
     .await;
+    a_feed
+        .until("the completion reaches the feed", |delta| {
+            upsert_of(delta, m2).is_some_and(|view| view["status"] == "COMPLETED")
+        })
+        .await;
     let view = message_view(&ctx, &a.passport, t, m2).await;
     assert_eq!(
         entries_of(&view)
