@@ -1,24 +1,3 @@
-//! The watch over a `STREAMING` message: a writer that pushes nothing for the
-//! idle window before closing its stream has its message failed, and a stream
-//! whose chunk the library refused has its failure stored.
-//!
-//! A message the watch fails because its writer went silent has its turn
-//! closed interrupted; one whose stream the library refused, closed failed
-//! ([`super::draft::close`]).
-//!
-//! ENGINE GAP (br-service-engine v0.4.2): the accumulated lane keeps no
-//! last-chunk time a service may read, and a fold can neither fail its message
-//! nor trigger work after it commits. The watch therefore runs on Threads' own
-//! scheduled message, every quarter of the idle window while the message
-//! streams: it compares how far the stream has come (the folded state's
-//! contiguous sequence, read through the engine's reader) with what it saw the
-//! last time — kept in `threads.stream_watch`, so that a forged or repeated
-//! message cannot cut a stream short — and fails the message once the stream
-//! has not moved for the whole window, or as soon as it sees the stream's
-//! refusal — within one period, a quarter of the window. The engine would need
-//! a last-chunk time on the accumulated state and a post-fold hook that can run
-//! pipeline work.
-
 use chrono::{DateTime, TimeDelta, Utc};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -27,8 +6,9 @@ use service_engine::inbound::{ReactionCoordinates, ReactionMessage};
 use service_engine::pipeline::{Ops, Reaction};
 use uuid::Uuid;
 
+use super::close::CloseKind;
 use super::closing;
-use super::draft::CloseKind;
+use super::closure::Closing;
 use super::state::MessageState;
 use super::store;
 use super::stream::{LegacyContent, TurnContent};
@@ -37,12 +17,9 @@ use crate::fault::Fault;
 use crate::principal::ThreadsPrincipal;
 use crate::slices::thread::state::ThreadState;
 
-/// Threads' own scheduled message: time to look at a streaming message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamWatchDue {
     pub message_id: Uuid,
-    /// The look this message is for: only the one the watch last scheduled is
-    /// acted on, so that a repeated or forged message starts no second chain.
     pub tick: Uuid,
 }
 
@@ -67,7 +44,6 @@ fn period() -> TimeDelta {
     TimeDelta::from_std(crate::config::installed().stream_watch_period()).unwrap_or(TimeDelta::MAX)
 }
 
-/// Schedules the next look, under a fresh tick the watch row remembers.
 async fn schedule(ops: &mut Ops<'_>, message: Uuid, at: DateTime<Utc>) -> Result<(), Fault> {
     let tick = Uuid::now_v7();
     sqlx::query("UPDATE threads.stream_watch SET tick = $2 WHERE message_id = $1")
@@ -85,7 +61,6 @@ async fn schedule(ops: &mut Ops<'_>, message: Uuid, at: DateTime<Utc>) -> Result
     Ok(())
 }
 
-/// Starts watching a message opened `STREAMING` at `now`.
 pub async fn open(ops: &mut Ops<'_>, message: Uuid, now: DateTime<Utc>) -> Result<(), Fault> {
     sqlx::query(
         "INSERT INTO threads.stream_watch (message_id, seen_through, since, tick) \
@@ -99,7 +74,6 @@ pub async fn open(ops: &mut Ops<'_>, message: Uuid, now: DateTime<Utc>) -> Resul
     schedule(ops, message, now + period()).await
 }
 
-/// Ends the watch of a message whose stream closed.
 pub async fn end(ops: &mut Ops<'_>, message: Uuid) -> Result<(), Fault> {
     sqlx::query("DELETE FROM threads.stream_watch WHERE message_id = $1")
         .bind(message)
@@ -108,19 +82,13 @@ pub async fn end(ops: &mut Ops<'_>, message: Uuid) -> Result<(), Fault> {
     Ok(())
 }
 
-/// What the watch decides when it looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// The stream moved: remember how far, look again a period later.
     Moved,
-    /// Still within the window: look again.
     Wait { next: DateTime<Utc> },
-    /// Silent for the whole window, or refused: fail the message.
     Fail,
 }
 
-/// The watch's one decision, on what it saw last (`seen`, since `since`) and
-/// what the stream holds now.
 pub fn decide(
     seen: Option<u64>,
     since: DateTime<Utc>,
@@ -149,17 +117,15 @@ pub fn due<'r>(
     message: StreamWatchDue,
 ) -> BoxFuture<'r, Result<(), Fault>> {
     Box::pin(async move {
-        // Threads schedules its looks itself, from a reaction: a service sends
-        // it. Anything else is not the watch's.
         if !cx.actor().is_some_and(|actor| actor.is_service()) {
             return Ok(());
         }
-        // The thread first, then the message: the one lock order of the
-        // service (`slices::thread::store`), which a thread's deletion takes too.
         let Some(thread) = store::thread_of(cx.connection(), message.message_id).await? else {
             return Ok(());
         };
-        cx.load::<ThreadState>(&thread).await?;
+        let Some(mut thread) = cx.load::<ThreadState>(&thread).await? else {
+            return Ok(());
+        };
         let Some(state) = cx.load::<MessageState>(&message.message_id).await? else {
             return Ok(());
         };
@@ -181,8 +147,6 @@ pub fn due<'r>(
         let now = cx.now().as_datetime();
         let held = cx.accumulated::<TurnContent>(&state.id).await?;
         let through = held.contiguous_to.map(|seq| seq.get());
-        // A frame a 0.4 writer pushed under the 0.4 accumulator name refuses
-        // the stream as a refused chunk does.
         let legacy = cx.accumulated::<LegacyContent>(&state.id).await?.state;
         match decide(
             seen.map(|seq| seq as u64),
@@ -220,9 +184,17 @@ pub fn due<'r>(
                     causation_id: Some(cx.message_id()),
                     occurred_at: now,
                 };
-                closing::store_closed(cx, state, &sealed, CloseKind::Watch, Vec::new(), &meta)
-                    .await
-                    .map(|_| ())
+                closing::store_closed(
+                    cx,
+                    state,
+                    &mut thread,
+                    &sealed,
+                    &Closing::of(CloseKind::Watch),
+                    Vec::new(),
+                    &meta,
+                )
+                .await
+                .map(|_| ())
             }
         }
     })

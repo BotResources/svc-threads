@@ -1,27 +1,29 @@
+use contract_threads::llm::TurnClosure;
 use contract_threads::llm::{
     BlockStart, ClosureReason, ContentBlock, DeltaOp, Finalization, HumanId, HumanMessage,
     PlainBlock, ResponseEnding, ResponseMetadata, RuntimeNotice, RuntimeToolResult,
     RuntimeToolResults, TextBlock, ToolName, TurnEntry,
 };
-use contract_threads::{Annotation, AnnotationBody, ArtifactRef, LibraryJson};
+use contract_threads::{Annotation, AnnotationBody, ArtifactRef, LibraryJson, MessageStatus};
 
 use contract_threads::llm::ModelResponse;
 
 use super::*;
+use crate::slices::message::close::{CloseKind, Closed, close, reason};
+use crate::slices::message::closure::Closing;
 
-fn v7() -> Uuid {
+pub(crate) fn v7() -> Uuid {
     Uuid::now_v7()
 }
 
-/// A writer pushing chunks on one message's stream, numbered from 0.
-struct Writer {
-    draft: TurnDraft,
+pub(crate) struct Writer {
+    pub(crate) draft: TurnDraft,
     seq: u64,
     turn: TurnId,
 }
 
 impl Writer {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             draft: TurnDraft::default(),
             seq: 0,
@@ -29,7 +31,7 @@ impl Writer {
         }
     }
 
-    fn push(&mut self, chunk: Chunk) -> &mut Self {
+    pub(crate) fn push(&mut self, chunk: Chunk) -> &mut Self {
         fold(
             &mut self.draft,
             self.seq,
@@ -39,18 +41,20 @@ impl Writer {
         self
     }
 
-    fn delta(&mut self, entry: EntryId, op: DeltaOp) -> &mut Self {
+    pub(crate) fn delta(&mut self, entry: EntryId, op: DeltaOp) -> &mut Self {
         let chunk = Chunk::delta(&ResponseDelta::new(self.turn, entry, op)).unwrap();
         self.push(chunk)
     }
 
-    fn entry(&mut self, entry: TurnEntry) -> &mut Self {
+    pub(crate) fn entry(&mut self, entry: TurnEntry) -> &mut Self {
         self.push(Chunk::entry(&entry).unwrap())
     }
 
-    /// A response whose one text block grows from `parts`, completed when
-    /// `ending` is given.
-    fn text_response(&mut self, parts: &[&str], ending: Option<ResponseEnding>) -> EntryId {
+    pub(crate) fn text_response(
+        &mut self,
+        parts: &[&str],
+        ending: Option<ResponseEnding>,
+    ) -> EntryId {
         let entry = EntryId::from_uuid(v7()).unwrap();
         let block = BlockId::from_uuid(v7()).unwrap();
         self.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
@@ -68,8 +72,7 @@ impl Writer {
         entry
     }
 
-    /// A response ending on a runtime call of `search`; answers the call's id.
-    fn calling_response(&mut self) -> BlockId {
+    pub(crate) fn calling_response(&mut self) -> BlockId {
         let entry = EntryId::from_uuid(v7()).unwrap();
         let call = BlockId::from_uuid(v7()).unwrap();
         self.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
@@ -92,7 +95,7 @@ impl Writer {
         call
     }
 
-    fn results(&mut self, call: BlockId) -> &mut Self {
+    pub(crate) fn results(&mut self, call: BlockId) -> &mut Self {
         let result = RuntimeToolResult::new(
             BlockId::from_uuid(v7()).unwrap(),
             call,
@@ -111,7 +114,7 @@ impl Writer {
         self.entry(entry.into())
     }
 
-    fn judged(&self) -> Judged {
+    pub(crate) fn judged(&self) -> Judged {
         self.judged_holding(&HashSet::new())
     }
 
@@ -126,12 +129,12 @@ impl Writer {
             .unwrap()
     }
 
-    fn closed(&self, kind: CloseKind) -> Closed {
-        close(self.judged(), kind).unwrap()
+    pub(crate) fn closed(&self, kind: CloseKind) -> Closed {
+        close(self.judged(), &Closing::of(kind)).unwrap()
     }
 }
 
-fn kinds(content: &Content) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn kinds(content: &Content) -> Vec<(&'static str, &'static str)> {
     content
         .entries
         .iter()
@@ -139,7 +142,7 @@ fn kinds(content: &Content) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-fn closure_of(content: &Content) -> serde_json::Value {
+pub(crate) fn closure_of(content: &Content) -> serde_json::Value {
     let closure = content
         .entries
         .last()
@@ -191,9 +194,6 @@ fn a_tool_call_answered_by_a_whole_results_entry_then_an_answer_completes() {
     );
 }
 
-/// The library's 2.1 order: an incoming entry at any point of an open turn —
-/// here a runtime notice while a call waits for its results, which 2.0
-/// refused `entry_out_of_order`.
 #[test]
 fn a_runtime_notice_while_a_call_is_outstanding_folds_and_the_turn_completes() {
     let mut writer = Writer::new();
@@ -399,7 +399,7 @@ fn the_judgement_under_the_message_cuts_at_an_id_another_message_holds() {
     let refusal = judged.refusal.clone().unwrap();
     assert_eq!(refusal.code, "reused_identity");
     assert_eq!(refusal.object_id, Some(answer.as_uuid()));
-    let closed = close(judged, CloseKind::Complete).unwrap();
+    let closed = close(judged, &Closing::of(CloseKind::Complete)).unwrap();
     assert_eq!(closed.status, MessageStatus::Failed);
 }
 
@@ -517,4 +517,56 @@ fn a_chunk_holding_nul_is_refused_and_nothing_after_it_folds() {
             .contains("\\u0000"),
         "what the close stores holds no U+0000"
     );
+}
+
+#[test]
+fn a_keepalive_folds_to_nothing_before_between_and_inside_a_response() {
+    let mut plain = Writer::new();
+    plain.text_response(&["Hel", "lo"], Some(ResponseEnding::finished()));
+
+    let mut kept_alive = Writer::new();
+    kept_alive.push(Chunk::keepalive());
+    let entry = EntryId::from_uuid(v7()).unwrap();
+    let block = BlockId::from_uuid(v7()).unwrap();
+    kept_alive.delta(entry, DeltaOp::response_started(ResponseMetadata::new()));
+    kept_alive.push(Chunk::keepalive());
+    kept_alive.delta(entry, DeltaOp::block_started(block, BlockStart::text()));
+    kept_alive.push(Chunk::keepalive());
+    kept_alive.delta(entry, DeltaOp::text_appended(block, "Hel"));
+    kept_alive.push(Chunk::keepalive());
+    kept_alive.delta(entry, DeltaOp::text_appended(block, "lo"));
+    kept_alive.delta(
+        entry,
+        DeltaOp::block_finalized(block, Finalization::accumulated()),
+    );
+    kept_alive.push(Chunk::keepalive());
+    kept_alive.delta(
+        entry,
+        DeltaOp::response_completed(ResponseEnding::finished()),
+    );
+    kept_alive.push(Chunk::keepalive());
+
+    assert_eq!(kept_alive.draft.refusal(), None);
+    let alive = kept_alive.closed(CloseKind::Complete);
+    let direct = plain.closed(CloseKind::Complete);
+    assert_eq!(alive.status, direct.status);
+    assert_eq!(kinds(&alive.content), kinds(&direct.content));
+    assert!(alive.content.annotations.is_empty());
+}
+
+#[test]
+fn a_keepalive_changes_neither_a_stream_that_produces_nor_one_already_refused() {
+    let mut writer = Writer::new();
+    writer.text_response(&["half"], None);
+    let before = writer.draft.clone();
+    writer.push(Chunk::keepalive());
+    assert_eq!(writer.draft, before);
+
+    let mut refused = Writer::new();
+    refused.push(Chunk::Entry {
+        entry: LibraryJson::from_json(serde_json::json!({ "type": "no_such_entry" })),
+    });
+    let refusal = refused.draft.refusal().cloned().expect("refused");
+    refused.push(Chunk::keepalive());
+    assert_eq!(refused.draft.refusal(), Some(&refusal));
 }

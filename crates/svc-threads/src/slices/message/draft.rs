@@ -1,54 +1,19 @@
-//! A `STREAMING` message's turn as its chunks fold, and the content it is
-//! stored with when its stream closes. Pure: the accumulator calls [`fold`] for
-//! every chunk, in sequence; the view, the watch, the close commands and the
-//! agent context [`TurnDraft::judge`] what folded.
-//!
-//! The library has the last word on every chunk: a response delta is applied to
-//! the library's `ResponseDraft` of its entry, and the response it completes —
-//! like every whole entry — is pushed into the library's `AITurn`, whose rules
-//! (order, results answering their calls, ids used once) refuse what does not
-//! fit. The first chunk refused is recorded and nothing after it folds: the
-//! stream watch then fails the message ([`TurnDraft::refusal`]).
-//!
-//! A fold does not know its key — the engine hands it the state, the sequence
-//! and the chunk, never the message — so it judges the turn under a probe id
-//! ([`PROBE_TURN`]). [`TurnDraft::judge`] rebuilds the turn under the message's
-//! own id, agent and author, and with the ids other messages already hold:
-//! what the probe could not see (an id equal to the message's, a delta naming
-//! another turn, an id another message holds) cuts the turn there, as a refused
-//! chunk does. The view, the watch, the close and the agent context all judge
-//! the same way, so what members see is what the message closes to.
-//!
-//! Closing the turn is Threads': a closure pushed on the stream is refused,
-//! and the closure a close appends is a new entry under a UUIDv7 Threads
-//! mints when it closes — freshly, never derived (only the upgrade derives the
-//! closure of a message it converts, [`super::derived`]). A completion its
-//! redelivery judges again mints another: the first one's transaction either
-//! committed (the redelivery is answered from the command's claim) or rolled
-//! back with its closure.
-
 use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
-    AITurn, AgentId, Author, BlockId, ClosureReason, DeltaOp, DeltaOutcome, DraftPhase, EntryId,
-    Error, InterruptionReason, RecordSet, ResponseDelta, ResponseDraft, Turn, TurnClosure,
-    TurnEntry, TurnEntryKind, TurnId,
+    AITurn, AgentId, Author, BlockId, DeltaOutcome, DraftPhase, EntryId, Error, RecordSet,
+    ResponseDelta, ResponseDraft, Turn, TurnEntry, TurnEntryKind, TurnId,
 };
-use contract_threads::{Chunk, MessageInvalidError, MessageStatus, PlacedAnnotation};
+use contract_threads::{Chunk, MessageInvalidError, PlacedAnnotation};
 use service_engine::error::EngineError;
 use uuid::Uuid;
 
 use super::content::{Content, citation_ids};
 use crate::fault::corrupt;
 
-/// The turn id a fold judges under: a fold does not know its message.
 const PROBE_TURN: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0001);
-/// The agent a fold judges under.
 const PROBE_AGENT: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0002);
 
-/// Why a stream was cut: a code — the library's ([`Error::code`]) or one of
-/// Threads' ([`MessageInvalidError`]) — and the object and place the library
-/// names, at the chunk it fell on when a chunk was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamRefusal {
     pub seq: Option<u64>,
@@ -77,29 +42,18 @@ impl StreamRefusal {
     }
 }
 
-/// What a stream holds, in arrival order.
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
-    /// A whole entry, or — `streamed` — a response the library completed from
-    /// the stream's deltas.
-    Entry {
-        entry: TurnEntry,
-        streamed: bool,
-    },
-    /// A response still produced, or one its writer interrupted.
+    Entry { entry: TurnEntry, streamed: bool },
     Response(Box<ResponseDraft>),
     Annotation(PlacedAnnotation),
 }
 
-/// What the stream of one message folded so far.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TurnDraft {
-    /// The entries the library accepted, under the probe id.
     probe: Option<AITurn>,
     items: Vec<Item>,
-    /// The item of the response being produced.
     producing: Option<usize>,
-    /// The turn the stream's deltas name.
     delta_turn: Option<TurnId>,
     refusal: Option<StreamRefusal>,
 }
@@ -112,15 +66,10 @@ fn probe_turn() -> AITurn {
     )
 }
 
-/// Folds one raw chunk, in sequence. Never fails: a chunk the contract or the
-/// library refuses is recorded as the stream's refusal, and nothing after it
-/// folds.
 pub fn fold(draft: &mut TurnDraft, seq: u64, raw: serde_json::Value) {
     if draft.refusal.is_some() {
         return;
     }
-    // U+0000 the library accepts in a text, Postgres cannot keep: refused at
-    // the chunk, so that the stream never holds what its close could not store.
     let folded = if super::content::holds_nul(&raw) {
         Err(StreamRefusal::threads(
             MessageInvalidError::NulCharacter,
@@ -142,13 +91,10 @@ pub fn fold(draft: &mut TurnDraft, seq: u64, raw: serde_json::Value) {
 }
 
 impl TurnDraft {
-    /// The first refused chunk, if any: the message has failed there.
     pub fn refusal(&self) -> Option<&StreamRefusal> {
         self.refusal.as_ref()
     }
 
-    /// The stream refused from outside its fold — a frame under the
-    /// accumulator name of Threads 0.4: nothing it holds after now folds.
     pub fn refuse(&mut self, refusal: StreamRefusal) {
         self.refusal.get_or_insert(refusal);
     }
@@ -157,7 +103,6 @@ impl TurnDraft {
         self.probe.get_or_insert_with(probe_turn)
     }
 
-    /// The entries seen so far, by id: those an annotation may follow.
     fn holds_entry(&self, entry: Uuid) -> bool {
         self.items.iter().any(|item| match item {
             Item::Entry { entry: held, .. } => held.id().as_uuid() == entry,
@@ -168,6 +113,7 @@ impl TurnDraft {
 
     fn fold_chunk(&mut self, chunk: Chunk) -> Result<(), StreamRefusal> {
         match chunk {
+            Chunk::Keepalive => Ok(()),
             Chunk::Delta { delta } => {
                 let delta = delta
                     .to_delta()
@@ -179,12 +125,6 @@ impl TurnDraft {
                     .to_entry()
                     .map_err(|error| StreamRefusal::library(&error))?;
                 let id = Some(entry.id().as_uuid());
-                // Threads' rule, not the library's (2.1 orders entries
-                // freely): one response is produced at a time and nothing
-                // joins the turn meanwhile, so the items' arrival order is the
-                // turn's entry order, which `Judged::content` relies on. A
-                // writer still reaches every order the library accepts by
-                // pushing the entry before or after the response.
                 if self.producing.is_some() {
                     return Err(StreamRefusal::threads(
                         MessageInvalidError::ResponseStillProducing,
@@ -219,7 +159,6 @@ impl TurnDraft {
                 after_entry_id,
                 annotation,
             } => {
-                // An annotation's id is minted like a block's: a UUIDv7.
                 BlockId::from_uuid(annotation.id)
                     .map_err(|error| StreamRefusal::library(&error))?;
                 if !self.holds_entry(after_entry_id) {
@@ -259,9 +198,6 @@ impl TurnDraft {
             }
             None => self.items.len(),
         };
-        // Every delta of a stream names one turn: a draft opened under the
-        // first one refuses a delta naming another (the library's target
-        // error).
         let turn = *self.delta_turn.get_or_insert(delta.turn());
         let mut draft = ResponseDraft::new(turn, delta.entry());
         let outcome = draft
@@ -272,8 +208,6 @@ impl TurnDraft {
         self.settle(outcome, at)
     }
 
-    /// A response the library completed joins the turn — or, refused there,
-    /// leaves the stream; one its writer interrupted stays, interrupted.
     fn settle(&mut self, outcome: DeltaOutcome, at: usize) -> Result<(), StreamRefusal> {
         match outcome {
             DeltaOutcome::Completed { .. } => {
@@ -307,9 +241,6 @@ impl TurnDraft {
         }
     }
 
-    /// The stream judged under the message's own id, agent and author, the ids
-    /// in `held` belonging to other messages: the turn the library accepts, and
-    /// what the stream holds around it, cut at the first item that does not fit.
     pub fn judge(
         &self,
         turn: TurnId,
@@ -337,9 +268,6 @@ impl TurnDraft {
                 break;
             }
             let kept = match item {
-                // The deltas name the turn they fold into: under another
-                // turn than the message's, nothing they built is the
-                // message's.
                 Item::Entry {
                     entry,
                     streamed: true,
@@ -394,9 +322,6 @@ impl TurnDraft {
 }
 
 impl TurnDraft {
-    /// The ids each entry the stream holds whole declares, read off the
-    /// library's records of the probe turn — which every such entry joined
-    /// when it folded.
     fn declared_by_entry(&self) -> Result<HashMap<Uuid, Vec<Uuid>>, EngineError> {
         let Some(probe) = &self.probe else {
             return Ok(HashMap::new());
@@ -407,8 +332,6 @@ impl TurnDraft {
     }
 }
 
-/// The ids an item declares: an entry's as its records declare them, a
-/// response's as its draft snapshot's records do, an annotation its own.
 fn item_ids(item: &Item, declared: &HashMap<Uuid, Vec<Uuid>>) -> Result<Vec<Uuid>, EngineError> {
     Ok(match item {
         Item::Entry { entry, .. } => declared
@@ -428,23 +351,17 @@ fn item_ids(item: &Item, declared: &HashMap<Uuid, Vec<Uuid>>) -> Result<Vec<Uuid
     })
 }
 
-/// An item of a judged stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JudgedItem {
-    /// An entry of the turn, by id.
     Entry(Uuid),
-    /// A response still produced, or interrupted.
     Response(Box<ResponseDraft>),
     Annotation(PlacedAnnotation),
 }
 
-/// A stream judged under its message: the library's turn of what it accepted,
-/// and its items around it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Judged {
     pub turn: AITurn,
     pub items: Vec<JudgedItem>,
-    /// The stream's refusal, or where the judgement cut it.
     pub refusal: Option<StreamRefusal>,
 }
 
@@ -453,7 +370,6 @@ impl Judged {
         self.refusal.get_or_insert(refusal);
     }
 
-    /// The response still being produced, if any.
     pub fn producing(&self) -> Option<&ResponseDraft> {
         self.items.iter().find_map(|item| match item {
             JudgedItem::Response(draft)
@@ -465,15 +381,10 @@ impl Judged {
         })
     }
 
-    /// Every id the judged stream declares.
     pub fn identities(&self) -> Result<Vec<Uuid>, EngineError> {
         Ok(self.content()?.identities())
     }
 
-    /// The records of what the stream holds, in arrival order: the turn's
-    /// entries as the library decomposes them, a response being produced or
-    /// interrupted as its draft's snapshot, the annotations after their
-    /// entries.
     pub fn content(&self) -> Result<Content, EngineError> {
         let set = RecordSet::from_turn(&self.turn.clone().into()).map_err(corrupt)?;
         let mut content = Content::default();
@@ -500,7 +411,6 @@ impl Judged {
                 JudgedItem::Annotation(placed) => content.annotations.push(placed.clone()),
             }
         }
-        // What the turn holds past the items: its closure.
         for entry in entries {
             content.blocks.extend(blocks_of(entry.id()));
             content.entries.push(entry.clone());
@@ -509,109 +419,6 @@ impl Judged {
     }
 }
 
-/// What closes a stream.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseKind {
-    /// `message.complete`: the writer says the stream is whole.
-    Complete,
-    /// `message.fail`: the writer failed it.
-    Fail,
-    /// `message.cancel`, typically a user's stop.
-    Cancel,
-    /// The stream watch: the writer went silent, or a chunk was refused.
-    Watch,
-}
-
-/// Why Threads failed a message whose stream gave no reason of its own.
-pub mod reason {
-    /// The writer failed it (`message.fail`).
-    pub const FAILED_BY_WRITER: &str = "failed_by_writer";
-    /// Its writer pushed nothing for the idle window.
-    pub const STREAM_IDLE: &str = "stream_idle";
-    /// A completion while a response was still produced.
-    pub const RESPONSE_STILL_PRODUCING: &str = "response_still_producing";
-}
-
-/// The content a stream is stored with when it closes, its status, and why it
-/// failed when it did.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Closed {
-    pub status: MessageStatus,
-    pub content: Content,
-    pub reason: Option<&'static str>,
-}
-
-/// Closes a judged stream: a response still produced is interrupted (kept for
-/// members, never sent to a runner), then the turn is closed with the
-/// library's closure, a new entry under a UUIDv7 Threads mints. A completion
-/// the library accepts —
-/// nothing refused, no response still produced, the turn closable completed
-/// (no tool call without its result) — is `COMPLETED`; a cancel `CANCELLED`;
-/// anything else `FAILED`, closed failed — or interrupted, when its writer
-/// went silent. A tool call left without a result stays unanswered, as the
-/// library allows on an abnormal closure.
-pub fn close(mut judged: Judged, kind: CloseKind) -> Result<Closed, EngineError> {
-    // The closure is a new entry of the turn: Threads mints its UUIDv7.
-    let closure_id = Uuid::now_v7();
-    let interruption = match kind {
-        CloseKind::Complete | CloseKind::Fail => InterruptionReason::failed(),
-        CloseKind::Cancel => InterruptionReason::cancelled(),
-        CloseKind::Watch => InterruptionReason::interrupted(),
-    };
-    let mut was_producing = false;
-    for item in &mut judged.items {
-        if let JudgedItem::Response(draft) = item
-            && matches!(draft.phase(), DraftPhase::Producing { .. })
-        {
-            was_producing = true;
-            let stop = ResponseDelta::new(
-                draft.turn(),
-                draft.entry(),
-                DeltaOp::response_interrupted(interruption.clone()),
-            );
-            draft.apply(&stop).map_err(corrupt)?;
-        }
-    }
-    let refusal = judged.refusal.as_ref().map(|refusal| refusal.code);
-    let failed = |detail: &'static str| -> Result<_, EngineError> {
-        Ok((
-            MessageStatus::Failed,
-            ClosureReason::failed(detail).map_err(corrupt)?,
-            Some(detail),
-        ))
-    };
-    let (status, closure, reason) = match (kind, refusal) {
-        (CloseKind::Watch, None) => (
-            MessageStatus::Failed,
-            ClosureReason::interrupted(),
-            Some(reason::STREAM_IDLE),
-        ),
-        (CloseKind::Cancel, None) => (MessageStatus::Cancelled, ClosureReason::cancelled(), None),
-        (CloseKind::Fail, None) => failed(reason::FAILED_BY_WRITER)?,
-        (_, Some(code)) => failed(code)?,
-        (CloseKind::Complete, None) if was_producing => failed(reason::RESPONSE_STILL_PRODUCING)?,
-        (CloseKind::Complete, None) => {
-            let completed = closure_entry(closure_id, ClosureReason::completed())?;
-            match judged.turn.would_refuse(&completed) {
-                None => (MessageStatus::Completed, ClosureReason::completed(), None),
-                Some(error) => failed(MessageInvalidError::of_library(error.code()).as_str())?,
-            }
-        }
-    };
-    let closure = closure_entry(closure_id, closure)?;
-    judged.turn.push_entry(closure).map_err(corrupt)?;
-    Ok(Closed {
-        status,
-        content: judged.content()?,
-        reason,
-    })
-}
-
-/// A turn's closure under `id`.
-pub fn closure_entry(id: Uuid, reason: ClosureReason) -> Result<TurnEntry, EngineError> {
-    Ok(TurnClosure::new(EntryId::from_uuid(id).map_err(corrupt)?, reason).into())
-}
-
 #[cfg(test)]
 #[path = "draft_tests.rs"]
-mod tests;
+pub(crate) mod tests;

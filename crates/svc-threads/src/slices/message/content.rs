@@ -1,13 +1,3 @@
-//! A message's content as Threads holds it: its turn's entries and blocks as
-//! the library's storage records (`br-llm-messages-records/1`), in the order the
-//! library decomposes the turn, and its annotations after their entries.
-//!
-//! Threads keeps no decomposition of its own: a turn becomes rows through
-//! `RecordSet::from_turn` and comes back through `RecordSet::into_turns`, so
-//! what Threads stores is exactly what the library loads. The library judges
-//! every turn before it is stored; its refusals are answered with its own error
-//! code ([`refusal_of`]).
-
 use std::collections::{HashMap, HashSet};
 
 use contract_threads::llm::{
@@ -19,20 +9,14 @@ use uuid::Uuid;
 
 use crate::command::Refusal;
 
-/// A message's content: its entries and blocks as records, its annotations.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Content {
-    /// In the order of the turn.
     pub entries: Vec<EntryRecord>,
-    /// In the order the library decomposes the turn: each root block followed
-    /// by its children.
     pub blocks: Vec<BlockRecord>,
-    /// In order: by the entry they follow, then their place after it.
     pub annotations: Vec<PlacedAnnotation>,
 }
 
 impl Content {
-    /// The records of a whole turn, with its annotations.
     pub fn of_turn(turn: &Turn, annotations: Vec<PlacedAnnotation>) -> Result<Self, Error> {
         let set = RecordSet::from_turn(turn)?;
         Ok(Self {
@@ -46,16 +30,18 @@ impl Content {
         self.entries.is_empty() && self.blocks.is_empty() && self.annotations.is_empty()
     }
 
-    /// Whether the turn holds an entry other than its closure: a message failed
-    /// before its first entry is left out of a runner's conversation.
+    pub fn closure_entry(&self) -> Option<&EntryRecord> {
+        self.entries
+            .iter()
+            .find(|entry| entry.kind() == TurnEntryKind::TurnClosure)
+    }
+
     pub fn has_an_entry(&self) -> bool {
         self.entries
             .iter()
             .any(|entry| entry.kind() != TurnEntryKind::TurnClosure)
     }
 
-    /// The rows of the turn the library's conversation holds: every row but
-    /// those of an interrupted response, which members see and a runner never.
     pub fn complete_rows(&self) -> (Vec<EntryRecord>, Vec<BlockRecord>) {
         let interrupted: HashSet<_> = self
             .entries
@@ -78,7 +64,6 @@ impl Content {
         (entries, blocks)
     }
 
-    /// The library's turn of the complete rows, under its turn row.
     pub fn to_turn(&self, record: TurnRecord) -> Result<Turn, Error> {
         let (entries, blocks) = self.complete_rows();
         let mut turns = RecordSet::new()
@@ -89,8 +74,6 @@ impl Content {
         Ok(turns.remove(0))
     }
 
-    /// Every id the content declares: its entries', its blocks' (children
-    /// included), its text blocks' citations' and its annotations'.
     pub fn identities(&self) -> Vec<Uuid> {
         let mut ids: Vec<Uuid> = self.entries.iter().map(|e| e.id().as_uuid()).collect();
         for block in &self.blocks {
@@ -101,9 +84,6 @@ impl Content {
         ids
     }
 
-    /// The ids each entry declares, by entry: its own, its blocks' (children
-    /// included) and their citations' — read off the library's records, so
-    /// that what counts as an id is the library's decomposition.
     pub fn identities_by_entry(&self) -> HashMap<Uuid, Vec<Uuid>> {
         let mut by_entry: HashMap<Uuid, Vec<Uuid>> = self
             .entries
@@ -119,7 +99,6 @@ impl Content {
         by_entry
     }
 
-    /// The artifacts its `ARTIFACT` annotations name.
     pub fn artifacts(&self) -> Vec<Uuid> {
         self.annotations
             .iter()
@@ -127,14 +106,11 @@ impl Content {
             .collect()
     }
 
-    /// Whether `entry` is one of its entries.
     pub fn holds_entry(&self, entry: Uuid) -> bool {
         self.entries.iter().any(|row| row.id().as_uuid() == entry)
     }
 }
 
-/// The citation ids of a text block's record: a citation is the library's
-/// citation of a text block, its id in the record's payload.
 pub fn citation_ids(block: &BlockRecord) -> Vec<Uuid> {
     if block.kind() != ContentBlockKind::Text {
         return Vec::new();
@@ -154,19 +130,15 @@ pub fn citation_ids(block: &BlockRecord) -> Vec<Uuid> {
         .collect()
 }
 
-/// The first id named twice in `ids`.
 pub fn first_repeated(ids: impl IntoIterator<Item = Uuid>) -> Option<Uuid> {
     let mut seen = HashSet::new();
     ids.into_iter().find(|id| !seen.insert(*id))
 }
 
-/// A `MESSAGE_INVALID` refusal under one of Threads' own codes.
 pub fn invalid(code: MessageInvalidError) -> Refusal {
     Refusal::new(ReasonCode::MessageInvalid).with("error", code.as_str())
 }
 
-/// The refusal of what the library refuses: `MESSAGE_INVALID` under the
-/// library's code, naming the object and the place the library names.
 pub fn refusal_of(error: &Error) -> Refusal {
     let refusal = invalid(MessageInvalidError::of_library(error.code()));
     let refusal = match error.object_id() {
@@ -179,9 +151,6 @@ pub fn refusal_of(error: &Error) -> Refusal {
     }
 }
 
-/// The refusal of content whose every id the caller minted for a new object —
-/// plain blocks, which reference nothing: an id the library refuses as no
-/// UUIDv7 is `ID_NOT_UUIDV7`, anything else the library's `MESSAGE_INVALID`.
 pub fn minted_refusal_of(error: &Error) -> Refusal {
     match error.code() {
         ErrorCode::InvalidIdentity => {
@@ -199,19 +168,6 @@ pub fn minted_refusal_of(error: &Error) -> Refusal {
     }
 }
 
-/// The refusal of a turn or an entry the library refuses, read from the
-/// caller's JSON: an id it declares for a new object (an entry's, a block's, a
-/// citation's) that is no UUIDv7 is `ID_NOT_UUIDV7`; a reference that is none
-/// (an agent, a human, the call a result answers), and anything else, the
-/// library's `MESSAGE_INVALID`.
-///
-/// The library names the id it refused, not its role, and its location stops
-/// at the entry. The role is read off the library's own decomposition: in a
-/// copy of the JSON every UUID the library would refuse is replaced by a fresh
-/// UUIDv7 stand-in, and `declared` answers the ids the copy declares, as the
-/// library reads it; the refused id is a declared one when its stand-in is. A
-/// malformed id the library cannot name, or a copy it still refuses for
-/// another reason, cannot be placed: the library's `MESSAGE_INVALID`.
 pub fn declared_refusal_of(
     json: &serde_json::Value,
     error: &Error,
@@ -232,9 +188,6 @@ pub fn declared_refusal_of(
     }
 }
 
-/// Replaces, in place, every string of `value` that is a UUID the library
-/// refuses as an id (not a UUIDv7) by a fresh UUIDv7, the same one for every
-/// occurrence of an id.
 fn stand_in_refused_ids(value: &mut serde_json::Value, stand_ins: &mut HashMap<Uuid, Uuid>) {
     match value {
         serde_json::Value::String(text) => {
@@ -259,7 +212,6 @@ fn stand_in_refused_ids(value: &mut serde_json::Value, stand_ins: &mut HashMap<U
     }
 }
 
-/// Whether a string of `value`, or a key, holds U+0000.
 pub fn holds_nul(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(text) => text.contains('\0'),
@@ -271,10 +223,6 @@ pub fn holds_nul(value: &serde_json::Value) -> bool {
     }
 }
 
-/// `MESSAGE_INVALID` (`nul_character`) when what a command carries holds
-/// U+0000. The library accepts it in a text, but Postgres refuses it in `text`
-/// and `jsonb`: the store would fail on a terminal fault and the command stay
-/// unanswered, so it is refused when judged.
 pub fn nul_refusal<T: serde::Serialize>(carried: &T) -> Option<Refusal> {
     let value = serde_json::to_value(carried).ok()?;
     holds_nul(&value).then(|| invalid(MessageInvalidError::NulCharacter))

@@ -1,20 +1,8 @@
-//! `threads.message` and the rows that are part of a message's state —
-//! `message_entry`, `entry_block` (the library's records), `message_annotation`
-//! and `message_identity` — through the engine's `Persistence` seam, soft EDA.
-//!
-//! A batch read is five statements whatever its size: the messages with their
-//! user author's current name, their entries, their blocks, their annotations,
-//! and the members of their threads. A record read back is checked by the
-//! library (`check_local`), never trusted. A save writes the message row, the
-//! content its transition wrote or removed (entries before their blocks, both
-//! before the annotations, the identities with them), and the facts of the
-//! change, in the pipeline's transaction.
-
 use std::collections::{BTreeSet, HashMap};
 
 use contract_threads::llm::{
     ActorRef, AgentId, Author, BlockId, BlockRecord, ContentBlockKind, EntryId, EntryRecord,
-    HumanId, ObservedAt, OpaqueJson, RepresentationState, TurnEntryKind, TurnId,
+    HumanId, ObservedAt, OpaqueJson, RepresentationState, TurnEntryKind, TurnId, TurnKind,
 };
 use contract_threads::{
     Annotation, AnnotationBody, AnnotationKind, MessageStatus, PlacedAnnotation,
@@ -29,6 +17,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::closure::Kind;
 use super::content::Content;
 use super::state::{MessageAuthor, MessageChange, MessageState, turn_kind_of_db};
 use crate::directory::KNOWN_USERS_TABLE;
@@ -38,7 +27,6 @@ use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
 pub const TABLE: &str = "threads.message";
 
-/// The schema of the content of a message Threads 0.5 writes.
 pub const CONTENT_SCHEMA: &str = contract_threads::llm::CONVERSATION_SCHEMA;
 
 pub struct MessageStore;
@@ -162,15 +150,12 @@ async fn write_changes(
     .await
 }
 
-/// Removes a message's content, its identities but its own, and whatever
-/// Threads 0.4 kept of it: no previous content survives anywhere.
 async fn remove_content(conn: &mut PgConnection, message: Uuid) -> Result<(), EngineError> {
     for statement in [
         "DELETE FROM threads.message_annotation WHERE message_id = $1",
         "DELETE FROM threads.entry_block WHERE message_id = $1",
         "DELETE FROM threads.message_entry WHERE message_id = $1",
         "DELETE FROM threads.message_identity WHERE message_id = $1 AND id <> $1",
-        // What Threads 0.4 kept of the message (read by the upgrade only).
         "DELETE FROM threads.message_block WHERE message_id = $1",
         "DELETE FROM threads.message_item WHERE message_id = $1",
     ] {
@@ -182,8 +167,6 @@ async fn remove_content(conn: &mut PgConnection, message: Uuid) -> Result<(), En
     Ok(())
 }
 
-/// A message's content, whole: its entries, its blocks, its annotations and
-/// its identities, one insert each.
 pub async fn write_content(
     conn: &mut PgConnection,
     message: Uuid,
@@ -320,7 +303,6 @@ async fn insert_blocks(
     Ok(())
 }
 
-/// The place of each annotation among those after the same entry.
 pub fn positions_after_their_entry(annotations: &[PlacedAnnotation]) -> Vec<usize> {
     let mut seen: HashMap<Uuid, usize> = HashMap::new();
     annotations
@@ -375,7 +357,6 @@ async fn insert_annotations(
     Ok(())
 }
 
-/// An annotation's content, as its kind types it.
 fn annotation_content(body: &AnnotationBody) -> Result<serde_json::Value, EngineError> {
     let mut value = serde_json::to_value(body).map_err(|source| encode("an annotation", source))?;
     Ok(value
@@ -384,7 +365,6 @@ fn annotation_content(body: &AnnotationBody) -> Result<serde_json::Value, Engine
         .unwrap_or(serde_json::Value::Null))
 }
 
-/// An annotation's body, read back through its kind's typed content.
 fn annotation_body(kind: &str, content: serde_json::Value) -> Result<AnnotationBody, EngineError> {
     let kind = AnnotationKind::parse(kind).map_err(corrupt)?;
     serde_json::from_value(serde_json::json!({ "kind": kind.as_str(), "content": content }))
@@ -409,8 +389,6 @@ pub async fn insert_identities(
     Ok(())
 }
 
-/// Of `ids`, those a message already declared: an id is used once. The
-/// identities of `except` do not count — an edit keeps its own message's.
 pub async fn held_ids(
     conn: &mut PgConnection,
     ids: &[Uuid],
@@ -429,8 +407,6 @@ pub async fn held_ids(
     .await?)
 }
 
-/// Of `ids`, those a message already declared, each with the message that
-/// declared it: one statement, whatever the number of ids.
 pub async fn holders(
     conn: &mut PgConnection,
     ids: &[Uuid],
@@ -446,7 +422,6 @@ pub async fn holders(
     .await?)
 }
 
-/// The thread a message belongs to, if it exists.
 pub async fn thread_of(
     conn: &mut PgConnection,
     message: Uuid,
@@ -459,8 +434,6 @@ pub async fn thread_of(
     )
 }
 
-/// The messages of the threads of the members named, one read bounded by the
-/// engine's ceiling.
 impl CohortIndex for MessageStore {
     fn keys_in_cohorts<'a>(
         conn: &'a mut PgConnection,
@@ -484,11 +457,6 @@ impl CohortIndex for MessageStore {
     }
 }
 
-/// One page of a branch of `thread`, the newest first, read for `member`
-/// (nothing when they are not a member of it): the branch ending at `tip`, or
-/// the active branch — the one ending at the thread's most recent message —
-/// when no tip is named; the page holds the messages older than `cursor` when
-/// one is given. One statement.
 pub async fn branch_page(
     pg: &PgPool,
     member: Uuid,
@@ -565,6 +533,7 @@ async fn read_many(
             annotations: annotations.remove(&message.id).unwrap_or_default(),
         };
         message.members = members.get(&message.thread_id).cloned().unwrap_or_default();
+        check_status_follows_closure(message)?;
     }
     Ok(messages
         .into_iter()
@@ -572,7 +541,24 @@ async fn read_many(
         .collect())
 }
 
-/// A row read back is validated, never trusted.
+pub(super) fn check_status_follows_closure(message: &MessageState) -> Result<(), EngineError> {
+    if message.turn_kind != TurnKind::AITurn {
+        return Ok(());
+    }
+    let Some(closure) = message.content.closure_entry() else {
+        return Ok(());
+    };
+    let payload = serde_json::to_value(closure.payload()).map_err(corrupt)?;
+    let wire = payload["reason"]["type"].as_str().unwrap_or("NULL");
+    match Kind::parse(wire).map(Kind::status) {
+        Some(status) if status == message.status => Ok(()),
+        _ => Err(corrupt(UnknownStoredValue {
+            column: "message.status",
+            value: format!("{} beside a {wire} closure", message.status.as_str()),
+        })),
+    }
+}
+
 fn message_of_row(row: &PgRow) -> Result<MessageState, EngineError> {
     let unknown = |column: &'static str, value: &str| {
         corrupt(UnknownStoredValue {
@@ -630,7 +616,6 @@ fn payload_of(row: &PgRow) -> Result<OpaqueJson, EngineError> {
     serde_json::from_value(payload).map_err(corrupt)
 }
 
-/// One entry row, as the library's record, checked by the library.
 pub fn entry_of_row(row: &PgRow) -> Result<EntryRecord, EngineError> {
     let kind: String = row.try_get("kind")?;
     let state: String = row.try_get("state")?;
@@ -669,7 +654,6 @@ pub fn entry_of_row(row: &PgRow) -> Result<EntryRecord, EngineError> {
     Ok(record)
 }
 
-/// One block row, as the library's record.
 pub fn block_of_row(row: &PgRow) -> Result<BlockRecord, EngineError> {
     let kind: String = row.try_get("kind")?;
     let state: String = row.try_get("state")?;
@@ -793,9 +777,56 @@ async fn members_of(
 
 #[cfg(test)]
 mod tests {
+    use contract_threads::llm::{ClosureReason, ResponseEnding};
     use contract_threads::{AnnotationBody, Notice};
 
+    use super::super::close::{CloseKind, close};
+    use super::super::closure::{Closing, Named};
+    use super::super::draft::tests::Writer;
+    use super::super::state::tests::message_in;
     use super::*;
+
+    fn closed_message(reason: ClosureReason) -> MessageState {
+        let mut writer = Writer::new();
+        writer.text_response(&["done"], Some(ResponseEnding::finished()));
+        let closing = Closing::naming(CloseKind::Fail, Some(Named::of(reason).unwrap()));
+        let closed = close(writer.judged(), &closing).unwrap();
+        let mut message = message_in(&[]);
+        message.status = closed.status;
+        message.content = closed.content;
+        message
+    }
+
+    #[test]
+    fn a_status_beside_a_closure_that_does_not_give_it_fails_to_load() {
+        let reasons = [
+            ClosureReason::completed(),
+            ClosureReason::budget_exhausted(),
+            ClosureReason::cancelled(),
+            ClosureReason::interrupted(),
+            ClosureReason::failed("x").unwrap(),
+        ];
+        for reason in reasons {
+            let mut message = closed_message(reason.clone());
+            assert!(check_status_follows_closure(&message).is_ok(), "{reason:?}");
+            for other in [
+                MessageStatus::Completed,
+                MessageStatus::Cancelled,
+                MessageStatus::Failed,
+                MessageStatus::Streaming,
+            ] {
+                let consistent = other == message.status;
+                let stored = message.status;
+                message.status = other;
+                assert_eq!(
+                    check_status_follows_closure(&message).is_ok(),
+                    consistent,
+                    "{reason:?} stored {other:?}"
+                );
+                message.status = stored;
+            }
+        }
+    }
 
     #[test]
     fn an_annotation_content_is_stored_apart_from_its_kind_and_read_back() {
@@ -812,9 +843,6 @@ mod tests {
         assert!(annotation_body("error", serde_json::json!({})).is_err());
     }
 
-    /// `insert_entries` writes the library's kind literal: the column's CHECK
-    /// admits exactly the library's kinds, or a kind a library bump adds is
-    /// refused by Postgres at the first insert.
     #[test]
     fn the_entry_kind_column_admits_every_kind_of_the_library() {
         let migration = include_str!("../../../migrations/9800000005_llm_messages_2_records.sql");

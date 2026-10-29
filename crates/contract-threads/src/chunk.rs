@@ -1,31 +1,3 @@
-//! The content of a `STREAMING` message, as its writer pushes it on the
-//! engine's accumulated lane.
-//!
-//! A frame is published on [`chunk_subject`]`(message_id)` of the
-//! [`STREAMING_STREAM`] stream, with `Nats-Msg-Id` = [`ChunkFrame::msg_id`], no
-//! integration envelope:
-//!
-//! ```json
-//! { "accumulator": "turn_content", "key": "<message_id>", "seq": 0, "chunk": { … } }
-//! ```
-//!
-//! `seq` starts at 0 and is contiguous. A chunk is one of three kinds:
-//!
-//! - `DELTA`: one response delta of the library (`br-llm-messages-delta/1`),
-//!   folded with the library's response draft of its entry. A response opens
-//!   with its `response_started` delta and ends with its `response_completed`
-//!   (or `response_interrupted`); one response is produced at a time.
-//! - `ENTRY`: one whole entry of the turn other than a model response (runtime
-//!   tool results, an incoming entry, a task notice). The closure is Threads':
-//!   `message.complete`, `fail` or `cancel` closes the turn.
-//! - `ANNOTATION`: one whole annotation, after an entry of the turn
-//!   (`after_entry_id`).
-//!
-//! A chunk the library refuses fails the message; a chunk after the seal is
-//! refused on every pod; a chunk is never a fact. The writer closes the stream
-//! with `message.complete` (or `fail` / `cancel`) carrying the [`seal_hash`]
-//! of every chunk it pushed.
-
 use br_llm_messages::{ResponseDelta, TurnEntry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,51 +6,45 @@ use uuid::Uuid;
 use crate::annotation::Annotation;
 use crate::library::LibraryJson;
 
-/// The stream the engine binds for Threads (`STREAMING_{service}`), declared out
-/// of band like every stream.
 pub const STREAMING_STREAM: &str = "STREAMING_threads";
 
-/// The accumulator a message's turn folds into. (Threads 0.4 named it
-/// `message_content`: a frame under that name is refused.)
 pub const TURN_CONTENT_ACCUMULATOR: &str = "turn_content";
 
-/// `stream.threads.{message_id}`: the engine's accumulated-lane subject for one
-/// message. A UUID is a token-safe key, so the token is the id itself.
 pub fn chunk_subject(message_id: Uuid) -> String {
     format!("stream.{}.{message_id}", crate::SERVICE)
 }
 
-/// One chunk of a message's turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Chunk {
-    /// One response delta, the library's JSON for it.
     #[serde(rename = "DELTA")]
     Delta { delta: LibraryJson },
-    /// One whole entry other than a model response, the library's JSON for it.
     #[serde(rename = "ENTRY")]
     Entry { entry: LibraryJson },
-    /// One whole annotation, after an entry of the turn.
     #[serde(rename = "ANNOTATION")]
     Annotation {
         after_entry_id: Uuid,
         annotation: Annotation,
     },
+    #[serde(rename = "KEEPALIVE")]
+    Keepalive,
 }
 
 impl Chunk {
-    /// The chunk of a library response delta.
     pub fn delta(delta: &ResponseDelta) -> Result<Self, serde_json::Error> {
         Ok(Self::Delta {
             delta: LibraryJson::of(delta)?,
         })
     }
 
-    /// The chunk of a whole library entry.
     pub fn entry(entry: &TurnEntry) -> Result<Self, serde_json::Error> {
         Ok(Self::Entry {
             entry: LibraryJson::of(entry)?,
         })
+    }
+
+    pub fn keepalive() -> Self {
+        Self::Keepalive
     }
 
     pub fn annotation(after_entry_id: Uuid, annotation: Annotation) -> Self {
@@ -89,7 +55,6 @@ impl Chunk {
     }
 }
 
-/// The lane-A frame a writer publishes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkFrame {
     pub accumulator: String,
@@ -112,20 +77,11 @@ impl ChunkFrame {
         chunk_subject(self.key)
     }
 
-    /// The `Nats-Msg-Id` header: `{message_id}:{seq}`, the broker's duplicate
-    /// window keyed on the chunk's place in its stream.
     pub fn msg_id(&self) -> String {
         format!("{}:{}", self.key, self.seq)
     }
 }
 
-/// The digest a seal declares: lowercase hex SHA-256 over every chunk, in
-/// `seq` order, each serialized as compact JSON with object keys in byte order.
-///
-/// That is the form the engine reads a chunk back in: a stored chunk is
-/// `jsonb`, which keeps no key order, and the engine hashes the decoded value.
-/// The keys are therefore ordered here, whatever the serializer of the writer
-/// does — never hash the bytes as published.
 pub fn seal_hash<'a>(
     chunks: impl IntoIterator<Item = &'a Chunk>,
 ) -> Result<String, serde_json::Error> {
@@ -236,6 +192,34 @@ mod tests {
         assert_eq!(wire["after_entry_id"], json!(entry));
         assert_eq!(wire["annotation"]["kind"], "ARTIFACT");
         assert_eq!(serde_json::from_value::<Chunk>(wire).unwrap(), chunk);
+    }
+
+    #[test]
+    fn a_keepalive_chunk_has_no_field_but_its_kind() {
+        let wire = serde_json::to_value(Chunk::keepalive()).unwrap();
+        assert_eq!(wire, json!({ "kind": "KEEPALIVE" }));
+        assert_eq!(
+            serde_json::from_value::<Chunk>(wire).unwrap(),
+            Chunk::Keepalive
+        );
+    }
+
+    #[test]
+    fn a_keepalive_enters_the_seal_hash_like_any_chunk() {
+        let delta = started(Uuid::now_v7(), Uuid::now_v7());
+        let without = seal_hash([&delta]).unwrap();
+        let with = seal_hash([&delta, &Chunk::Keepalive]).unwrap();
+        assert_ne!(without, with);
+        let expected = {
+            let mut hasher = Sha256::new();
+            hasher.update(br#"{"kind":"KEEPALIVE"}"#);
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(seal_hash([&Chunk::Keepalive]).unwrap(), expected);
     }
 
     #[test]

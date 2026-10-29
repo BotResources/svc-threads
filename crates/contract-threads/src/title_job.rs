@@ -1,27 +1,14 @@
-//! What the title runner receives. When a thread receives its first user
-//! message and has no title, Threads asks Jobs to run one Job of the configured
-//! title runner type, with this configuration — the thread and the names of the
-//! runner operations, never a URL. The runner reads the beginning of the
-//! conversation and sets the title, or declares that it failed, through those
-//! operations, which accept only the thread's active title Job.
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The GraphQL root that reads a thread's context (`threads:runner`).
 pub const CONTEXT_ROOT: &str = "threadsContext";
-/// The GraphQL root that sets the title for the active title Job.
 pub const TITLE_ROOT: &str = "threadsSetTitle";
-/// The GraphQL root that declares the active title Job failed.
 pub const FAILURE_ROOT: &str = "threadsFailTitleJob";
 
-/// The `config` of a title Job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleJobConfig {
-    /// The service whose operations the runner calls: `threads`.
     pub host: String,
     pub thread_id: Uuid,
-    /// The Job's own id, which the runner names on every operation.
     pub job_id: Uuid,
     pub context_root: String,
     pub title_root: String,
