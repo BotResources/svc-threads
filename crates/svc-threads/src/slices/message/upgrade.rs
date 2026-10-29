@@ -1,34 +1,3 @@
-//! The upgrade of the messages an earlier Threads stored (`br-llm-messages/3`,
-//! in the 0.4 decomposition kept under `message_item` / `message_block`) to the
-//! library's 2.0 model, once, at boot, before the service is ready.
-//!
-//! - Multi-pod: the pods serialize on one Postgres session advisory lock
-//!   ([`LOCK`]); a pod that waited finds nothing left to convert.
-//! - Judged first, then written: every message still in the 0.4 form is read
-//!   and converted in memory, a batch of [`BATCH`] at a time (one statement per
-//!   family — the messages, their items, their blocks — per batch), and every id
-//!   the conversions declare is checked once in the thread's sense — named once
-//!   across them, and held by no message already in the 2.0 form (one
-//!   statement per batch). A message that cannot be converted, or whose ids
-//!   clash, stops the upgrade before anything is written, so that no message is
-//!   converted while another cannot be and the writes cannot stop half-way.
-//!   The ids judged are kept in memory until the writes start: about 50 bytes
-//!   per id.
-//! - Then one transaction per batch, its rows locked and their marker
-//!   (`content_schema`) re-read under the lock, read the same way: a batch is
-//!   converted whole or not at all, and a crash resumes where it stopped.
-//!   Idempotent: a converted message is never converted again.
-//! - The mapping is [`super::v1`]'s, with the library's constructors: message
-//!   ids (= turn ids) and block ids kept, entry and closure ids derived. The
-//!   message's status becomes its turn's closure; a message still `STREAMING`
-//!   (its 0.4 chunks, under the accumulator `message_content`, are never read
-//!   again) is closed interrupted and becomes `FAILED`.
-//! - No fact is added and no version raised: the conversion changes no
-//!   conversation.
-//! - A message that cannot be converted is logged by its id and left as it
-//!   was; the upgrade then fails, and the service with it: it never becomes
-//!   ready while a message is left unconverted.
-
 use std::collections::{BTreeMap, HashMap};
 
 use contract_threads::llm::{
@@ -41,30 +10,23 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::close::closure_entry;
 use super::content::{Content, first_repeated};
 use super::derived;
-use super::draft::closure_entry;
 use super::store::{self, CONTENT_SCHEMA};
 use super::v1::{self, V1Fault};
 
-/// The schema of the content of a message an earlier Threads stored.
 pub const LEGACY_SCHEMA: &str = "br-llm-messages/3";
 
-/// The session advisory lock the pods of Threads take to upgrade, one at a
-/// time: `threads/upgrade/5` as an integer, a value no engine lock domain uses
-/// (the engine's keys are FNV hashes under their own domain tag).
 pub const LOCK: i64 = 0x7468_7265_6164_7305;
 
-/// How many messages one read of the pending ones names.
 const BATCH: i64 = 256;
 
-/// What an upgrade did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Upgraded {
     pub converted: usize,
 }
 
-/// A 0.4 message, as its rows read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LegacyMessage {
     pub id: Uuid,
@@ -73,13 +35,10 @@ pub struct LegacyMessage {
     pub author_ai_name: Option<String>,
     pub status: MessageStatus,
     pub deleted: bool,
-    /// A user message's blocks.
     pub blocks: Vec<Block>,
-    /// An AI message's items.
     pub items: Vec<Item>,
 }
 
-/// What a 0.4 message becomes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Converted {
     pub turn_kind: TurnKind,
@@ -88,7 +47,6 @@ pub struct Converted {
     pub content: Content,
 }
 
-/// The 2.0 form of a 0.4 message. Pure.
 pub fn convert(message: &LegacyMessage) -> Result<Converted, V1Fault> {
     match (
         &message.author_user_id,
@@ -155,7 +113,6 @@ pub fn convert(message: &LegacyMessage) -> Result<Converted, V1Fault> {
     }
 }
 
-/// Converts every message still in the 0.4 form, under the upgrade lock.
 pub async fn run(pool: &PgPool) -> Result<Upgraded, EngineError> {
     let mut conn = pool.acquire().await?;
     sqlx::query("SELECT pg_advisory_lock($1)")
@@ -171,8 +128,6 @@ pub async fn run(pool: &PgPool) -> Result<Upgraded, EngineError> {
 }
 
 impl Converted {
-    /// Every id the message declares once converted: its own (its turn's) and
-    /// its content's.
     fn identities(&self, message: Uuid) -> Vec<Uuid> {
         let mut ids = vec![message];
         ids.extend(self.content.identities());
@@ -217,7 +172,6 @@ async fn convert_all(conn: &mut PgConnection) -> Result<Upgraded, EngineError> {
     Ok(upgraded)
 }
 
-/// The next batch of messages still in the 0.4 form after `after`, by id.
 async fn next_pending(
     conn: &mut PgConnection,
     after: Uuid,
@@ -234,12 +188,8 @@ async fn next_pending(
     Ok((!pending.is_empty()).then_some(pending))
 }
 
-/// Every message still in the 0.4 form converted in memory, batch by batch,
-/// nothing written: those that cannot be, with why — a conversion refused, or
-/// an id the converted messages name twice or another message already holds.
 async fn judge_all(conn: &mut PgConnection) -> Result<Vec<(Uuid, String)>, EngineError> {
     let mut refused = Vec::new();
-    // Every id the conversions declare, with the message declaring it.
     let mut declared: HashMap<Uuid, Uuid> = HashMap::new();
     let mut after = Uuid::nil();
     while let Some(pending) = next_pending(conn, after).await? {
@@ -277,7 +227,6 @@ async fn judge_all(conn: &mut PgConnection) -> Result<Vec<(Uuid, String)>, Engin
                 batch.push(declared_id);
             }
         }
-        // An id a message already in the 2.0 form holds.
         for (held, holder) in store::holders(conn, &batch).await? {
             let claimant = declared.get(&held).copied().unwrap_or(holder);
             if claimant != holder {
@@ -294,11 +243,6 @@ async fn judge_all(conn: &mut PgConnection) -> Result<Vec<(Uuid, String)>, Engin
     Ok(refused)
 }
 
-/// Converts one batch in its own transaction, its rows locked and re-read: how
-/// many it converted (none when another pod already had). A fault rolls the
-/// batch back and stops the upgrade: the judgement made every message of it
-/// convertible and every id free, so a fault here is the store's, logged with
-/// its SQLSTATE.
 async fn convert_batch(conn: &mut PgConnection, ids: &[Uuid]) -> Result<usize, EngineError> {
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
     let mut converted = 0;
@@ -320,7 +264,6 @@ fn unconvertible(id: Uuid, fault: &str) -> EngineError {
     )
 }
 
-/// A write the store refused, named by its SQLSTATE and constraint.
 fn store_fault(id: Uuid, error: EngineError) -> EngineError {
     if let EngineError::Db(sqlx::Error::Database(db)) = &error {
         tracing::error!(
@@ -335,7 +278,6 @@ fn store_fault(id: Uuid, error: EngineError) -> EngineError {
     error
 }
 
-/// A 0.4 message's turn row, as `load_batch` reads it.
 struct LegacyRow {
     id: Uuid,
     author_user_id: Option<Uuid>,
@@ -345,10 +287,6 @@ struct LegacyRow {
     deleted: bool,
 }
 
-/// The 0.4 rows of the messages of `ids` still in the 0.4 form, by id, their
-/// rows locked when `lock`: three statements whatever the batch — the
-/// messages, their items, their blocks. `Err` for a message whose rows are not
-/// the 0.4 form.
 async fn load_batch(
     conn: &mut PgConnection,
     ids: &[Uuid],
@@ -418,7 +356,6 @@ async fn load_batch(
         .collect()
 }
 
-/// One 0.4 message from its rows; `Err` when they are not the 0.4 form.
 fn assemble(
     row: LegacyRow,
     items: &[&PgRow],
@@ -478,9 +415,6 @@ fn assemble(
     }))
 }
 
-/// Writes what the message became: its turn row marked converted (the 0.4 id
-/// of its AI author cleared, its agent id set), its records, annotations and
-/// identities; a stream left open is no longer watched.
 async fn write(
     conn: &mut PgConnection,
     id: Uuid,
@@ -640,8 +574,6 @@ mod tests {
         let Item::Step(step) = &mut message.items[0] else {
             unreachable!()
         };
-        // A 0.4 Threads block under the id of a library block: the library
-        // never sees the annotation it becomes, the identities do.
         let twice = step.blocks[0].id;
         step.blocks[1].id = twice;
         let converted = convert(&message).expect("the library accepts the turn");

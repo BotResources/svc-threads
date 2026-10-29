@@ -4,7 +4,7 @@ Threads is the shared, passive conversation store of the BotResources platform.
 It keeps conversations between people and AIs — threads, their members and
 resources, messages in the conversation model of
 [`br-llm-messages`](https://github.com/BotResources/br-llm-messages-rs)
-(2.0, schema `br-llm-messages/5`: each message is a turn), the artifacts runners attach to them, and each
+(2.1, schema `br-llm-messages/5`: each message is a turn), the artifacts runners attach to them, and each
 member's read mark — and serves them, live, to their members.
 
 - Threads never decides who may write: every write reaches it as a command from
@@ -16,7 +16,7 @@ member's read mark — and serves them, live, to their members.
 - Threads runs no AI logic; to name a new conversation it asks a runner through
   Jobs.
 
-**Status: 0.5.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.6.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 

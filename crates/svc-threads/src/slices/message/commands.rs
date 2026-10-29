@@ -1,69 +1,30 @@
-//! The message commands, one reaction each:
-//! `integration.cmd.threads.message.{store (v2, and the deprecated v1),
-//! complete, fail, cancel, delete}.v{N}`, each answered once —
-//! `message.confirmed` with the message's status after it, or
-//! `message.refused` — in the transaction of the change.
-//!
-//! Every message command acts on an `OPEN` thread: the thread is loaded and
-//! locked first (`THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`), then the message, then
-//! the artifacts it names — the one lock order of the service. A refusal writes
-//! nothing; a close that must refuse is judged before its seal.
-//!
-//! A resolved thread refuses the commands that would change its conversation —
-//! store, delete, and the edit of [`super::edit`] — with `THREAD_RESOLVED`
-//! ([`writable_thread`]); a message already `STREAMING` still completes, fails
-//! or cancels ([`open_thread`] alone).
-//!
-//! A store judges, in this order: the thread, the message id (`ID_NOT_UUIDV7`,
-//! `KEY_REUSED`), its parent (`MESSAGE_NOT_FOUND`, `MESSAGE_INVALID`), its
-//! content — a string holding U+0000, then the library's rules: an id it
-//! declares for a new object that is no UUIDv7 `ID_NOT_UUIDV7`, anything else
-//! `MESSAGE_INVALID` under the library's code — and its annotations
-//! (`ID_NOT_UUIDV7`, `MESSAGE_INVALID`), its author (`NOT_A_MEMBER`), the ids
-//! its content declares (`KEY_REUSED`), the artifacts it names
-//! (`ARTIFACT_NOT_READY`).
-//!
-//! A `message.store` v1 gets the answers Threads 0.4 gave it: its user author
-//! is judged a member before its content, and its block ids are judged as 0.4
-//! judged them (each a UUIDv7, each named once) before anything is converted.
-
 use std::collections::HashSet;
 
 use contract_threads::llm::{
     AgentId, Author, ClosureReason, IncomingEntry, InputTurn, ObservedAt, Turn, TurnId, TurnKind,
 };
 use contract_threads::{
-    AiDelivery, CancelMessage, CompleteMessage, DeleteMessage, FailMessage, LibraryJson,
-    MessageInvalidError, MessageStatus, MessageTurn, PlacedAnnotation, ReasonCode, StoreMessageV2,
-    StreamSeal, v1,
+    AiDelivery, DeleteMessage, LibraryJson, MessageInvalidError, MessageStatus, MessageTurn,
+    PlacedAnnotation, ReasonCode, StoreMessageV2, v1,
 };
 use futures_util::future::BoxFuture;
-use service_engine::SealHash;
-use service_engine::accumulator::ChunkSeq;
-use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Reaction;
 use uuid::Uuid;
 
+use super::close;
+use super::closure::Kind;
 use super::content::{
     Content, declared_refusal_of, first_repeated, invalid, nul_refusal, refusal_of,
 };
-use super::draft::{self, CloseKind, TurnDraft};
 use super::state::{Message, MessageAuthor, MessageState};
-use super::stream::TurnContent;
 use super::transitions::{self, NewMessage};
-use super::{MessageCause, closing, message_cause, store, watch};
+use super::{MessageCause, message_cause, store, watch};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
-use crate::directory;
 use crate::fault::Fault;
 use crate::slices::artifact::lifecycle;
 use crate::slices::thread::state::{Thread, ThreadState};
 use crate::slices::thread::transitions::Applied;
 use crate::slices::thread::{ThreadCause, title_job};
-
-/// How many deliveries a completion waits for the chunks it seals to be folded
-/// before it answers `STREAM_MISMATCH`: the engine's backoff makes that about
-/// six seconds of ingestion lag.
-const SEAL_TRUNCATION_ATTEMPTS: u32 = 6;
 
 pub(super) type Verdict = Result<MessageOutcome, Refusal>;
 
@@ -75,9 +36,7 @@ fn message_not_found() -> Refusal {
     Refusal::new(ReasonCode::MessageNotFound)
 }
 
-/// The thread a message command names, loaded and locked, and `OPEN`: what a
-/// close of a `STREAMING` message needs, resolved or not.
-async fn open_thread(
+pub(super) async fn open_thread(
     cx: &mut Reaction<'_>,
     thread: Uuid,
 ) -> Result<Result<ThreadState, Refusal>, Fault> {
@@ -90,8 +49,6 @@ async fn open_thread(
     Ok(Ok(thread))
 }
 
-/// The thread a command changing its conversation names — store, edit,
-/// delete — loaded and locked, `OPEN` and not resolved (`THREAD_RESOLVED`).
 pub(super) async fn writable_thread(
     cx: &mut Reaction<'_>,
     thread: Uuid,
@@ -105,7 +62,6 @@ pub(super) async fn writable_thread(
     })
 }
 
-/// The message a command names, loaded and locked, when it is one of `thread`'s.
 pub(super) async fn message_of(
     cx: &mut Reaction<'_>,
     thread: Uuid,
@@ -127,9 +83,6 @@ macro_rules! refuse_on {
 }
 pub(super) use refuse_on;
 
-// ── message.store ───────────────────────────────────────────────────────────
-
-/// What a store names, whichever version of the command carried it.
 struct Store<'a> {
     message_id: Uuid,
     thread_id: Uuid,
@@ -162,8 +115,6 @@ pub fn store_v2<'r>(
     })
 }
 
-/// `message.store` v1, deprecated: converted to the 2.0 model, answered on the
-/// same events.
 pub fn store_v1<'r>(
     cx: &'r mut Reaction<'r>,
     Inbound(command): Inbound<v1::StoreMessage>,
@@ -183,7 +134,6 @@ pub fn store_v1<'r>(
     })
 }
 
-/// A store's content, judged by the library's rules.
 #[derive(Debug)]
 struct Judged {
     author: MessageAuthor,
@@ -193,14 +143,12 @@ struct Judged {
     content: Content,
 }
 
-/// The library's agent and author of an AI message.
 fn ai_author(agent: Uuid, name: &str) -> Result<(AgentId, Author), Refusal> {
     let agent = AgentId::from_uuid(agent).map_err(|error| refusal_of(&error))?;
     let author = Author::new(name).map_err(|error| refusal_of(&error))?;
     Ok((agent, author))
 }
 
-/// Every annotation follows an entry of the turn, under a UUIDv7.
 fn judge_annotations(content: &Content, annotations: &[PlacedAnnotation]) -> Result<(), Refusal> {
     for placed in annotations {
         crate::command::minted("annotation_id", placed.annotation.id)?;
@@ -212,25 +160,12 @@ fn judge_annotations(content: &Content, annotations: &[PlacedAnnotation]) -> Res
     Ok(())
 }
 
-/// The status of a message whose writer closed its turn: Threads stores every
-/// closure the library accepts, and gives none a behaviour of its own.
 fn status_of_closure(closure: &ClosureReason) -> Result<MessageStatus, Refusal> {
-    Ok(match closure {
-        ClosureReason::Completed { .. } | ClosureReason::BudgetExhausted { .. } => {
-            MessageStatus::Completed
-        }
-        ClosureReason::Cancelled { .. } => MessageStatus::Cancelled,
-        ClosureReason::Failed { .. } | ClosureReason::Interrupted { .. } => MessageStatus::Failed,
-        // `ClosureReason` is non-exhaustive: a closure of a later library has
-        // no status in this build.
-        _ => return Err(invalid(MessageInvalidError::LibraryRefusal)),
-    })
+    Kind::of(closure)
+        .map(Kind::status)
+        .ok_or_else(|| invalid(MessageInvalidError::LibraryRefusal))
 }
 
-/// A whole turn as it is stored, and its message's status: an AI turn its
-/// writer closed keeps its closure, which gives the status; one holding none
-/// is closed completed by Threads, under a UUIDv7 it mints. An input turn has
-/// no closure: `COMPLETED`.
 fn closed_whole(turn: Turn) -> Result<(Turn, MessageStatus), Refusal> {
     let Turn::AITurn(mut ai) = turn else {
         return Ok((turn, MessageStatus::Completed));
@@ -239,14 +174,12 @@ fn closed_whole(turn: Turn) -> Result<(Turn, MessageStatus), Refusal> {
         let status = status_of_closure(closure)?;
         return Ok((Turn::AITurn(ai), status));
     }
-    let closure = draft::closure_entry(Uuid::now_v7(), ClosureReason::completed())
+    let closure = close::closure_entry(Uuid::now_v7(), ClosureReason::completed())
         .map_err(|_| invalid(MessageInvalidError::LibraryRefusal))?;
     ai.push_entry(closure).map_err(|error| refusal_of(&error))?;
     Ok((Turn::AITurn(ai), MessageStatus::Completed))
 }
 
-/// The ids a turn read from `json` declares, its own included: what
-/// [`declared_refusal_of`] places a refused id among.
 fn declared_by_turn(json: serde_json::Value) -> Option<Vec<Uuid>> {
     let turn = LibraryJson::from_json(json).to_turn().ok()?;
     let mut ids = Content::of_turn(&turn, Vec::new()).ok()?.identities();
@@ -273,8 +206,6 @@ fn whole(
     })
 }
 
-/// A user's human message, as the input turn under the message's id holding
-/// it.
 fn user_turn(message_id: Uuid, entry: &LibraryJson) -> Result<(Turn, Uuid), Refusal> {
     let turn = TurnId::from_uuid(message_id).map_err(|error| refusal_of(&error))?;
     let parsed = entry.to_entry().map_err(|error| {
@@ -297,8 +228,6 @@ fn user_turn(message_id: Uuid, entry: &LibraryJson) -> Result<(Turn, Uuid), Refu
     Ok((turn.into(), author))
 }
 
-/// Whether `turn` is an input turn holding a human message: a human message
-/// travels in a user message only, whose author is judged a member.
 fn holds_a_human_message(turn: &Turn) -> bool {
     match turn {
         Turn::InputTurn(input) => input
@@ -309,7 +238,6 @@ fn holds_a_human_message(turn: &Turn) -> bool {
     }
 }
 
-/// What a store carries that the store cannot keep: a string holding U+0000.
 fn unstorable(body: &StoreBody<'_>) -> Option<Refusal> {
     match body {
         StoreBody::V2(message) => nul_refusal(message),
@@ -318,8 +246,6 @@ fn unstorable(body: &StoreBody<'_>) -> Option<Refusal> {
 }
 
 fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refusal> {
-    // An AI message's agent id is judged first; the rest of what a store
-    // carries is content, judged by the library once it holds no U+0000.
     let storable = || unstorable(body).map_or(Ok(()), Err);
     match body {
         StoreBody::V2(MessageTurn::User(user)) => {
@@ -423,11 +349,6 @@ async fn store_message(
 ) -> Result<Verdict, Fault> {
     let mut thread = refuse_on!(writable_thread(cx, command.thread_id).await?);
     refuse_on!(crate::command::minted("message_id", command.message_id));
-    // Every message declares its own id among its identities: one read tells
-    // a message stored under the id, or an id another message's content holds.
-    // Two stores racing past it meet at the identity's key: the loser's
-    // unique violation is retried (`Fault::disposition`), and its redelivery
-    // reads the winner's id here.
     let held_message = !store::held_ids(cx.connection(), &[command.message_id], None)
         .await?
         .is_empty();
@@ -436,8 +357,6 @@ async fn store_message(
             Refusal::new(ReasonCode::KeyReused).with("message_id", command.message_id)
         ));
     }
-    // The parent is a message the command names: one nobody stored is not
-    // found; one of another thread is not a parent this message can have.
     if let Some(parent) = command.parent_message_id {
         match store::thread_of(cx.connection(), parent).await? {
             None => {
@@ -452,8 +371,6 @@ async fn store_message(
             Some(_) => {}
         }
     }
-    // A v1 user message names its author outside its content: judged a member
-    // first, as Threads 0.4 judged it.
     if let StoreBody::V1(v1::NewMessage::User(user)) = &command.body
         && !thread.is_member(user.author_user_id)
     {
@@ -514,18 +431,14 @@ async fn store_message(
     }
 
     thread.record_activity(now);
-    if let Some(user) = author_user
-        && let Some(job) = title_job::start(&mut thread, now)
-    {
-        let name = directory::display_name(cx.connection(), user).await?;
-        title_job::publish_create(
+    if status == MessageStatus::Completed {
+        title_job::trigger(
             cx,
-            thread.id,
-            job,
-            &crate::config::installed().title_runner_type,
-            user,
-            name,
-        )?;
+            &mut thread,
+            now,
+            author_user.or(call.meta.acting_user_id),
+        )
+        .await?;
     }
     cx.save(&thread).await?;
     cx.impact_caused::<Message, _>(&message.id, message_cause(MessageCause::Stored, thread.id))?;
@@ -544,142 +457,6 @@ impl Judged {
         }
     }
 }
-
-// ── message.complete / fail / cancel ────────────────────────────────────────
-
-pub fn complete<'r>(
-    cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<CompleteMessage>,
-) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let call = Call::of(cx, &command)?;
-        let verdict = close_message(
-            cx,
-            &call,
-            command.thread_id,
-            command.message_id,
-            CloseKind::Complete,
-            Some(&command.seal),
-        )
-        .await?;
-        answer_message(cx, &call, command.thread_id, command.message_id, verdict)
-    })
-}
-
-pub fn fail<'r>(
-    cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<FailMessage>,
-) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let call = Call::of(cx, &command)?;
-        let verdict = close_message(
-            cx,
-            &call,
-            command.thread_id,
-            command.message_id,
-            CloseKind::Fail,
-            command.seal.as_ref(),
-        )
-        .await?;
-        answer_message(cx, &call, command.thread_id, command.message_id, verdict)
-    })
-}
-
-pub fn cancel<'r>(
-    cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<CancelMessage>,
-) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let call = Call::of(cx, &command)?;
-        let verdict = close_message(
-            cx,
-            &call,
-            command.thread_id,
-            command.message_id,
-            CloseKind::Cancel,
-            command.seal.as_ref(),
-        )
-        .await?;
-        answer_message(cx, &call, command.thread_id, command.message_id, verdict)
-    })
-}
-
-/// `STREAM_MISMATCH`, when a seal's refusal is one the writer can correct; any
-/// other seal error is a fault (retried).
-fn seal_refusal(error: &EngineError, delivered: u32) -> Option<Refusal> {
-    let mismatch = |detail: &str| Refusal::new(ReasonCode::StreamMismatch).with("error", detail);
-    match error {
-        EngineError::Accumulator(AccumulatorError::SealHashMismatch { .. })
-        | EngineError::Accumulator(AccumulatorError::SealHashFormat(_)) => Some(mismatch("hash")),
-        EngineError::Accumulator(AccumulatorError::SealChunkBeyondLastSeq { max_seq, .. }) => {
-            Some(mismatch("chunk_beyond_last_seq").with("max_seq", max_seq))
-        }
-        EngineError::Accumulator(AccumulatorError::SealTruncated { contiguous_to, .. })
-            if delivered >= SEAL_TRUNCATION_ATTEMPTS =>
-        {
-            Some(mismatch("chunks_missing").with("contiguous_to", contiguous_to))
-        }
-        _ => None,
-    }
-}
-
-async fn seal(
-    cx: &mut Reaction<'_>,
-    message: Uuid,
-    seal: Option<&StreamSeal>,
-) -> Result<Result<TurnDraft, Refusal>, Fault> {
-    let sealed = match seal {
-        Some(seal) => {
-            let last_seq = ChunkSeq::new(seal.last_seq);
-            let hash = SealHash::from_hex(&seal.hash);
-            match (last_seq, hash) {
-                (Ok(last_seq), Ok(hash)) => cx.seal::<TurnContent>(&message, last_seq, hash).await,
-                (Err(error), _) | (_, Err(error)) => Err(error),
-            }
-        }
-        None => cx.seal_current::<TurnContent>(&message).await,
-    };
-    match sealed {
-        Ok(draft) => Ok(Ok(draft)),
-        Err(error) => match seal_refusal(&error, cx.delivered()) {
-            Some(refusal) => Ok(Err(refusal)),
-            None => match error {
-                EngineError::Accumulator(AccumulatorError::ChunkSeqOutOfRange { .. }) => Ok(Err(
-                    Refusal::new(ReasonCode::StreamMismatch).with("error", "last_seq"),
-                )),
-                other => Err(other.into()),
-            },
-        },
-    }
-}
-
-async fn close_message(
-    cx: &mut Reaction<'_>,
-    call: &Call,
-    thread: Uuid,
-    message: Uuid,
-    kind: CloseKind,
-    seal_declared: Option<&StreamSeal>,
-) -> Result<Verdict, Fault> {
-    refuse_on!(open_thread(cx, thread).await?);
-    let state = refuse_on!(message_of(cx, thread, message).await?);
-    if let Some(refusal) = state.not_streaming() {
-        return Ok(Err(refusal));
-    }
-    // A completion can still be refused once its stream is judged: judged on
-    // what the stream holds now, before the seal writes anything.
-    let mut artifacts = Vec::new();
-    if kind == CloseKind::Complete {
-        let preview = cx.accumulated::<TurnContent>(&state.id).await?.state;
-        artifacts = refuse_on!(closing::precheck_completion(cx, &state, &preview).await?);
-    }
-    let sealed = refuse_on!(seal(cx, state.id, seal_declared).await?);
-    closing::store_closed(cx, state, &sealed, kind, artifacts, &call.meta)
-        .await
-        .map(Ok)
-}
-
-// ── message.delete ──────────────────────────────────────────────────────────
 
 pub fn delete<'r>(
     cx: &'r mut Reaction<'r>,
@@ -897,7 +674,7 @@ mod tests {
         let Turn::AITurn(mut turn) = turn.to_turn().unwrap() else {
             unreachable!()
         };
-        turn.push_entry(draft::closure_entry(v7(), closure).unwrap())
+        turn.push_entry(close::closure_entry(v7(), closure).unwrap())
             .unwrap();
         MessageTurn::Ai(AiTurn {
             agent_id: agent.as_uuid(),
@@ -935,8 +712,6 @@ mod tests {
         }
     }
 
-    /// The library's 2.1 turn rules: after a closure, the results of a call
-    /// the closure left outstanding; a tool name of 256 characters.
     #[test]
     fn a_whole_ai_turn_holding_results_after_its_closure_is_stored_under_its_closure() {
         use contract_threads::llm::{
@@ -966,7 +741,7 @@ mod tests {
             )
             .unwrap()
             .into(),
-            draft::closure_entry(v7(), ClosureReason::cancelled()).unwrap(),
+            close::closure_entry(v7(), ClosureReason::cancelled()).unwrap(),
             RuntimeToolResults::new(
                 EntryId::from_uuid(v7()).unwrap(),
                 vec![
@@ -1006,7 +781,6 @@ mod tests {
                 TurnEntryKind::RuntimeToolResults
             ]
         );
-        // What members read and a runner receives is rebuilt from these rows.
         let record = RecordSet::from_turn(&turn).unwrap().turns()[0].clone();
         assert_eq!(judged.content.to_turn(record).unwrap(), turn);
     }
@@ -1051,7 +825,6 @@ mod tests {
         assert_eq!(judged.status, MessageStatus::Completed);
     }
 
-    /// A user message whose JSON has `id` swapped for a UUIDv4 at `path`.
     fn user_with_v4_at(human: Uuid, path: &[&str]) -> (MessageTurn, Uuid) {
         let mut entry = human_entry(human, v7()).into_json();
         let v4 = Uuid::new_v4();

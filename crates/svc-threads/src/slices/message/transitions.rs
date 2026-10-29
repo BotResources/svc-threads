@@ -1,9 +1,3 @@
-//! The guarded transitions of a message: stored (whole, or opened
-//! `STREAMING`), closed (completed, failed or cancelled), deleted by its
-//! author. Each is the one decision of its command and records the facts of
-//! the change: never the content of the message nor a name, only its kinds,
-//! positions, author and status.
-
 use chrono::{DateTime, Utc};
 use contract_threads::llm::{ObservedAt, TurnEntryKind, TurnKind};
 use contract_threads::{MessageStatus, ReasonCode};
@@ -11,14 +5,13 @@ use serde::Serialize;
 use service_engine::error::EngineError;
 use uuid::Uuid;
 
+use super::close::Closed;
 use super::content::Content;
-use super::draft::Closed;
 use super::state::{MessageAuthor, MessageChange, MessageState};
 use crate::command::Refusal;
 use crate::facts::{Fact, FactMeta};
 use crate::slices::thread::transitions::Applied;
 
-// The fact types of the noun `message`.
 pub const CREATED: &str = "Created";
 pub const ENTRY_ADDED: &str = "EntryAdded";
 pub const COMPLETED: &str = "Completed";
@@ -35,7 +28,6 @@ struct AuthorShape {
     agent_id: Option<Uuid>,
 }
 
-/// A block of a fact: its position in the message, its kind and state.
 #[derive(Serialize)]
 pub(super) struct BlockShape {
     position: usize,
@@ -56,7 +48,6 @@ struct CreatedFact<'a> {
     job_id: Option<Uuid>,
     status: &'static str,
     turn_kind: &'a str,
-    /// The entries of a message given whole (none for a stream opened).
     entries: Vec<EntryFact>,
 }
 
@@ -73,12 +64,12 @@ struct EntryFact {
 struct ClosedFact<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'a str>,
+    closure: &'static str,
 }
 
 #[derive(Serialize)]
 struct NoPayload {}
 
-/// The shapes of the blocks of an entry — what a fact may say of content.
 pub(super) fn block_shapes(content: &Content, entry: usize) -> Vec<BlockShape> {
     let Some(row) = content.entries.get(entry) else {
         return Vec::new();
@@ -96,8 +87,6 @@ pub(super) fn block_shapes(content: &Content, entry: usize) -> Vec<BlockShape> {
         .collect()
 }
 
-/// One `EntryAdded` per entry of `content` but its closure, whose fact is the
-/// message's end (`Completed`, `Failed`, `Cancelled`).
 fn entry_facts(content: &Content, meta: &FactMeta) -> Result<Vec<Fact>, EngineError> {
     entry_shapes(content)
         .into_iter()
@@ -105,8 +94,6 @@ fn entry_facts(content: &Content, meta: &FactMeta) -> Result<Vec<Fact>, EngineEr
         .collect()
 }
 
-/// What a fact says of each entry of `content` but its closure: its position,
-/// kind and state, its blocks' and annotations' — never their content.
 fn entry_shapes(content: &Content) -> Vec<EntryFact> {
     let mut shapes = Vec::new();
     for (position, entry) in content.entries.iter().enumerate() {
@@ -134,16 +121,12 @@ fn entry_shapes(content: &Content) -> Vec<EntryFact> {
     shapes
 }
 
-/// What a `message.store` stores, once judged.
 pub struct NewMessage {
     pub id: Uuid,
     pub thread_id: Uuid,
     pub parent_message_id: Option<Uuid>,
     pub author: MessageAuthor,
     pub job_id: Option<Uuid>,
-    /// `STREAMING` with no content yet; given whole, `COMPLETED` — or, for a
-    /// whole AI turn its writer closed, the status its closure gives
-    /// (`CANCELLED`, `FAILED`) — with its content.
     pub status: MessageStatus,
     pub turn_kind: TurnKind,
     pub observed_at: Option<ObservedAt>,
@@ -151,9 +134,6 @@ pub struct NewMessage {
     pub created_at: DateTime<Utc>,
 }
 
-/// A message stored at version 1: `Created`, which carries the shapes of the
-/// entries of a message given whole (`EntryAdded` records an entry a stream
-/// adds).
 pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineError> {
     let author = match &new.author {
         MessageAuthor::User { user_id, .. } => AuthorShape {
@@ -200,17 +180,12 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
 }
 
 impl MessageState {
-    /// `MESSAGE_NOT_STREAMING` when the message is completed, failed or
-    /// cancelled: it never changes again.
     pub fn not_streaming(&self) -> Option<Refusal> {
         (self.status != MessageStatus::Streaming).then(|| {
             Refusal::new(ReasonCode::MessageNotStreaming).with("status", self.status.as_str())
         })
     }
 
-    /// Closes a `STREAMING` message with what its stream closed to: its
-    /// entries stored, each recorded (`EntryAdded`), then its end — with why it
-    /// failed, when it did.
     pub fn close(
         &mut self,
         closed: Closed,
@@ -235,6 +210,7 @@ impl MessageState {
             end,
             &ClosedFact {
                 reason: closed.reason,
+                closure: closed.closure.as_str(),
             },
             meta,
         )?;
@@ -242,9 +218,6 @@ impl MessageState {
         Ok(Ok(()))
     }
 
-    /// Deleted on its author's own gesture: its content goes, its node stays so
-    /// that its forks remain readable. An AI message is never deleted: no user
-    /// is its author. A deleted message deleted again changes nothing.
     pub fn delete(
         &mut self,
         acting_user: Uuid,
@@ -267,9 +240,6 @@ impl MessageState {
         Ok(Ok(Applied::Changed))
     }
 
-    /// The edit itself, once judged: the content replaced whole, `edited_at`
-    /// set, the version raised by one, `Edited` recorded with the new blocks'
-    /// shapes.
     pub fn edit(&mut self, content: Content, meta: &FactMeta) -> Result<(), EngineError> {
         let fact = Fact::new(
             EDITED,
@@ -430,6 +400,7 @@ mod tests {
             status: MessageStatus::Cancelled,
             content: Content::default(),
             reason: None,
+            closure: super::super::closure::Kind::Cancelled,
         };
         assert_eq!(message.close(closed.clone(), &meta()).unwrap(), Ok(()));
         assert_eq!(message.status, MessageStatus::Cancelled);

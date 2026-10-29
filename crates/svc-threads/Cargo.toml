@@ -1,6 +1,6 @@
 [package]
 name = "svc-threads"
-version = "0.5.0"
+version = "0.6.0"
 description = "Threads — the shared conversation store: threads, members, messages in the br-llm-messages model, artifacts and read marks, served live to their members (fatty manner on br-service-engine)"
 edition.workspace = true
 rust-version.workspace = true

@@ -1,35 +1,15 @@
-//! Closing a `STREAMING` message, once its stream is sealed: what the close
-//! commands (`message.complete`, `fail`, `cancel`) and the stream watch share.
-//!
-//! The sealed draft is judged under the message — its id, agent and author —
-//! and against the ids other messages already declared
-//! ([`store::held_ids`]), then closed with the library's closure
-//! ([`draft::close`]); the `ARTIFACT` annotations it keeps attach their
-//! artifacts; the message row, its records, annotations and identities, and its
-//! facts are written; its watch ends.
-//!
-//! What a close that nobody can refuse (a failure, a cancel, the watch) keeps
-//! must still be storable: an `ARTIFACT` annotation whose artifact is not ready
-//! is dropped. A completion is judged before its seal instead
-//! ([`precheck_completion`]), so that it can be refused `ARTIFACT_NOT_READY`
-//! and change nothing — and it never drops an annotation: one its seal reaches
-//! that the stream did not hold yet when it was judged (the stream's chunks
-//! were still being stored) is a retried fault ([`UnjudgedArtifact`]), never a
-//! silent loss.
-//!
-//! Every reader of a stream — the close, the members' view, the agent context
-//! — judges it the same way, with the ids other messages declared
-//! ([`judge_streams`]): what members see is what the message closes to.
-
 use std::collections::HashSet;
 
+use contract_threads::MessageStatus;
 use contract_threads::llm::{AgentId, Author, TurnId};
 use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Ops;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::draft::{self, CloseKind, Judged, StreamRefusal, TurnDraft};
+use super::close;
+use super::closure::Closing;
+use super::draft::{Judged, StreamRefusal, TurnDraft};
 use super::state::{Message, MessageAuthor, MessageState};
 use super::store;
 use super::stream::{LegacyContent, TurnContent};
@@ -40,9 +20,9 @@ use crate::facts::FactMeta;
 use crate::fault::{Fault, corrupt};
 use crate::slices::artifact::lifecycle;
 use crate::slices::artifact::state::ArtifactState;
-use crate::slices::thread::state::UnknownStoredValue;
+use crate::slices::thread::state::{Thread, ThreadState, UnknownStoredValue};
+use crate::slices::thread::{ThreadCause, title_job};
 
-/// The id, agent and author a streaming message's turn is judged under.
 pub fn turn_of(message: &MessageState) -> Result<(TurnId, AgentId, Author), EngineError> {
     match &message.author {
         MessageAuthor::Agent { agent, name } => Ok((message.turn_id()?, *agent, name.clone())),
@@ -53,9 +33,6 @@ pub fn turn_of(message: &MessageState) -> Result<(TurnId, AgentId, Author), Engi
     }
 }
 
-/// Streams judged under their messages ([`TurnDraft::judge`]), the ids other
-/// messages declared cutting each where they appear: one read of the
-/// identities for every stream, whatever their number.
 pub async fn judge_streams(
     conn: &mut PgConnection,
     streams: &[(&MessageState, &TurnDraft)],
@@ -87,9 +64,6 @@ pub async fn judge_streams(
     Ok(judged)
 }
 
-/// A stream judged under its message, as [`judge_streams`] judges it. Read
-/// under the message's thread lock: the identities do not change while it
-/// closes.
 pub async fn judge_held(
     ops: &mut Ops<'_>,
     message: &MessageState,
@@ -101,26 +75,17 @@ pub async fn judge_held(
         .ok_or_else(|| Fault::Engine(EngineError::Service("a stream judged to nothing".into())))
 }
 
-/// Judges a completion on what the stream holds now, before its seal: the
-/// artifacts it names must be ready. A refusal here changes nothing. Answers the
-/// artifacts, loaded and locked.
 pub async fn precheck_completion(
     ops: &mut Ops<'_>,
     message: &MessageState,
     preview: &TurnDraft,
+    closing: &Closing,
 ) -> Result<Result<Vec<ArtifactState>, Refusal>, Fault> {
     let judged = judge_held(ops, message, preview).await?;
-    let closed = draft::close(judged, CloseKind::Complete)?;
+    let closed = close::close(judged, closing)?;
     lifecycle::ready(ops, message.thread_id, &closed.content.artifacts()).await
 }
 
-/// A completion whose seal reached an `ARTIFACT` annotation the stream did not
-/// hold yet when the completion was judged ([`precheck_completion`] reads the
-/// chunks stored so far, the seal every chunk up to `last_seq`), its artifact
-/// not ready. A fault, retried: the transaction rolls back, the seal with it,
-/// and the redelivery judges the completion on a stream that holds the
-/// annotation — refused `ARTIFACT_NOT_READY`, or stored once the artifact is
-/// ready.
 #[derive(Debug, thiserror::Error)]
 #[error("artifact_not_ready_past_the_judged_stream message_id={message} artifact_id={artifact}")]
 pub struct UnjudgedArtifact {
@@ -128,32 +93,21 @@ pub struct UnjudgedArtifact {
     pub artifact: Uuid,
 }
 
-/// What a close does with the `ARTIFACT` annotations of its sealed stream whose
-/// artifact is not ready (`not_ready`, sorted).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unready {
-    /// Every artifact named is ready.
     None,
-    /// A failure, a cancel, the watch: nobody can refuse them, and what they
-    /// keep must be storable — the annotations go.
     Drop(Vec<Uuid>),
-    /// A completion: never stored without an annotation it holds.
     Retry(Uuid),
 }
 
-pub fn unready(kind: CloseKind, not_ready: &[Uuid]) -> Unready {
-    match (kind, not_ready.first()) {
+pub fn unready(closing: &Closing, not_ready: &[Uuid]) -> Unready {
+    match (closing.strict(), not_ready.first()) {
         (_, None) => Unready::None,
-        (CloseKind::Complete, Some(first)) => Unready::Retry(*first),
-        (CloseKind::Fail | CloseKind::Cancel | CloseKind::Watch, Some(_)) => {
-            Unready::Drop(not_ready.to_vec())
-        }
+        (true, Some(first)) => Unready::Retry(*first),
+        (false, Some(_)) => Unready::Drop(not_ready.to_vec()),
     }
 }
 
-/// The refusal of a stream a 0.4 writer pushed to under the 0.4 accumulator
-/// name, if it did: its frames are sealed (gone from the lane) and the stream
-/// refused there.
 pub async fn legacy_refusal(
     ops: &mut Ops<'_>,
     message: Uuid,
@@ -179,12 +133,12 @@ pub async fn legacy_refusal(
     }))
 }
 
-/// Stores a sealed stream's content on its message and ends its watch.
 pub async fn store_closed(
     ops: &mut Ops<'_>,
     mut message: MessageState,
+    thread: &mut ThreadState,
     sealed: &TurnDraft,
-    kind: CloseKind,
+    closing: &Closing,
     mut artifacts: Vec<ArtifactState>,
     meta: &FactMeta,
 ) -> Result<MessageOutcome, Fault> {
@@ -193,7 +147,7 @@ pub async fn store_closed(
         sealed.refuse(refusal);
     }
     let judged = judge_held(ops, &message, &sealed).await?;
-    let mut closed = draft::close(judged, kind)?;
+    let mut closed = close::close(judged, closing)?;
     let missing: Vec<Uuid> = closed
         .content
         .artifacts()
@@ -202,7 +156,7 @@ pub async fn store_closed(
         .collect();
     let (mut ready, not_ready) = lifecycle::sort_ready(ops, message.thread_id, &missing).await?;
     artifacts.append(&mut ready);
-    match unready(kind, &not_ready) {
+    match unready(closing, &not_ready) {
         Unready::None => {}
         Unready::Drop(gone) => closed.content.annotations.retain(|placed| {
             placed
@@ -228,6 +182,12 @@ pub async fn store_closed(
     ops.save(&message).await?;
     lifecycle::attach(ops, artifacts, message.id, meta).await?;
     watch::end(ops, message.id).await?;
+    if message.status == MessageStatus::Completed
+        && title_job::trigger(ops, thread, meta.occurred_at, meta.acting_user_id).await?
+    {
+        ops.save(&*thread).await?;
+        ops.impact_caused::<Thread, _>(&thread.id, ThreadCause::MessageStored)?;
+    }
     ops.impact_caused::<Message, _>(
         &message.id,
         message_cause(MessageCause::Closed, message.thread_id),
@@ -238,11 +198,6 @@ pub async fn store_closed(
     })
 }
 
-/// Seals the stream of every message of `thread` still `STREAMING`, in the
-/// transaction that deletes the thread: its stored chunks go with the seal, and
-/// a chunk pushed after it is refused on every pod, so nothing of a deleted
-/// thread's content survives in the accumulated lane. The thread is loaded and
-/// locked by the caller; the messages go with it by cascade.
 pub async fn seal_streams_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(), Fault> {
     let streaming: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM threads.message WHERE thread_id = $1 AND status = 'STREAMING' ORDER BY id",
@@ -257,7 +212,6 @@ pub async fn seal_streams_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(
     Ok(())
 }
 
-/// A stream already sealed is as sealed as it gets: a lost race, not a fault.
 fn sealed_or_already(outcome: Result<(), EngineError>) -> Result<(), Fault> {
     match outcome {
         Ok(()) | Err(EngineError::Accumulator(AccumulatorError::AlreadySealed { .. })) => Ok(()),
@@ -267,30 +221,43 @@ fn sealed_or_already(outcome: Result<(), EngineError>) -> Result<(), Fault> {
 
 #[cfg(test)]
 mod tests {
+    use contract_threads::llm::ClosureReason;
     use service_engine::name::AccumulatorName;
+
+    use super::super::close::CloseKind;
 
     use super::*;
 
     #[test]
-    fn a_completion_never_drops_an_artifact_annotation_and_a_close_nobody_refuses_does() {
+    fn a_closing_that_must_be_whole_never_drops_an_artifact_annotation_and_one_nobody_refuses_does()
+    {
         let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
-        for kind in [
-            CloseKind::Complete,
-            CloseKind::Fail,
-            CloseKind::Cancel,
-            CloseKind::Watch,
-        ] {
-            assert_eq!(unready(kind, &[]), Unready::None, "{kind:?}");
+        let whole = [
+            Closing::of(CloseKind::Complete),
+            Closing::naming(CloseKind::Fail, Some(ClosureReason::completed())),
+            Closing::naming(CloseKind::Fail, Some(ClosureReason::budget_exhausted())),
+        ];
+        let droppable = [
+            Closing::of(CloseKind::Fail),
+            Closing::of(CloseKind::Cancel),
+            Closing::of(CloseKind::Watch),
+            Closing::naming(CloseKind::Fail, Some(ClosureReason::interrupted())),
+        ];
+        for closing in whole.iter().chain(droppable.iter()) {
+            assert_eq!(unready(closing, &[]), Unready::None, "{closing:?}");
         }
-        assert_eq!(
-            unready(CloseKind::Complete, &[first, second]),
-            Unready::Retry(first)
-        );
-        for kind in [CloseKind::Fail, CloseKind::Cancel, CloseKind::Watch] {
+        for closing in &whole {
             assert_eq!(
-                unready(kind, &[first, second]),
+                unready(closing, &[first, second]),
+                Unready::Retry(first),
+                "{closing:?}"
+            );
+        }
+        for closing in &droppable {
+            assert_eq!(
+                unready(closing, &[first, second]),
                 Unready::Drop(vec![first, second]),
-                "{kind:?}"
+                "{closing:?}"
             );
         }
     }

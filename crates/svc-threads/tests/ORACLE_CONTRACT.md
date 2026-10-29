@@ -143,3 +143,14 @@ own commands, stops it, and starts this version on the same database with
 `migrate`, then `serve`. A message that cannot be converted makes `migrate`
 fail or keeps `serve` from becoming ready. Either way, the message id is named
 in that output.
+
+## 0.6.0 additions
+
+- `Chunk::Keepalive` (wire `{"kind":"KEEPALIVE"}`), built by `Chunk::keepalive()`.
+- `CompleteMessageV2 { message_id, thread_id, seal: StreamSeal, closure:
+  Option<LibraryJson>, acting_user_id }` and `FailMessageV2 { message_id,
+  thread_id, seal: Option<StreamSeal>, closure: Option<LibraryJson>,
+  acting_user_id }`: `ThreadsCommand`, aggregate `message`, verbs `complete`
+  and `fail`, version 2. `closure` is the library's closure reason JSON.
+- The closing fact's payload carries `closure`, one of `completed`,
+  `budget_exhausted`, `cancelled`, `interrupted`, `failed`.

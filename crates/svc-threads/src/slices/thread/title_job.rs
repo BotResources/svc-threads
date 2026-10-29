@@ -1,21 +1,3 @@
-//! A thread's title Job, with Jobs: Threads is the Job's owner.
-//!
-//! - Starting: when a thread receives its first user message and has no title
-//!   and never had a title Job, the message's transaction records the Job as
-//!   the thread's active title Job and publishes `job.create` for the
-//!   configured runner type ([`start`]).
-//! - The runner sets the title, or declares that it failed, through a runner
-//!   operation accepted only for the thread's active title Job ([`job_gate`]);
-//!   Threads then ends the Job and publishes `job.finish` or `job.fail` in the
-//!   same transaction.
-//! - A title set by command while the Job runs wins, and deleting a thread
-//!   cancels its running Job: Threads publishes `job.cancel` ([`cancel_active`]).
-//! - Jobs refusing, failing or cancelling the Job ends it: the thread stays
-//!   without a title for good ([`end_by_jobs`]).
-//!
-//! At most one title Job per thread, ever. Ending a Job records no fact of the
-//! thread; only a title does (`TitleChanged`).
-
 use chrono::{DateTime, Utc};
 use contract_jobs::command::{CancelJob, CreateJob, FailJob, FinishJob, TriggeredBy};
 use contract_jobs::event::{JobCancelled, JobCreationRejected, JobFailed};
@@ -35,16 +17,11 @@ use crate::facts::FactMeta;
 use crate::fault::Fault;
 use crate::principal::ThreadsPrincipal;
 
-/// A title operation naming a Job that is not the thread's active title Job.
 pub const JOB_NOT_ACTIVE: Reason = Reason::new("JOB_NOT_ACTIVE");
-/// A declared failure whose reason code is not `[a-z][a-z0-9_]*`.
 pub const FAILURE_REASON_INVALID: Reason = Reason::new("FAILURE_REASON_INVALID");
 
-/// Threads names itself to Jobs as the producer and the source of its Jobs.
 const PRODUCER: &str = contract_threads::SERVICE;
 
-/// The decision of both title operations: they are open only to the thread's
-/// active title Job.
 pub fn job_gate(thread: &ThreadState, job_id: Uuid) -> Gate {
     match thread.active_title_job() {
         Some(job) if job.job_id == job_id => Gate::allowed(),
@@ -52,8 +29,6 @@ pub fn job_gate(thread: &ThreadState, job_id: Uuid) -> Gate {
     }
 }
 
-/// Records a new active title Job when the thread is owed one: it has no title
-/// and never had a title Job. Answers the Job's id.
 pub fn start(thread: &mut ThreadState, now: DateTime<Utc>) -> Option<Uuid> {
     if thread.title.is_some() || thread.title_job.is_some() {
         return None;
@@ -75,15 +50,10 @@ fn end(thread: &mut ThreadState, state: TitleJobState, now: DateTime<Utc>) -> Op
     Some(job.job_id)
 }
 
-/// Ends the active title Job as cancelled, if any: a title set by command, or
-/// the thread deleted. Answers the Job to cancel at Jobs.
 pub fn cancel_active(thread: &mut ThreadState, now: DateTime<Utc>) -> Option<Uuid> {
     end(thread, TitleJobState::Cancelled, now)
 }
 
-/// Jobs ended `job_id` on its side: if it is the thread's active title Job, it
-/// ends so, and the thread stays without a title. Anything else changes
-/// nothing.
 pub fn end_by_jobs(
     thread: &mut ThreadState,
     job_id: Uuid,
@@ -96,16 +66,12 @@ pub fn end_by_jobs(
     end(thread, state, now).is_some()
 }
 
-/// Whether a declared failure reason is `[a-z][a-z0-9_]*`.
 pub fn is_failure_reason(code: &str) -> bool {
     let mut bytes = code.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_lowercase())
         && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-// ── Jobs' published language ────────────────────────────────────────────────
-
-/// A command of Jobs' contract, on its coordinates.
 struct JobsCommand<T> {
     coords: br_core_integration::CommandCoords,
     command_id: Uuid,
@@ -139,13 +105,36 @@ fn jobs_command<T>(
     }
 }
 
-/// Publishes `job.create` for a new title Job of `thread`.
-pub fn publish_create(
+pub async fn trigger(
+    ops: &mut Ops<'_>,
+    thread: &mut ThreadState,
+    now: DateTime<Utc>,
+    triggered_by: Option<Uuid>,
+) -> Result<bool, Fault> {
+    let Some(job) = start(thread, now) else {
+        return Ok(false);
+    };
+    let name = match triggered_by {
+        Some(user) => crate::directory::display_name(ops.connection(), user).await?,
+        None => None,
+    };
+    publish_create(
+        ops,
+        thread.id,
+        job,
+        &crate::config::installed().title_runner_type,
+        triggered_by,
+        name,
+    )?;
+    Ok(true)
+}
+
+fn publish_create(
     ops: &mut Ops<'_>,
     thread_id: Uuid,
     job_id: Uuid,
     runner_type: &str,
-    triggered_by: Uuid,
+    triggered_by: Option<Uuid>,
     triggered_by_name: Option<String>,
 ) -> Result<(), Fault> {
     let config = serde_json::to_value(TitleJobConfig::new(thread_id, job_id))
@@ -158,12 +147,9 @@ pub fn publish_create(
             producer: PRODUCER.to_string(),
             config: Some(config),
             parent_job_id: None,
-            triggered_by: Some(match triggered_by_name {
-                Some(display_name) => TriggeredBy::Identified {
-                    id: triggered_by,
-                    display_name,
-                },
-                None => TriggeredBy::Anonymous(triggered_by),
+            triggered_by: triggered_by.map(|id| match triggered_by_name {
+                Some(display_name) => TriggeredBy::Identified { id, display_name },
+                None => TriggeredBy::Anonymous(id),
             }),
             source_bc: Some(PRODUCER.to_string()),
             source_entity_id: Some(thread_id),
@@ -173,7 +159,6 @@ pub fn publish_create(
     Ok(())
 }
 
-/// Publishes `job.cancel` for a title Job.
 pub fn publish_cancel(ops: &mut Ops<'_>, job_id: Uuid) -> Result<(), Fault> {
     ops.command(jobs_command(
         contract_jobs::cmd_job_cancel_v2_coords(),
@@ -182,9 +167,6 @@ pub fn publish_cancel(ops: &mut Ops<'_>, job_id: Uuid) -> Result<(), Fault> {
     Ok(())
 }
 
-// ── the runner's operations ─────────────────────────────────────────────────
-
-/// The title Job's runner sets the title.
 #[derive(Debug, Deserialize)]
 pub struct RunnerSetTitle {
     pub thread_id: Uuid,
@@ -227,8 +209,6 @@ pub fn runner_set_title<'m>(
     })
 }
 
-/// The title Job's runner declares that it failed: the thread stays untitled
-/// for good.
 #[derive(Debug, Deserialize)]
 pub struct RunnerFailTitleJob {
     pub thread_id: Uuid,
@@ -276,9 +256,6 @@ pub fn runner_fail_title_job<'m>(
     })
 }
 
-// ── Jobs' events ────────────────────────────────────────────────────────────
-
-/// An event of Jobs' contract about a Job, decoded from its envelope.
 pub struct JobsEvent<T>(pub T);
 
 macro_rules! jobs_event {
@@ -304,7 +281,6 @@ jobs_event!(
 jobs_event!(JobFailed, contract_jobs::evt_job_failed_v1_coords);
 jobs_event!(JobCancelled, contract_jobs::evt_job_cancelled_v1_coords);
 
-/// The thread whose title Job is `job_id`, loaded and locked, if any.
 async fn thread_of_job(cx: &mut Reaction<'_>, job_id: Uuid) -> Result<Option<ThreadState>, Fault> {
     let thread: Option<Uuid> =
         sqlx::query_scalar("SELECT thread_id FROM threads.title_job WHERE job_id = $1")
@@ -332,9 +308,6 @@ async fn end_title_job(
     Ok(())
 }
 
-/// Jobs refused to create a title Job: it ends rejected. When Jobs names
-/// another live Job of the same thread (`duplicate_active_entity`), that one
-/// is cancelled.
 pub fn on_creation_rejected<'r>(
     cx: &'r mut Reaction<'r>,
     JobsEvent(event): JobsEvent<JobCreationRejected>,
@@ -366,7 +339,6 @@ pub fn on_creation_rejected<'r>(
     })
 }
 
-/// Jobs failed a title Job (a terminal run failure or an inactivity timeout).
 pub fn on_failed<'r>(
     cx: &'r mut Reaction<'r>,
     JobsEvent(event): JobsEvent<JobFailed>,
@@ -374,7 +346,6 @@ pub fn on_failed<'r>(
     Box::pin(async move { end_title_job(cx, event.job_id, TitleJobState::Failed).await })
 }
 
-/// Jobs cancelled a title Job.
 pub fn on_cancelled<'r>(
     cx: &'r mut Reaction<'r>,
     JobsEvent(event): JobsEvent<JobCancelled>,

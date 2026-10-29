@@ -1,58 +1,29 @@
-//! **T28 — Ids are UUIDv7 and used once in the thread.**
-//!
-//! > On thread T holding message M1 with entry e1 and block b1: storing M2 whose
-//! > block reuses b1's id, or whose entry reuses e1's id, is refused KEY_REUSED;
-//! > an id used twice inside M2 is refused MESSAGE_INVALID naming the library's
-//! > error code; an AI message whose agent id is not a UUIDv7 is refused
-//! > MESSAGE_INVALID; an annotation whose id is not a UUIDv7 is refused
-//! > ID_NOT_UUIDV7. Nothing is stored. M2 with fresh UUIDv7 ids is confirmed.
-//! > Threads' own rules are refused MESSAGE_INVALID naming their code, and
-//! > nothing is stored: a whole turn whose id is not the message id
-//! > (turn_id_mismatch), an AI turn whose agent or author is not the command's
-//! > agent_id and author_name (author_mismatch), an annotation placed after an
-//! > entry the message does not hold (annotation_entry_unknown), and a USER form
-//! > whose turn is not an input turn holding a human message (not_a_user_turn).
-//!
-//! An entry or a block whose id is not a UUIDv7 is refused ID_NOT_UUIDV7, as
-//! an annotation's is: the id rule is Threads', judged before the library is
-//! asked. An agent id that is not a UUIDv7 is the library's refusal: its
-//! `MESSAGE_INVALID` names the library's code for that very id.
-//!
-//! Every attempt is sent under the one id M2 — "nothing is stored" then bites
-//! twice: no fact of M2 after each refusal, and the last store of M2, with
-//! fresh ids, is confirmed instead of refused KEY_REUSED. The content the
-//! library refuses is the library's own JSON, mutated; the code it names is
-//! the library's, on that very JSON.
-//!
-//! Channels: the answers (4), the active branch as a member reads it (2), A's
-//! live feed of T — silent across every refusal, M2 pushed once confirmed (3) —
-//! the fact log.
-
 mod common;
 
-use common::TestContext;
 use common::content::{
-    after, ai_turn, closed, human, mail, model_response, reply, said, text, text_as, to_json,
-    turn_refusal, warning,
+    Streamed, after, ai_turn, closed, human, mail, model_response, reply, said, text, text_as,
+    to_json, turn_refusal, warning,
 };
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, ai, command, create_thread, message_confirmed, message_refused,
-    raw_whole_message, store, streaming_message, user_entry_message, user_message, whole_message,
+    active_branch, ai, await_message, command, completion, create_thread, message_confirmed,
+    message_refused, open_stream, raw_whole_message, store, streaming_message, user_entry_message,
+    user_message, whole_message,
 };
+use common::{TestContext, stream};
 use contract_threads::llm::{
     AgentId, ModelResponse, ResponseEnding, ResponseMetadata, Turn, TurnEntry,
 };
-use contract_threads::{MessageStatus, MessageTurn, ReasonCode, StoreMessageV2};
+use contract_threads::{
+    Chunk, LibraryJson, MessageStatus, MessageTurn, ReasonCode, StoreMessageV2,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
-    // Given T, with member A following it, holding M1: entry e1 holding block
-    // b1.
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
@@ -73,7 +44,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         async move {
             let sent = command(ctx, &store).await;
             let answer = message_refused(ctx, sent, code, what).await;
-            // Then nothing is stored.
             assert!(
                 facts::of(&ctx.pool, "message", m2).await.is_empty(),
                 "{what}"
@@ -87,7 +57,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         store
     };
 
-    // When M2's block reuses b1's id.
     refused(
         as_m2(user_message(
             t,
@@ -100,7 +69,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )
     .await;
 
-    // When M2's entry reuses e1's id.
     let reusing_entry = TurnEntry::from(
         ModelResponse::new(
             e1.id(),
@@ -118,7 +86,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )
     .await;
 
-    // When M2's entry id, then its block id, is not a UUIDv7.
     let mine = to_json(&human(a.id, vec![text("mine")]));
     let mut entry_v4 = mine.clone();
     entry_v4["id"] = Value::String(Uuid::new_v4().to_string());
@@ -132,11 +99,9 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         if let MessageTurn::User(user) = &mut store.message {
             user.entry = contract_threads::LibraryJson::from_json(entry);
         }
-        // Then each is refused ID_NOT_UUIDV7.
         refused(store, ReasonCode::IdNotUuidV7, what).await;
     }
 
-    // When an id is used twice inside M2: its response's two blocks under one.
     let response = TurnEntry::from(model_response(
         vec![said("first"), said("second")],
         ResponseEnding::finished(),
@@ -152,11 +117,8 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         "an id used twice inside M2",
     )
     .await;
-    // Then the refusal names the library's code.
     assert_eq!(answer.params["error"], json!(code), "{answer:?}");
 
-    // When an AI message names an agent id that is not a UUIDv7: opened
-    // STREAMING, and whole, its turn naming that agent.
     let v4 = Uuid::new_v4();
     let v4_code = AgentId::from_uuid(v4)
         .expect_err("the library refuses an agent id that is not a UUIDv7")
@@ -173,7 +135,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         "a streaming AI message of a v4 agent",
     )
     .await;
-    // Then the refusal names the library's code for that agent id.
     assert_eq!(answer.params["error"], json!(v4_code), "{answer:?}");
     let mut whole = to_json(&Turn::from(ai_turn(
         m2,
@@ -192,10 +153,8 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         "a whole AI turn of a v4 agent",
     )
     .await;
-    // Then the refusal names the library's code on that very turn.
     assert_eq!(answer.params["error"], json!(whole_code), "{answer:?}");
 
-    // When an annotation's id is not a UUIDv7.
     let answered = common::content::reply("annotated");
     let turn = Turn::from(ai_turn(m2, &analyst, closed(answered.clone())));
     let mut note = warning("NOTE", "an annotation");
@@ -214,10 +173,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )
     .await;
 
-    // When Threads' own rules are broken, each by a message the library
-    // accepts: a whole turn under another id than M2's; an AI turn of a1 sent
-    // as a2's, then under another author name; an annotation after an entry M2
-    // does not hold; a USER form whose entry is no human message.
     let critic = ai("a2", "Critic");
     let renamed = common::content::Agent {
         id: analyst.id,
@@ -262,15 +217,11 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
             "a USER form holding no human message",
         ),
     ] {
-        // Then each is refused MESSAGE_INVALID naming Threads' own code, and
-        // nothing is stored.
         let answer = refused(store, ReasonCode::MessageInvalid, what).await;
         assert_eq!(answer.params["error"], json!(error), "{what}: {answer:?}");
     }
-    // And no refusal reached A.
     a_feed.silence("a refused store reaches no one").await;
 
-    // When M2 is stored with fresh UUIDv7 ids.
     let fresh = common::content::reply("fresh ids");
     let turn = Turn::from(ai_turn(m2, &analyst, closed(fresh.clone())));
     let sent = command(
@@ -285,7 +236,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         ),
     )
     .await;
-    // Then it is confirmed, and (3) pushed to A.
     message_confirmed(&ctx, sent, MessageStatus::Completed, "M2 with fresh ids").await;
     assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1, m2]);
     a_feed
@@ -293,6 +243,54 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
             upsert_of(delta, m2).is_some()
         })
         .await;
+
+    ctx.teardown().await;
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t28_a_streamed_message_reusing_a_held_entry_id_is_stored_failed_with_reused_identity() {
+    let ctx = TestContext::setup().await;
+    let a = ctx.enrol("ada").await;
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let analyst = ai("a1", "Analyst");
+    let e1 = human(a.id, vec![text("the first block")]);
+    let m1 = store(
+        &ctx,
+        user_entry_message(t, None, a.id, &e1),
+        MessageStatus::Completed,
+    )
+    .await;
+
+    let m2 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mut reusing = to_json(&mail(&analyst, t, vec![text("a note")]));
+    reusing["id"] = Value::String(e1.id().as_uuid().to_string());
+    let mut response = Streamed::start(m2, None);
+    response.text(&["an answer"], true);
+    response.complete(ResponseEnding::finished());
+    let mut chunks = vec![Chunk::Entry {
+        entry: LibraryJson::from_json(reusing),
+    }];
+    chunks.extend(response.chunks());
+    let (last_seq, hash) = stream::push(&ctx.nats.url(), m2, 0, &chunks).await;
+    let sent = command(&ctx, &completion(t, m2, last_seq, &hash)).await;
+    message_confirmed(&ctx, sent, MessageStatus::Failed, "completing M2").await;
+
+    let view = await_message(&ctx, &a.passport, t, m2, "M2 failed", |view| {
+        view["status"] == "FAILED"
+    })
+    .await;
+    assert_eq!(
+        common::content::closure_kind(&view).as_deref(),
+        Some("failed"),
+        "{view}"
+    );
+    let failed = facts::of(&ctx.pool, "message", m2).await;
+    assert_eq!(
+        facts::the(&failed, "Failed").payload["reason"],
+        "reused_identity"
+    );
+    assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1, m2]);
 
     ctx.teardown().await;
 }

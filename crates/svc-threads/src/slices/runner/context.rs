@@ -1,44 +1,3 @@
-//! A thread's context, as a runner reads it: its active branch, with the
-//! thread's members and resources. Threads sorts it, never the runner:
-//!
-//! - naming an agent, the runner receives the library's projected thread for
-//!   that agent (`br-llm-messages-projected-thread/1`), built by
-//!   `RecordSet::into_projected_thread[_pending]` from the rows the agent
-//!   context holds;
-//! - naming none (the title runner), it receives the whole active branch as a
-//!   `br-llm-messages/5` conversation, built by `RecordSet::into_conversation`.
-//!
-//! The context leaves out the branch's deleted messages, its cancelled ones and
-//! those failed before their first entry, every interrupted response and every
-//! annotation. Each AI turn carries its agent's id and name, each human message
-//! its user's id; the current display names come with the members.
-//!
-//! What the agent context holds is read in one statement ([`context_query`]):
-//! the active branch's recursive walk joined to the entry and block rows —
-//! whole for the input turns and the named agent's own turns; for another
-//! agent's AI turn, only its turn row, its model responses' entry rows (their
-//! payload blanked where they are selected, never read: the library accepts
-//! them without their ending on this door) with their root plain blocks (the
-//! library's text, image and structured content), and its incoming entries —
-//! the library's kinds, bound from the library. A message still streaming holds
-//! its content in the accumulated lane: the streams of the branch are read
-//! concurrently and judged as their close will judge them, the ids other
-//! messages hold included ([`judge_streams`], one read for every stream), their
-//! complete entries reduced the same way, and the response another agent is
-//! still producing given to the library as pending.
-//!
-//! A message that closes between the statement and the read of its stream
-//! leaves a sealed — empty — stream behind a turn row still `STREAMING`: the
-//! statuses of the streaming messages are read again once their streams are
-//! read, and the branch is read once more when one closed meanwhile.
-//!
-//! ENGINE GAP (br-service-engine v0.4.2): a GraphQL resolver reaches the
-//! accumulated lane only through a projector's load, so the context is a raw
-//! projector ([`ContextView`]) read once through `Query::fetch_window`; and the
-//! chunk reader reads one stream per call: the streams of a branch (typically
-//! none or one) are read concurrently, one read each. The engine would need a
-//! batched `ChunkReader::states(&[key])`.
-
 use std::collections::{BTreeSet, HashSet};
 
 use contract_threads::MessageStatus;
@@ -71,36 +30,27 @@ use crate::slices::thread::state::{ThreadState, UnknownStoredValue};
 use crate::slices::thread::store::ThreadStore;
 use crate::slices::thread::view::{MemberView, ResourceView};
 
-/// What a runner reads of a thread.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct ThreadContext {
     pub thread_id: Uuid,
-    /// Naming no agent: the whole active branch as a `br-llm-messages/5`
-    /// conversation (its JSON); `null` when an agent is named.
     pub conversation: Option<JsonScalar>,
-    /// Naming an agent: its agent context, the library's projected thread
-    /// (`br-llm-messages-projected-thread/1`); `null` otherwise.
     pub projected_thread: Option<JsonScalar>,
     pub members: Vec<MemberView>,
     pub resources: Vec<ResourceView>,
 }
 
-/// One context: a thread, read for the agent named, or whole.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContextKey {
     pub thread: Uuid,
     pub agent: Option<Uuid>,
 }
 
-/// The window of the context: the thread and the agent a runner names.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextWindow {
     pub thread: Option<Uuid>,
     pub agent: Option<Uuid>,
 }
 
-/// A thread's context, read by a runner: any thread, for a service account
-/// holding `threads:runner`, and for nobody else. Never subscribed to.
 #[derive(Default)]
 pub struct ContextView;
 
@@ -108,7 +58,6 @@ impl ContextView {
     pub const NAME: ProjectorName = ProjectorName::from_static("runner_context");
 }
 
-/// The rows of a context, as the one statement reads them.
 pub struct ContextFacts {
     contexts: Vec<(ContextKey, ThreadContext)>,
 }
@@ -210,18 +159,6 @@ impl Projector for ContextView {
     }
 }
 
-/// The library's incoming entry kinds (`$3`): what an agent context keeps
-/// whole of another agent's turn.
-fn incoming_kinds() -> Vec<&'static str> {
-    TurnEntryKind::ALL
-        .iter()
-        .filter(|kind| kind.is_incoming())
-        .map(|kind| kind.as_str())
-        .collect()
-}
-
-/// The library's plain block kinds (`$4`): what an agent context keeps of
-/// another agent's response, at its root.
 fn plain_kinds() -> Vec<&'static str> {
     ContentBlockKind::ALL
         .iter()
@@ -230,15 +167,6 @@ fn plain_kinds() -> Vec<&'static str> {
         .collect()
 }
 
-/// The one statement of a context: the active branch of `$1` read for the
-/// agent `$2` (none: whole), the library's incoming entry kinds `$3` and plain
-/// block kinds `$4`. Its rows are turn, entry and block rows in one column set,
-/// ordered by the branch from its first message, then by their place in their
-/// message. A message is left out when deleted, cancelled, or failed before
-/// its first entry; an interrupted response is never read; of another agent's
-/// AI turn, only its model responses (their payload blanked in the `entry`
-/// selection itself, so never read) with their root plain blocks, and its
-/// incoming entries are.
 pub fn context_query() -> String {
     let response = TurnEntryKind::ModelResponse.as_str();
     let closure = TurnEntryKind::TurnClosure.as_str();
@@ -274,7 +202,7 @@ pub fn context_query() -> String {
                     t.depth, t.foreign_turn \
              FROM turn t JOIN threads.message_entry e ON e.message_id = t.id \
              WHERE e.state = '{complete}' \
-               AND (NOT t.foreign_turn OR e.kind = '{response}' OR e.kind = ANY($3)) \
+               AND (NOT t.foreign_turn OR e.kind = '{response}') \
          ) \
          SELECT 0 AS row_kind, t.depth, t.id AS message_id, t.id, 0 AS position, \
                 t.status AS kind, t.turn_kind AS state, NULL::text AS sender_kind, \
@@ -292,19 +220,16 @@ pub fn context_query() -> String {
          FROM entry e JOIN threads.entry_block b ON b.entry_id = e.id \
          WHERE b.state = '{complete}' \
            AND (NOT e.foreign_turn OR e.kind <> '{response}' \
-                OR (b.parent_id IS NULL AND b.kind = ANY($4))) \
+                OR (b.parent_id IS NULL AND b.kind = ANY($3))) \
          ORDER BY 2 DESC, 1, 5"
     )
 }
 
-/// A turn of the branch, as its row reads.
 struct BranchTurn {
     message: MessageState,
     foreign: bool,
 }
 
-/// What a context reads of the active branch: its turns, the records the agent
-/// context holds of them, and another agent's responses still produced.
 #[derive(Default)]
 struct Branch {
     turns: Vec<BranchTurn>,
@@ -314,7 +239,6 @@ struct Branch {
 }
 
 impl Branch {
-    /// The messages of the branch that were still streaming when it was read.
     fn streaming(&self) -> Vec<uuid::Uuid> {
         self.turns
             .iter()
@@ -324,7 +248,6 @@ impl Branch {
     }
 }
 
-/// The context of `key`, `None` for a thread that does not exist.
 async fn read(
     conn: &mut PgConnection,
     chunks: &service_engine::accumulator::ChunkReader,
@@ -344,8 +267,6 @@ async fn read(
         .transpose()
         .map_err(corrupt)?;
     let mut branch = read_branch(conn, chunks, key, agent).await?;
-    // A stream sealed between the statement and its read is empty: its message
-    // closed meanwhile, its rows now hold its content. Read once more.
     if closed_meanwhile(conn, &branch.streaming()).await? {
         branch = read_branch(conn, chunks, key, agent).await?;
     }
@@ -383,7 +304,6 @@ async fn read(
     Ok(Some(context_of(&thread, read)))
 }
 
-/// Whether one of `streaming` is no longer `STREAMING`. One statement.
 async fn closed_meanwhile(
     conn: &mut PgConnection,
     streaming: &[uuid::Uuid],
@@ -400,9 +320,6 @@ async fn closed_meanwhile(
     .await?)
 }
 
-/// The active branch as the agent context holds it: the one statement, then
-/// the streams of the messages still streaming, read concurrently and judged
-/// together.
 async fn read_branch(
     conn: &mut PgConnection,
     chunks: &service_engine::accumulator::ChunkReader,
@@ -412,7 +329,6 @@ async fn read_branch(
     let rows = sqlx::query(&context_query())
         .bind(key.thread)
         .bind(key.agent)
-        .bind(incoming_kinds())
         .bind(plain_kinds())
         .fetch_all(&mut *conn)
         .await?;
@@ -431,7 +347,6 @@ async fn read_branch(
             }
         }
     }
-    // A message still streaming holds its turn in the accumulated lane.
     let streaming: Vec<&BranchTurn> = branch
         .turns
         .iter()
@@ -484,15 +399,10 @@ async fn read_branch(
     Ok(branch)
 }
 
-/// What a context keeps of another agent's turn: its model responses and its
-/// incoming entries.
 fn reduced_entry(kind: TurnEntryKind) -> bool {
-    kind == TurnEntryKind::ModelResponse || kind.is_incoming()
+    kind == TurnEntryKind::ModelResponse
 }
 
-/// What a context keeps of the blocks of another agent's entry: a model
-/// response's root plain blocks (text, image, structured content); an incoming
-/// entry's blocks whole.
 fn reduced_block(set: &RecordSet, block: &BlockRecord) -> bool {
     let of_response = set
         .entries()
@@ -501,8 +411,6 @@ fn reduced_block(set: &RecordSet, block: &BlockRecord) -> bool {
     !of_response || (block.parent().is_none() && block.kind().is_plain())
 }
 
-/// A conversation Threads stored that the library cannot read back: a fault of
-/// the store, never a refusal — Threads only stores what the library loads.
 fn store_fault(thread: Uuid, error: &contract_threads::llm::Error) -> EngineError {
     EngineError::Service(format!("the context of thread {thread} does not load: {error}").into())
 }
@@ -566,7 +474,6 @@ fn author_agent(author: &MessageAuthor) -> Option<AgentId> {
     }
 }
 
-/// What a context holds: the whole conversation, or an agent context.
 enum Read {
     Whole(serde_json::Value),
     Projected(serde_json::Value),
@@ -623,20 +530,11 @@ mod tests {
             !selection.contains("e.*") && selection.contains("CASE WHEN t.foreign_turn"),
             "the entry selection names its columns and blanks a foreign payload itself"
         );
-        assert!(query.contains("ANY($3)") && query.contains("ANY($4)"));
+        assert!(query.contains("ANY($3)") && !query.contains("$4"));
     }
 
     #[test]
-    fn the_kinds_the_context_keeps_are_the_librarys() {
-        let incoming = incoming_kinds();
-        assert_eq!(
-            incoming.len(),
-            TurnEntryKind::ALL
-                .iter()
-                .filter(|k| k.is_incoming())
-                .count()
-        );
-        assert!(incoming.contains(&"agent_mail") && !incoming.contains(&"model_response"));
+    fn the_plain_kinds_the_context_keeps_are_the_librarys() {
         assert_eq!(plain_kinds(), ["text", "image", "structured_content"]);
     }
 
@@ -649,11 +547,20 @@ mod tests {
     }
 
     #[test]
-    fn another_agents_turn_keeps_its_responses_and_incoming_entries() {
+    fn another_agents_turn_keeps_only_its_responses() {
         assert!(reduced_entry(TurnEntryKind::ModelResponse));
-        assert!(reduced_entry(TurnEntryKind::AgentMail));
-        assert!(reduced_entry(TurnEntryKind::HumanMessage));
+        assert!(!reduced_entry(TurnEntryKind::AgentMail));
+        assert!(!reduced_entry(TurnEntryKind::HumanMessage));
+        assert!(!reduced_entry(TurnEntryKind::RuntimeNotice));
         assert!(!reduced_entry(TurnEntryKind::RuntimeToolResults));
         assert!(!reduced_entry(TurnEntryKind::TurnClosure));
+    }
+
+    #[test]
+    fn a_foreign_turn_is_not_asked_for_what_it_received() {
+        let query = context_query();
+        let selection = &query[query.find("entry AS").unwrap()..query.find("SELECT 0").unwrap()];
+        assert!(selection.contains("NOT t.foreign_turn OR e.kind = 'model_response'"));
+        assert!(!selection.contains("ANY"));
     }
 }

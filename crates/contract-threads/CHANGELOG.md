@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.6.0 - 2026-10-29
+
+The published language of Threads 0.6 (registry patch 0.6.0): a writer keeps a
+waiting stream alive, and names the closure of the stream it completes or
+fails.
+
+### Added
+
+- `Chunk::Keepalive` (wire `{"kind":"KEEPALIVE"}`) and `Chunk::keepalive()`: a
+  chunk that carries no content. It takes its place in the order of the chunks
+  and in `seal_hash` like any chunk.
+- `CompleteMessageV2` (`message.complete`, version 2) and `FailMessageV2`
+  (`message.fail`, version 2): `complete` and `fail` with an optional
+  `closure`, the library's closure reason as `LibraryJson`. `FailMessageV2`
+  keeps the optional `seal` of `FailMessage`. Without a `closure` they act as
+  the version 1 commands.
+- `LibraryJson::to_closure_reason()`: the library's `ClosureReason` read from
+  that JSON, with the library's error when it cannot be read.
+
+### Changed
+
+- `Chunk` gains a variant: an exhaustive `match` over it no longer compiles
+  (a minor bump on the 0.x line).
+- Comments removed from the files this release touches.
+
 ## 0.5.0 - 2026-10-27
 
 The published language of Threads 0.5 (registry patch 0.5.0): a message is a

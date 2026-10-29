@@ -11,6 +11,57 @@ heading exists.
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-29
+
+Threads 0.6 (registry patch 0.6.0): a writer keeps a waiting stream alive and
+names the closure of the stream it ends; a restarted runner can close the turn
+its predecessor left open; the title Job starts at the first completed message;
+an agent context keeps less of what another agent received.
+`contract-threads` 0.6.0 carries the new published language (see its
+changelog).
+
+### Added
+
+- **Keepalive chunk** on `stream.threads.{message_id}` (same subject and
+  frame): it folds to nothing, takes a sequence number, enters the seal digest,
+  and counts as activity for the silence rule. It adds no entry, no fact and no
+  version change, may come inside a response still producing, works on a
+  resolved thread, and changes nothing for a message that is not `STREAMING`.
+- **`message.complete.v2` and `message.fail.v2`**: the writer may name the
+  closure reason among the library's five (completed, cancelled, failed,
+  interrupted, budget exhausted), with its detail. The status follows the
+  reason (completed and budget exhausted `COMPLETED`, cancelled `CANCELLED`,
+  failed and interrupted `FAILED`). A closure the library cannot read, such as
+  failed without a detail, is refused `MESSAGE_INVALID` and the message stays
+  `STREAMING`. A chunk the library refused fails the message whatever reason is
+  named. Completed, named or not, still needs a whole turn: a response still
+  producing or a call left without a result fails the message (`failed`);
+  budget exhausted and every other reason leave them as the library allows. The
+  version 1 commands behave as in 0.5.
+- The closing fact (`Completed`, `Failed`, `Cancelled`) carries the `closure`
+  kind of the turn; the detail of a closure is in no fact.
+
+### Changed
+
+- **The title Job starts at the first message to be `COMPLETED`**, whatever its
+  kind (a user message, an AI message, a request stored as an input turn, a
+  stream completed by `complete` or by `fail.v2` naming a completed closure),
+  in the transaction that completes it; `triggered_by` is the acting user of
+  that storage when it has one. A message that ends `CANCELLED` or `FAILED`
+  starts none. In 0.5 only a user message did.
+- **Agent context**: another agent's turn keeps only its model responses; what
+  that agent received (notices, tasks, mails, requests, human messages) is no
+  longer in it.
+- Comments removed from the files this release touches. The message close
+  matrix moved out of `draft.rs` into `close.rs`, `closure.rs` and `closers.rs`.
+
+### Checked
+
+- `br-agentic-contract` 0.1.0 (tag `br-agentic-contract/v0.1.0`): nothing in
+  `contract-threads` or `svc-threads` duplicates its types. Threads owns no
+  runner-side port or wire type of the agentic contract; its agent ids and
+  closure reasons are the `br-llm-messages` ones. No dependency is added.
+
 ## 0.5.0 - 2026-10-27
 
 Threads 0.5 (registry patch 0.5.0): a message is a turn of the
