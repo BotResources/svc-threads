@@ -85,7 +85,10 @@ impl Named {
 }
 
 pub fn parse(json: &LibraryJson) -> Result<Named, Refusal> {
-    Named::of(json.to_closure_reason().map_err(|error| refusal_of(&error))?)
+    Named::of(
+        json.to_closure_reason()
+            .map_err(|error| refusal_of(&error))?,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,7 +223,10 @@ mod tests {
             reason(ClosureReason::budget_exhausted())
         ));
         assert!(!strict(CloseKind::Fail, None));
-        assert!(!strict(CloseKind::Fail, reason(ClosureReason::interrupted())));
+        assert!(!strict(
+            CloseKind::Fail,
+            reason(ClosureReason::interrupted())
+        ));
         assert!(!strict(CloseKind::Cancel, None));
         assert!(!strict(CloseKind::Watch, None));
     }

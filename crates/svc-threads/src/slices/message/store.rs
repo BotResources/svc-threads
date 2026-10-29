@@ -1,4 +1,3 @@
-
 use std::collections::{BTreeSet, HashMap};
 
 use contract_threads::llm::{
@@ -809,10 +808,7 @@ mod tests {
         ];
         for reason in reasons {
             let mut message = closed_message(reason.clone());
-            assert!(
-                check_status_follows_closure(&message).is_ok(),
-                "{reason:?}"
-            );
+            assert!(check_status_follows_closure(&message).is_ok(), "{reason:?}");
             for other in [
                 MessageStatus::Completed,
                 MessageStatus::Cancelled,
