@@ -16,8 +16,6 @@ permissions:
   contents: read
 
 jobs:
-  # Kept since the bootstrap: a required check (scripts/setup-branch-protection.sh)
-  # that arms the Rust jobs once a Cargo workspace exists — which it now does.
   probe:
     name: scaffold probe
     runs-on: ubuntu-latest
@@ -51,8 +49,6 @@ jobs:
         with:
           components: rustfmt
 
-      # `cargo fmt` does not expand macros, so it never reaches the slice
-      # modules `compose_service!` declares: they are formatted directly.
       - name: cargo fmt --all (+ the composed slices)
         run: |
           cargo fmt --all
@@ -99,14 +95,9 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      # Unit tests of both crates. The e2e scenarios are `#[ignore]`d here —
-      # they need real infrastructure — and run in `integration (e2e)`.
       - name: Unit tests
         run: cargo test --workspace --locked
 
-      # A thin chart over the engine's library chart: its dependency is fetched
-      # from GHCR (Chart.lock pins it), and the deployment-owned keys are set by
-      # placeholders for the render.
       - name: helm dependency build
         run: helm dependency build charts/br-svc-threads
 
@@ -116,9 +107,6 @@ jobs:
       - name: helm template dry-run
         run: helm template ci charts/br-svc-threads --values charts/br-svc-threads/ci/lint-values.yaml --debug > /dev/null
 
-  # The black-box suite: the real binary against real PostgreSQL, a spawned
-  # nats-server per scenario, the `nats` CLI (the streams the harness cannot
-  # declare yet, the message stream's frames) and a spawned MinIO per scenario.
   integration:
     name: integration (e2e)
     needs: fmt
@@ -137,9 +125,6 @@ jobs:
           --health-retries 30
     env:
       E2E_PG_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
-      # MinIO publishes no binary any more: the pinned commit (>= RELEASE.2024-12-13,
-      # the POST-policy checksum conditions an artifact upload relies on) and the
-      # pinned natscli are built from source, and cached on their pins.
       MINIO_COMMIT: 01ce918d8279a20e4706b96a64396146894adee4
       NATSCLI_VERSION: v0.3.2
     steps:
@@ -197,7 +182,6 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@v4
-      # Reads .cargo/audit.toml, whose ignores mirror deny.toml's, reasons there.
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -223,9 +207,6 @@ jobs:
           tool: cargo-machete
       - run: cargo machete
 
-  # Each crate keeps its own changelog: the service's is the root CHANGELOG.md
-  # (its `## x.y.z` heading is what CD publishes on), the published language's
-  # is crates/contract-threads/CHANGELOG.md (its heading is what CD tags on).
   changelog:
     name: changelog entry present (per crate)
     runs-on: ubuntu-latest
@@ -250,7 +231,7 @@ jobs:
             echo "::error::svc-threads changed without a CHANGELOG.md entry"
             fail=1
           fi
-          if echo "$changed" | grep -qE '^crates/contract-threads/' \
+          if echo "$changed" | grep -vx 'crates/contract-threads/registry.toml' | grep -qE '^crates/contract-threads/' \
             && ! echo "$changed" | grep -qx 'crates/contract-threads/CHANGELOG.md'; then
             echo "::error::contract-threads changed without a crates/contract-threads/CHANGELOG.md entry"
             fail=1
@@ -306,6 +287,15 @@ jobs:
           done
 
           [[ "${gated}" -eq 1 ]] || echo "No tracked service version bump in this PR — nothing to gate."
+
+      - name: Gate tracked libraries against the Libraries registry
+        env:
+          BR_REGISTRY_KEY: ${{ secrets.BR_REGISTRY_KEY }}
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: bash scripts/library-pr-gate.sh
+
+      - name: Library registry wiring tests
+        run: bash scripts/test-library-registry.sh
 
   shellcheck:
     name: shellcheck
