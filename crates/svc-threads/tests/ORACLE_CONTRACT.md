@@ -63,7 +63,9 @@ content }`.
 - Unchanged from 0.4: `CompleteMessage`, `FailMessage`, `CancelMessage`,
   `DeleteMessage`, `StreamSeal`, every thread command, the four answer events,
   `ReasonCode`, `MessageStatus`, `ClosingStatus`, `PublishedThreadMembers`,
-  `members::members_key`, `MEMBERS_MANIFEST_KEY`, `TitleJobConfig`.
+  `members::members_key`, `MEMBERS_MANIFEST_KEY`. (`TitleJobConfig` was
+  part of this list until `contract-threads` 0.7.0 removed it with the title
+  Job.)
 - The suite never uses the 0.4 content types (`Block`, `Item`, `ChunkPart`,
   `LibraryEvent`, ...). It sends `store.v1` through `contract-threads` 0.4.0 by
   its git tag (dev-dependency `contract-threads-v0-4`), as a consumer still on

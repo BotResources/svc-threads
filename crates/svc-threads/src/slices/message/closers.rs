@@ -170,7 +170,7 @@ async fn close_message(
     call: &Call,
     closer: &Closer<'_>,
 ) -> Result<Verdict, Fault> {
-    let mut thread = refuse_on!(open_thread(cx, closer.thread).await?);
+    refuse_on!(open_thread(cx, closer.thread).await?);
     let state = refuse_on!(message_of(cx, closer.thread, closer.message).await?);
     if let Some(refusal) = state.not_streaming() {
         return Ok(Err(refusal));
@@ -186,15 +186,7 @@ async fn close_message(
         artifacts = refuse_on!(closing::precheck_completion(cx, &state, &preview, &closing).await?);
     }
     let sealed = refuse_on!(seal(cx, state.id, closer.seal).await?);
-    closing::store_closed(
-        cx,
-        state,
-        &mut thread,
-        &sealed,
-        &closing,
-        artifacts,
-        &call.meta,
-    )
-    .await
-    .map(Ok)
+    closing::store_closed(cx, state, &sealed, &closing, artifacts, &call.meta)
+        .await
+        .map(Ok)
 }

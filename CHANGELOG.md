@@ -11,6 +11,50 @@ heading exists.
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-03
+
+Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A
+title is set by command only (`thread.set_title`, unchanged); naming a thread
+is the commanding services' concern (the agents service names a thread after
+its first message). Threads no longer talks to Jobs. `contract-threads` 0.7.0
+removes the title Job's published language (see its changelog).
+
+### Removed
+
+- **The title Job.** A thread's first `COMPLETED` message no longer creates a
+  Job; a title set by command and a thread's deletion (on command, or because
+  its owner left the roster) no longer cancel one.
+- **The runner's title operations** `threadsSetTitle(threadId, jobId, title)`
+  and `threadsFailTitleJob(threadId, jobId, reasonCode, message)`, with their
+  refusals `JOB_NOT_ACTIVE` and `FAILURE_REASON_INVALID`. `threads:runner` now
+  allows reading a thread's context and requesting an artifact upload, and
+  nothing else. The SDL loses both mutation roots; nothing else in it changes.
+- **Every Jobs consumption**: Threads no longer publishes
+  `integration.cmd.jobs.job.create.v1`, `job.finish.v2`, `job.fail.v2` or
+  `job.cancel.v2`, and no longer consumes `integration.evt.jobs.job.
+  creation_rejected.v1`, `job.failed.v1` or `job.cancelled.v1`: the durables
+  `threads-title-job-rejected`, `threads-title-job-failed` and
+  `threads-title-job-cancelled` are no longer registered. The `contract-jobs`
+  dependency is gone.
+- **`THREADS_TITLE_RUNNER_TYPE`** is no longer read.
+- The delta cause `TITLE_JOB_ENDED` is no longer emitted.
+
+### Changed
+
+- **Migration `9800000006`** drops `threads.title_job`. A title Job still
+  `RUNNING` when it runs is forgotten: Threads neither finishes nor cancels it
+  at Jobs, and its runner finds no title operation to call (README, *Deploy:
+  0.6 → 0.7*). Past facts are not rewritten: a `TitleChanged` fact a title Job
+  recorded keeps `by: TITLE_JOB`; from now on every `TitleChanged` says
+  `by: COMMAND`.
+
+### Tests
+
+- T12 (the title Job) is deleted with the harness's Jobs stand-in. T14 and T17
+  lose their title-Job clauses: neither expects a `job.cancel`, and T17 no
+  longer publishes Jobs' `job.cancelled`. T27 proves that Threads commands
+  nobody on the whole command stream instead of on Jobs' subjects.
+
 ## 0.6.0 - 2026-10-29
 
 Threads 0.6 (registry patch 0.6.0): a writer keeps a waiting stream alive and

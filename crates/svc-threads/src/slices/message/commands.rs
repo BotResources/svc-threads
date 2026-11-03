@@ -22,9 +22,9 @@ use super::{MessageCause, message_cause, store, watch};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
 use crate::fault::Fault;
 use crate::slices::artifact::lifecycle;
+use crate::slices::thread::ThreadCause;
 use crate::slices::thread::state::{Thread, ThreadState};
 use crate::slices::thread::transitions::Applied;
-use crate::slices::thread::{ThreadCause, title_job};
 
 pub(super) type Verdict = Result<MessageOutcome, Refusal>;
 
@@ -407,7 +407,6 @@ async fn store_message(
     let artifacts = refuse_on!(lifecycle::ready(cx, thread.id, &judged.content.artifacts()).await?);
 
     let now = call.meta.occurred_at;
-    let author_user = judged.author_user();
     let status = judged.status;
     let message = transitions::store(
         NewMessage {
@@ -431,15 +430,6 @@ async fn store_message(
     }
 
     thread.record_activity(now);
-    if status == MessageStatus::Completed {
-        title_job::trigger(
-            cx,
-            &mut thread,
-            now,
-            author_user.or(call.meta.acting_user_id),
-        )
-        .await?;
-    }
     cx.save(&thread).await?;
     cx.impact_caused::<Message, _>(&message.id, message_cause(MessageCause::Stored, thread.id))?;
     cx.impact_caused::<Thread, _>(&thread.id, ThreadCause::MessageStored)?;
@@ -447,15 +437,6 @@ async fn store_message(
         status,
         deleted: false,
     }))
-}
-
-impl Judged {
-    fn author_user(&self) -> Option<Uuid> {
-        match &self.author {
-            MessageAuthor::User { user_id, .. } => Some(*user_id),
-            MessageAuthor::Agent { .. } => None,
-        }
-    }
 }
 
 pub fn delete<'r>(
@@ -581,7 +562,7 @@ mod tests {
     fn a_user_message_is_the_input_turn_holding_its_authors_human_message() {
         let (message, human) = (v7(), v7());
         let judged = judge(message, &user(human)).unwrap();
-        assert_eq!(judged.author_user(), Some(human));
+        assert!(matches!(judged.author, MessageAuthor::User { user_id, .. } if user_id == human));
         assert_eq!(judged.turn_kind, TurnKind::InputTurn);
         assert_eq!(judged.status, MessageStatus::Completed);
         assert_eq!(judged.content.entries.len(), 1);

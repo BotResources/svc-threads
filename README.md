@@ -13,16 +13,17 @@ member's read mark — and serves them, live, to their members.
 - Threads decides who may read: the members of a thread, and nobody else.
 - Threads publishes the members of each thread (`threads.members.{thread_id}`),
   so that other services decide locally.
-- Threads runs no AI logic; to name a new conversation it asks a runner through
-  Jobs.
+- Threads runs no AI logic. A conversation's title is set by command
+  (`thread.set_title`); naming a conversation is the commanding services'
+  concern.
 
-**Status: 0.6.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.7.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members KV value, the content model and the chunk format of its message stream, the title Job configuration. What a commanding service imports. |
+| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members KV value, the content model and the chunk format of its message stream. What a commanding service imports. |
 | [`crates/svc-threads`](crates/svc-threads) | The service, on [`br-service-engine`](https://github.com/BotResources/br-service-engine) (fatty manner, soft EDA, multi-pod), organized by capability under `src/slices/` (`thread`, `message`, `artifact`, `runner`). |
 
 ## Running
@@ -43,7 +44,6 @@ Threads' own settings, read at `serve`, each with its default:
 
 | Variable | Default | What it sets |
 |---|---|---|
-| `THREADS_TITLE_RUNNER_TYPE` | `thread_title` | the runner type of the title Job Threads asks Jobs to run |
 | `THREADS_STREAM_IDLE_MS` | `600000` (10 min) | how long a writer may push nothing before its `STREAMING` message is failed |
 | `THREADS_UPLOAD_WINDOW_MS` | `900000` (15 min) | how long an upload access stays valid, and a `PENDING` artifact waits for its message |
 
@@ -53,6 +53,32 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.6 → 0.7
+
+0.7 drops the title Job: Threads no longer publishes `job.create`,
+`job.finish`, `job.fail` or `job.cancel`, no longer consumes Jobs'
+`creation_rejected`, `failed` or `cancelled`, and no longer serves
+`threadsSetTitle` / `threadsFailTitleJob`.
+
+- **Migration `9800000006`** drops `threads.title_job`. A title Job still
+  `RUNNING` at the upgrade is forgotten: Threads neither finishes nor cancels it
+  at Jobs, and its runner finds no title operation to call. To end them
+  cleanly, list them before the rollout
+  (`SELECT job_id FROM threads.title_job WHERE state = 'RUNNING'`) and cancel
+  them at Jobs. The `TitleChanged` facts already recorded keep their
+  `by: TITLE_JOB`.
+- **Remove the three stale durables** the 0.6 pods created on
+  `INTEGRATION_EVT` — 0.7 never binds them again, and nothing deletes them:
+  `nats consumer rm INTEGRATION_EVT threads-title-job-rejected`,
+  `… threads-title-job-failed`, `… threads-title-job-cancelled`.
+- **`THREADS_TITLE_RUNNER_TYPE`** is no longer read: drop it from the
+  deployment's values (a leftover is ignored).
+- The bus permissions that let Threads publish on
+  `integration.cmd.jobs.job.{create,finish,fail,cancel}.*` and consume
+  `integration.evt.jobs.job.*` can be withdrawn.
+- **No rollback to 0.6** once `migrate` has run: a 0.6 pod reads
+  `threads.title_job` with every thread.
 
 ## Deploy: 0.4 → 0.5
 

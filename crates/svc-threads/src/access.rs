@@ -9,9 +9,8 @@
 //!   out of it or deactivated are refused everything. Super-user status gives
 //!   nothing; past admission, a thread is seen by its members only, and one the
 //!   caller is not a member of is reported as not found.
-//! - The runner surface (a thread's context, an artifact upload, the title
-//!   operations) admits a service account holding `threads:runner`, for any
-//!   thread.
+//! - The runner surface (a thread's context, an artifact upload) admits a
+//!   service account holding `threads:runner`, for any thread.
 
 use service_engine::gate::{Gate, Reason};
 
@@ -39,9 +38,7 @@ pub fn human_surface(principal: &ThreadsPrincipal) -> Gate {
     }
 }
 
-/// Whether the caller may use the runner operations at all. Whether a title
-/// operation names the thread's active title Job is the title Job's own
-/// decision, on top of this one.
+/// Whether the caller may use the runner operations.
 pub fn runner_surface(principal: &ThreadsPrincipal) -> Gate {
     if principal.service_account().is_some() && principal.holds_scope(scopes::RUNNER) {
         Gate::allowed()

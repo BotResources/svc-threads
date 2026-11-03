@@ -1,6 +1,6 @@
 [package]
 name = "svc-threads"
-version = "0.6.0"
+version = "0.7.0"
 description = "Threads — the shared conversation store: threads, members, messages in the br-llm-messages model, artifacts and read marks, served live to their members (fatty manner on br-service-engine)"
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +21,6 @@ br-core-auth.workspace = true
 br-core-directory.workspace = true
 br-core-integration.workspace = true
 chrono.workspace = true
-contract-jobs.workspace = true
 contract-threads.workspace = true
 futures-util.workspace = true
 serde.workspace = true
@@ -42,9 +41,6 @@ br-core-scope.workspace = true
 br-scope-declaration-contract.workspace = true
 br-util-nats-fabric.workspace = true
 conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-directory", tag = "conformance-directory/v0.1.0", version = "0.1.0" }
-contract-jobs = { git = "https://github.com/BotResources/svc-jobs", package = "contract-jobs", tag = "contract-jobs/v0.5.1", version = "0.5.1", features = [
-    "integration",
-] }
 contract-threads-v0-4 = { git = "https://github.com/BotResources/svc-threads", package = "contract-threads", tag = "contract-threads/v0.4.0", version = "0.4.0" }
 dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }

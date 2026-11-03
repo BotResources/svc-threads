@@ -17,9 +17,9 @@ use futures_util::future::BoxFuture;
 use service_engine::pipeline::{Ops, Reaction};
 use uuid::Uuid;
 
+use super::ThreadCause;
 use super::state::{Thread, ThreadState};
-use super::transitions::{self, Applied, DeletionReason, ParentLookup, TitleSource};
-use super::{ThreadCause, title_job};
+use super::transitions::{self, Applied, DeletionReason, ParentLookup};
 use crate::command::{Call, Inbound, Refusal, answer_thread};
 use crate::directory;
 use crate::facts::{self, FactMeta, FactNoun};
@@ -192,20 +192,13 @@ pub fn remove_resource_ids<'r>(
     })
 }
 
-/// A title set by command while the title Job runs wins: the Job is cancelled
-/// at Jobs in the same transaction.
 pub fn set_title<'r>(
     cx: &'r mut Reaction<'r>,
     Inbound(command): Inbound<SetTitle>,
 ) -> BoxFuture<'r, Result<(), Fault>> {
     Box::pin(async move {
         on_thread!(cx, command, |thread, call| {
-            let verdict = thread.set_title(&command.title, TitleSource::Command, &call.meta)?;
-            if verdict == Ok(Applied::Changed)
-                && let Some(job) = title_job::cancel_active(&mut thread, call.meta.occurred_at)
-            {
-                title_job::publish_cancel(cx, job)?;
-            }
+            let verdict = thread.set_title(&command.title, &call.meta)?;
             Ok((verdict, ThreadCause::TitleChanged, Vec::new()))
         })
     })
@@ -264,21 +257,17 @@ pub fn delete<'r>(
     })
 }
 
-/// Deletes a loaded and locked thread with everything it holds: its running
-/// title Job is cancelled at Jobs, its artifacts deleted through their store
-/// (their bytes released), the streams of its streaming messages sealed, its
-/// `Deleted` fact recorded, its members entry
+/// Deletes a loaded and locked thread with everything it holds: its artifacts
+/// deleted through their store (their bytes released), the streams of its
+/// streaming messages sealed, its `Deleted` fact recorded, its members entry
 /// retracted (the offer's dirty key, staged by the delete), its rows deleted.
 /// Its members' windows over it are repopulated.
 pub async fn delete_thread(
     ops: &mut Ops<'_>,
-    mut thread: ThreadState,
+    thread: ThreadState,
     reason: DeletionReason,
     meta: &FactMeta,
 ) -> Result<(), Fault> {
-    if let Some(job) = title_job::cancel_active(&mut thread, meta.occurred_at) {
-        title_job::publish_cancel(ops, job)?;
-    }
     artifact::delete_all_of_thread(ops, thread.id).await?;
     closing::seal_streams_of_thread(ops, thread.id).await?;
     let deleted = thread.deleted_fact(reason, meta)?;

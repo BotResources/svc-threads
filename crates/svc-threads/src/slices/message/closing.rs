@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use contract_threads::MessageStatus;
 use contract_threads::llm::{AgentId, Author, TurnId};
 use service_engine::error::{AccumulatorError, EngineError};
 use service_engine::pipeline::Ops;
@@ -20,8 +19,7 @@ use crate::facts::FactMeta;
 use crate::fault::{Fault, corrupt};
 use crate::slices::artifact::lifecycle;
 use crate::slices::artifact::state::ArtifactState;
-use crate::slices::thread::state::{Thread, ThreadState, UnknownStoredValue};
-use crate::slices::thread::{ThreadCause, title_job};
+use crate::slices::thread::state::UnknownStoredValue;
 
 pub fn turn_of(message: &MessageState) -> Result<(TurnId, AgentId, Author), EngineError> {
     match &message.author {
@@ -136,7 +134,6 @@ pub async fn legacy_refusal(
 pub async fn store_closed(
     ops: &mut Ops<'_>,
     mut message: MessageState,
-    thread: &mut ThreadState,
     sealed: &TurnDraft,
     closing: &Closing,
     mut artifacts: Vec<ArtifactState>,
@@ -182,12 +179,6 @@ pub async fn store_closed(
     ops.save(&message).await?;
     lifecycle::attach(ops, artifacts, message.id, meta).await?;
     watch::end(ops, message.id).await?;
-    if message.status == MessageStatus::Completed
-        && title_job::trigger(ops, thread, meta.occurred_at, meta.acting_user_id).await?
-    {
-        ops.save(&*thread).await?;
-        ops.impact_caused::<Thread, _>(&thread.id, ThreadCause::MessageStored)?;
-    }
     ops.impact_caused::<Message, _>(
         &message.id,
         message_cause(MessageCause::Closed, message.thread_id),

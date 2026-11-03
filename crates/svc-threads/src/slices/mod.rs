@@ -24,7 +24,7 @@ service_engine::compose_service! {
     slice thread ["thread"] { query = thread::graphql::ThreadQuery, mutation = thread::graphql::ThreadMutation, subscription = thread::graphql::ThreadSubscription }
     slice message ["message"] { query = message::graphql::MessageQuery, subscription = message::graphql::MessageSubscription }
     slice artifact ["artifact"] { query = artifact::graphql::ArtifactQuery, mutation = artifact::graphql::ArtifactMutation, subscription = async_graphql::EmptySubscription }
-    slice runner ["runner"] { query = runner::graphql::RunnerQuery, mutation = runner::graphql::RunnerMutation, subscription = async_graphql::EmptySubscription }
+    slice runner ["runner"] { query = runner::graphql::RunnerQuery, subscription = async_graphql::EmptySubscription }
 }
 
 #[cfg(test)]
@@ -54,8 +54,6 @@ mod tests {
             "threadsContext(",
             "threadsSetReadMark(",
             "threadsRequestArtifactUpload(",
-            "threadsSetTitle(",
-            "threadsFailTitleJob(",
             "threadsThreadsDeltas(",
             "threadsThreadDeltas(",
         ] {
@@ -64,14 +62,10 @@ mod tests {
     }
 
     #[test]
-    fn the_title_job_roots_are_the_ones_the_contract_names() {
+    fn the_title_job_roots_are_gone() {
         let sdl = sdl();
-        for root in [
-            contract_threads::title_job::CONTEXT_ROOT,
-            contract_threads::title_job::TITLE_ROOT,
-            contract_threads::title_job::FAILURE_ROOT,
-        ] {
-            assert!(sdl.contains(&format!("{root}(")), "{root} is not a root");
+        for root in ["threadsSetTitle(", "threadsFailTitleJob("] {
+            assert!(!sdl.contains(root), "{root} is still a root:\n{sdl}");
         }
     }
 

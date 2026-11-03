@@ -14,13 +14,11 @@
 //! "Says the owner left the roster": the specification names no field, so the
 //! scenario asserts that the Deleted fact of a departure and the Deleted fact
 //! of a command deletion differ once their thread ids are blanked out — the
-//! cause is told apart, whatever its field is called. T1's running title Job
-//! is cancelled with it (specification, § Title Job: deleting a thread cancels
-//! it).
+//! cause is told apart, whatever its field is called.
 //!
-//! Channels: Identity's roster (4, consumed); the members entries (4); Jobs'
-//! commands (4); the answers (4); the threads and messages as members read
-//! them (2); A's live list (3); the artifact's read access; the fact log.
+//! Channels: Identity's roster (4, consumed); the members entries (4); the
+//! answers (4); the threads and messages as members read them (2); A's live
+//! list (3); the artifact's read access; the fact log.
 
 mod common;
 
@@ -41,8 +39,8 @@ use serde_json::{Value, json};
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     // Given O owning T1 (with A), member of ownerless T2 and of T3 owned by P.
-    // T1 holds O's message, an attached artifact and A's read mark, and its
-    // title Job runs. A follows their list.
+    // T1 holds O's message, an attached artifact and A's read mark. A follows
+    // their list.
     let ctx = TestContext::setup().await;
     let (o, a, p) = (
         ctx.enrol("olga").await,
@@ -53,12 +51,6 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     let t2 = create_thread(&ctx, None, &[&o, &a]).await;
     let t3 = create_thread(&ctx, Some(&p), &[&o]).await;
     let o_on_t1 = say(&ctx, t1, None, &o, "my thread").await;
-    let t1_job = ctx
-        .jobs
-        .await_create(t1, "T1's title Job")
-        .await
-        .payload
-        .job_id;
     let runner = ctx.service_account(true);
     let file = File::csv("owner\nO\n");
     let x = upload(&ctx, &runner.passport, t1, &file).await;
@@ -136,8 +128,6 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
         || async { fetch(&x_url).await.0 != 200 },
     )
     .await;
-    // And T1's running title Job is cancelled.
-    ctx.jobs.await_one_cancel(t1_job, "T1's deletion").await;
     // And (3) A's list is told once that T1 left it.
     a_list
         .until("T1 leaves A's list", |delta| removes(delta, t1))

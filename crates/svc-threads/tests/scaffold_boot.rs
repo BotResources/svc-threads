@@ -50,8 +50,6 @@ async fn the_schema_subcommand_prints_every_root_of_the_surface() {
         "threadsContext(",
         "threadsSetReadMark(",
         "threadsRequestArtifactUpload(",
-        "threadsSetTitle(",
-        "threadsFailTitleJob(",
         "threadsThreadsDeltas(",
         "threadsThreadDeltas(",
     ] {

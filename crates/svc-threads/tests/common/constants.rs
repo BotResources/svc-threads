@@ -33,11 +33,10 @@ pub const ENV_S3_REGION: &str = "S3_REGION";
 
 // ── Threads' own configuration (proposed by the oracle) ────────────────────
 //
-// The specification fixes three values the suite cannot wait out or must name:
-// a writer silent for 10 minutes has its message failed, a PENDING artifact is
-// removed after the upload window, and the title Job runs on "the title runner
-// type". The 0.1.0 scaffold hard-codes the first two (`STREAM_IDLE_WINDOW`,
-// `UPLOAD_WINDOW`) and names no runner type, so the oracle proposes these three
+// The specification fixes two values the suite cannot wait out: a writer
+// silent for 10 minutes has its message failed, and a PENDING artifact is
+// removed after the upload window. The 0.1.0 scaffold hard-coded both
+// (`STREAM_IDLE_WINDOW`, `UPLOAD_WINDOW`), so the oracle proposes these two
 // keys, read at `serve`, defaulting to the specified values. Real
 // configuration, like `ENGINE_BEAT_MS` — never a test seam.
 
@@ -47,8 +46,6 @@ pub const ENV_STREAM_IDLE_MS: &str = "THREADS_STREAM_IDLE_MS";
 /// Milliseconds a `PENDING` artifact waits for its message before it is
 /// removed.
 pub const ENV_UPLOAD_WINDOW_MS: &str = "THREADS_UPLOAD_WINDOW_MS";
-/// The runner type of the title Job.
-pub const ENV_TITLE_RUNNER_TYPE: &str = "THREADS_TITLE_RUNNER_TYPE";
 
 pub const MIGRATE_ARG: &str = "migrate";
 pub const SERVE_ARG: &str = "serve";
@@ -77,15 +74,10 @@ pub const TITLE_TOO_LONG: &str = "TITLE_TOO_LONG";
 /// Not named by the registry (it describes the refusal): the scaffold's, to
 /// ratify.
 pub const RUNNER_SCOPE_REQUIRED: &str = "RUNNER_SCOPE_REQUIRED";
-/// Not named by the functional specification ("accepted only for that
-/// thread's active title Job"): the draft registry tests' (T12), to ratify.
-pub const JOB_NOT_ACTIVE: &str = "JOB_NOT_ACTIVE";
 /// Named by the registry: an agent context named by an agent id that is not a
 /// UUIDv7.
 pub const AI_PERSPECTIVE_INVALID: &str = "AI_PERSPECTIVE_INVALID";
 
-/// The title runner type this suite configures ([`ENV_TITLE_RUNNER_TYPE`]).
-pub const TITLE_RUNNER_TYPE: &str = "thread-title-e2e";
 /// The stream window a scenario that waits it out configures
 /// ([`ENV_STREAM_IDLE_MS`]); every other scenario runs on the service's own
 /// default, the specified 10 minutes.
@@ -132,13 +124,6 @@ pub const M_REQUEST_UPLOAD: &str = "mutation($thread: UUID!, $artifact: UUID!, $
     $mediaType: String!, $size: Int!, $sha256: String!) { \
     threadsRequestArtifactUpload(threadId: $thread, artifactId: $artifact, name: $name, \
     mediaType: $mediaType, size: $size, sha256: $sha256) { url fields } }";
-
-pub const M_SET_TITLE: &str = "mutation($thread: UUID!, $job: UUID!, $title: String!) { \
-    threadsSetTitle(threadId: $thread, jobId: $job, title: $title) { success } }";
-
-pub const M_FAIL_TITLE_JOB: &str = "mutation($thread: UUID!, $job: UUID!, $reason: String!, \
-    $message: String) { threadsFailTitleJob(threadId: $thread, jobId: $job, \
-    reasonCode: $reason, message: $message) { success } }";
 
 pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(size: $size) { \
     __typename \

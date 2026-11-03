@@ -1,11 +1,10 @@
 //! A thread's canonical state, as its store reads it back: the thread row, its
-//! members (with the name the roster copy holds for each), its resources, its
-//! read marks and its title Job — plus the changes a transition made to it and
-//! not yet saved ([`ThreadChange`]), which its store writes and appends to the
-//! fact log in the transaction of the change.
+//! members (with the name the roster copy holds for each), its resources and
+//! its read marks — plus the changes a transition made to it and not yet saved
+//! ([`ThreadChange`]), which its store writes and appends to the fact log in the
+//! transaction of the change.
 //!
-//! The guarded transitions live in [`super::transitions`] and
-//! [`super::title_job`].
+//! The guarded transitions live in [`super::transitions`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,47 +83,6 @@ pub struct Member {
     pub in_roster: bool,
 }
 
-/// The lifecycle of a thread's one title Job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TitleJobState {
-    /// The thread's active title Job: its runner's operations are accepted.
-    Running,
-    /// The runner set the title.
-    Done,
-    /// The runner declared the Job failed, or Jobs did.
-    Failed,
-    /// Jobs refused to create it.
-    Rejected,
-    /// Cancelled: a title set by command, or the thread deleted.
-    Cancelled,
-}
-
-impl TitleJobState {
-    pub fn as_db(self) -> &'static str {
-        match self {
-            Self::Running => "RUNNING",
-            Self::Done => "DONE",
-            Self::Failed => "FAILED",
-            Self::Rejected => "REJECTED",
-            Self::Cancelled => "CANCELLED",
-        }
-    }
-
-    pub fn from_db(stored: &str) -> Result<Self, UnknownStoredValue> {
-        match stored {
-            "RUNNING" => Ok(Self::Running),
-            "DONE" => Ok(Self::Done),
-            "FAILED" => Ok(Self::Failed),
-            "REJECTED" => Ok(Self::Rejected),
-            "CANCELLED" => Ok(Self::Cancelled),
-            other => Err(UnknownStoredValue {
-                column: "title_job.state",
-                value: other.to_owned(),
-            }),
-        }
-    }
-}
-
 /// A stored value outside the domain of its column.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("`{value}` is not a value of {column}")]
@@ -133,24 +91,9 @@ pub struct UnknownStoredValue {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TitleJob {
-    pub job_id: Uuid,
-    pub state: TitleJobState,
-    pub created_at: DateTime<Utc>,
-    /// Set once the Job is no longer the thread's active title Job.
-    pub ended_at: Option<DateTime<Utc>>,
-}
-
-impl TitleJob {
-    pub fn is_active(&self) -> bool {
-        self.state == TitleJobState::Running
-    }
-}
-
 /// What a transition changed and the store has yet to write: the rows beside
 /// the thread row (members, resources, read marks), and the facts the change
-/// records. The thread row and its title Job are written whole at every save.
+/// records. The thread row is written whole at every save.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThreadChange {
     MembersAdded(Vec<Uuid>),
@@ -188,7 +131,6 @@ pub struct ThreadState {
     pub resources: BTreeMap<String, Vec<String>>,
     /// Each member's last read message.
     pub read_marks: BTreeMap<Uuid, Uuid>,
-    pub title_job: Option<TitleJob>,
     /// Unsaved changes, in order.
     pub pending: Vec<ThreadChange>,
 }
@@ -208,10 +150,6 @@ impl ThreadState {
     /// Whether `user` is the thread's owner.
     pub fn is_owner(&self, user: Uuid) -> bool {
         self.owner_id == Some(user)
-    }
-
-    pub fn active_title_job(&self) -> Option<&TitleJob> {
-        self.title_job.as_ref().filter(|job| job.is_active())
     }
 
     pub fn is_member(&self, user: Uuid) -> bool {
@@ -257,7 +195,6 @@ pub(crate) mod tests {
                 .collect(),
             resources: BTreeMap::new(),
             read_marks: BTreeMap::new(),
-            title_job: None,
             pending: Vec::new(),
         }
     }
@@ -285,19 +222,5 @@ pub(crate) mod tests {
         let member = person(false, RosterStanding::Deactivated);
         let thread = thread_with(&[member.user().unwrap()]);
         assert!(!<Thread as Visibility>::visible(&thread, &member));
-    }
-
-    #[test]
-    fn a_title_job_state_maps_to_and_from_its_column() {
-        for state in [
-            TitleJobState::Running,
-            TitleJobState::Done,
-            TitleJobState::Failed,
-            TitleJobState::Rejected,
-            TitleJobState::Cancelled,
-        ] {
-            assert_eq!(TitleJobState::from_db(state.as_db()), Ok(state));
-        }
-        assert!(TitleJobState::from_db("running").is_err());
     }
 }

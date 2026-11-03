@@ -285,30 +285,20 @@ fn resource_ids_are_a_set_per_key_and_an_emptied_key_disappears() {
 fn a_title_is_1_to_200_characters_and_the_same_title_changes_nothing() {
     let mut thread = thread_with(&[Uuid::now_v7()]);
     assert_eq!(
-        refused(
-            thread
-                .set_title(&"x".repeat(201), TitleSource::Command, &meta())
-                .unwrap()
-        ),
+        refused(thread.set_title(&"x".repeat(201), &meta()).unwrap()),
         ReasonCode::TitleTooLong
     );
-    for source in [TitleSource::Command, TitleSource::TitleJob] {
-        assert_eq!(
-            refused(thread.set_title("", source, &meta()).unwrap()),
-            ReasonCode::TitleEmpty
-        );
-    }
+    assert_eq!(
+        refused(thread.set_title("", &meta()).unwrap()),
+        ReasonCode::TitleEmpty
+    );
     assert!(thread.pending.is_empty(), "a refused title records nothing");
     assert_eq!(
-        thread
-            .set_title("Q3 review", TitleSource::Command, &meta())
-            .unwrap(),
+        thread.set_title("Q3 review", &meta()).unwrap(),
         Ok(Applied::Changed)
     );
     assert_eq!(
-        thread
-            .set_title("Q3 review", TitleSource::TitleJob, &meta())
-            .unwrap(),
+        thread.set_title("Q3 review", &meta()).unwrap(),
         Ok(Applied::Unchanged)
     );
     assert_eq!(fact_types(&thread), [TITLE_CHANGED]);

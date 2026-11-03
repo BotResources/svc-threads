@@ -20,8 +20,9 @@
 //!    their one answer each ([`commands`]), the message stream a writer pushes
 //!    ([`stream`]), Identity's roster and scope handshake ([`identity`]), the
 //!    `threads.members.{thread_id}` entries Threads publishes
-//!    ([`TestContext::published_members`]), Jobs' side of the title Job
-//!    ([`jobs`]), the object store ([`artifacts`]) and the fact log
+//!    ([`TestContext::published_members`]), the commands Threads itself puts
+//!    on the bus ([`TestContext::commands_not_sent_by_the_scenario`]), the
+//!    object store ([`artifacts`]) and the fact log
 //!    `threads.fact` ([`facts`], read with `SELECT` on the app role).
 //!
 //! [`content`] builds the conversation a scenario stores, through the
@@ -58,7 +59,6 @@ pub mod flows;
 pub mod gql;
 pub mod identity;
 pub mod infra;
-pub mod jobs;
 pub mod port;
 pub mod previous;
 pub mod store;
@@ -144,9 +144,6 @@ pub struct TestContext {
     pub scopes: identity::ScopeHandshake,
     /// Every answer Threads publishes, captured from before the first command.
     pub answers: commands::Answers,
-    /// Jobs' side of the title Job: every command Threads sends Jobs, captured
-    /// from before the boot, and the facts the scenario answers with.
-    pub jobs: jobs::Jobs,
     /// The app role's pool: `SELECT`, and the engine's claim sweep
     /// ([`TestContext::expire_answers`]).
     pub pool: PgPool,
@@ -235,7 +232,6 @@ impl TestContext {
         // start, so nothing the boot publishes escapes them.
         let scopes = identity::ScopeHandshake::bind(&nats).await;
         let answers = commands::Answers::bind(&nats).await;
-        let jobs = jobs::Jobs::bind(&nats).await;
 
         let minio = infra::Minio::start().await;
 
@@ -268,7 +264,6 @@ impl TestContext {
             nats,
             scopes,
             answers,
-            jobs,
             pool,
             minio,
             db,
@@ -301,7 +296,6 @@ impl TestContext {
             (ENV_S3_ACCESS_KEY, self.minio.access_key().to_string()),
             (ENV_S3_SECRET_KEY, self.minio.secret_key().to_string()),
             (ENV_S3_REGION, infra::S3_REGION.to_string()),
-            (ENV_TITLE_RUNNER_TYPE, TITLE_RUNNER_TYPE.to_string()),
         ];
         if let Some(idle) = self.windows.stream_idle {
             env.push((ENV_STREAM_IDLE_MS, idle.as_millis().to_string()));
@@ -507,7 +501,6 @@ impl TestContext {
         self.pool.close().await;
         self.scopes.stop().await;
         self.answers.stop().await;
-        self.jobs.stop().await;
         self.minio.shutdown().await;
         self.nats.shutdown().await;
         catalog::serialized(self.db.cleanup()).await;
@@ -528,6 +521,15 @@ impl TestContext {
             ));
         }
         logs
+    }
+
+    /// How many integration commands are on the bus that the scenario did not
+    /// send through [`flows::command`]: those Threads published. Read before
+    /// and after a gesture that sends no command again, the difference is what
+    /// Threads commanded meanwhile.
+    pub async fn commands_not_sent_by_the_scenario(&self) -> u64 {
+        let sent = self.sent.lock().expect("the ledger").len() as u64;
+        self.nats.command_stream_len().await.saturating_sub(sent)
     }
 
     /// Every command sent through [`flows::command`] was answered exactly

@@ -8,8 +8,8 @@
 use service_engine::ScopeDef;
 
 /// The machine scope of the runners' service accounts: reading a thread's
-/// context, requesting an artifact upload, and the title operations of the
-/// active title Job. It grants nothing on the human surface.
+/// context and requesting an artifact upload. It grants nothing on the human
+/// surface.
 pub const RUNNER: &str = "threads:runner";
 
 /// The i18n keys of the service, as Identity's scope screens show it.

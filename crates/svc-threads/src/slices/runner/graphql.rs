@@ -6,13 +6,12 @@ use async_graphql::{Context, Object, Result};
 use contract_threads::llm::AgentId;
 use service_engine::gate::Reason;
 use service_engine::session::WindowParams;
-use service_engine::{MutationAck, OrInternal, Query};
+use service_engine::{OrInternal, Query};
 use uuid::Uuid;
 
 use super::context::{ContextView, ContextWindow, ThreadContext};
 use crate::access;
 use crate::principal::ThreadsPrincipal;
-use crate::slices::thread::title_job::{RunnerFailTitleJob, RunnerSetTitle};
 
 /// An agent id that is not a UUIDv7: the library's agent id is one.
 pub const AI_PERSPECTIVE_INVALID: Reason = Reason::new("AI_PERSPECTIVE_INVALID");
@@ -53,60 +52,5 @@ impl RunnerQuery {
             )
             .await?;
         Ok(contexts.pop())
-    }
-}
-
-#[derive(Default)]
-pub struct RunnerMutation;
-
-#[Object]
-impl RunnerMutation {
-    /// Sets the title of a thread for its active title Job (1 to 200
-    /// characters, `TITLE_EMPTY`, `TITLE_TOO_LONG`); Threads then declares the
-    /// Job finished.
-    /// A Job that is not the thread's active title Job is refused
-    /// `JOB_NOT_ACTIVE`.
-    async fn threads_set_title(
-        &self,
-        ctx: &Context<'_>,
-        thread_id: Uuid,
-        job_id: Uuid,
-        title: String,
-    ) -> Result<MutationAck> {
-        access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        service_engine::ack::<ThreadsPrincipal, RunnerSetTitle>(
-            ctx,
-            RunnerSetTitle {
-                thread_id,
-                job_id,
-                title,
-            },
-        )
-        .await
-    }
-
-    /// Declares the thread's active title Job failed, with a reason code
-    /// (`[a-z][a-z0-9_]*`) and an optional message; the thread stays untitled
-    /// for good and Threads declares the Job failed. A Job that is not the
-    /// thread's active title Job is refused `JOB_NOT_ACTIVE`.
-    async fn threads_fail_title_job(
-        &self,
-        ctx: &Context<'_>,
-        thread_id: Uuid,
-        job_id: Uuid,
-        reason_code: String,
-        message: Option<String>,
-    ) -> Result<MutationAck> {
-        access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
-        service_engine::ack::<ThreadsPrincipal, RunnerFailTitleJob>(
-            ctx,
-            RunnerFailTitleJob {
-                thread_id,
-                job_id,
-                reason_code,
-                message,
-            },
-        )
-        .await
     }
 }
