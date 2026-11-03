@@ -176,3 +176,23 @@ in that output.
   `TitleChanged` fact's payload is `{ title, by: "RUNNER" }`, its actor the
   runner's service account (`actor_kind` `service`), no acting user; a command's
   says `by: "COMMAND"` (T32, proposed by the oracle).
+
+## 0.7.0 removals
+
+- `contract-threads` 0.7.0 removes the `title_job` module: `TitleJobConfig`
+  (and its re-export at the crate root) and the root-name constants
+  `CONTEXT_ROOT`, `TITLE_ROOT` and `FAILURE_ROOT`. The suite names roots in
+  `common::constants` only.
+- The title roots of the title-Job era: `threadsFailTitleJob(threadId, jobId,
+  reasonCode, message)` is gone, with `JOB_NOT_ACTIVE` and
+  `FAILURE_REASON_INVALID`; `threadsSetTitle(threadId, jobId, title)` is gone
+  in that form and returns as a generic runner operation without `jobId`
+  (above, *0.7.0 changes*; T32).
+- The harness's Jobs stand-in (`common::jobs`: the capture of the `job.*`
+  commands Threads sent and the `job.*` events the scenarios answered with),
+  `THREADS_TITLE_RUNNER_TYPE` and `TITLE_RUNNER_TYPE`. In their place,
+  `TestContext::commands_not_sent_by_the_scenario()` counts the integration
+  commands on the bus that the scenario did not send through
+  `flows::command`: read before and after a gesture, the difference is what
+  Threads commanded meanwhile (T27 proves it nothing, from before an untitled
+  thread's first message).

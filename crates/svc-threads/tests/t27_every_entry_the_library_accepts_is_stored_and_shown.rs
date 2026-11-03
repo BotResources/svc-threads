@@ -25,10 +25,13 @@
 //! accepts since 2.1), then the results — a fifth message is an input turn
 //! holding a runtime notice, and A's opening question is the human message.
 //!
-//! T is created with a title. Threads commands nobody since 0.7: any
-//! integration command on the bus that the scenario did not send would come of
-//! these messages. It creates no thread but on a command; the threads it holds
-//! are read through the members' lists and the members entries it publishes.
+//! T is created without a title, and the commands on the bus are counted
+//! before its first message: up to 0.6, an untitled thread's first `COMPLETED`
+//! message started its title Job (`job.create`). Threads commands nobody since
+//! 0.7: any integration command on the bus that the scenario did not send
+//! would come of these messages. It creates no thread but on a command; the
+//! threads it holds are read through the members' lists and the members
+//! entries it publishes.
 //!
 //! Channels: the answers (4), the messages as a member reads them (2), A's live
 //! feed of T — each stored message pushed, nothing for a refused one (3) — a
@@ -71,17 +74,16 @@ async fn pushed_all(feed: &mut Live, messages: &[Uuid], what: &str) {
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behaviour_of_its_own() {
-    // Given T, titled, with member A, following it; agents a1, a2, a3; a
-    // runner.
+    // Given T, untitled, with member A, following it; agents a1, a2, a3; a
+    // runner. The commands Threads put on the bus are counted before T's first
+    // message, the one that started a title Job up to 0.6.
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
-    let mut born = creation(Some(a.id), &[]);
-    born.title = Some("agents at work".to_string());
-    let t = create(&ctx, born).await;
+    let t = create(&ctx, creation(Some(a.id), &[])).await;
     let (analyst, critic, scout) = (ai("a1", "Analyst"), ai("a2", "Critic"), ai("a3", "Scout"));
     let runner = ctx.service_account(true);
-    let m0 = say(&ctx, t, None, &a, "Over to the agents").await;
     let threads_commands_before = ctx.commands_not_sent_by_the_scenario().await;
+    let m0 = say(&ctx, t, None, &a, "Over to the agents").await;
     let listed_before = listed(&ctx, &a.passport).await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 

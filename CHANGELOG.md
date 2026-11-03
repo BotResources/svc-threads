@@ -69,7 +69,9 @@ changelog).
 - T12 (the title Job) is deleted with the harness's Jobs stand-in. T14 and T17
   lose their title-Job clauses: neither expects a `job.cancel`, and T17 no
   longer publishes Jobs' `job.cancelled`. T27 proves that Threads commands
-  nobody on the whole command stream instead of on Jobs' subjects.
+  nobody on the whole command stream instead of on Jobs' subjects, on an
+  untitled thread and counting from before its first message — the gesture
+  that started a title Job up to 0.6.
 - T32 (proposed, not yet in the registry): a runner sets a thread's title —
   acknowledged, read by the members, live on a member's thread feed and on the
   owner's list, recorded `by: RUNNER` with the runner as actor; the same title
