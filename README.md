@@ -79,7 +79,9 @@ Before the rollout:
   them at Jobs. The `TitleChanged` facts already recorded keep their
   `by: TITLE_JOB`.
 - **Take a database backup** right before `migrate`: it is the only way back
-  (below).
+  (below). Migration `9800000007` also builds the index of the child-thread
+  list (`thread_child_idx`, partial on `parent_thread_id`) in `migrate`'s
+  transaction, while no pod serves.
 
 The rollout:
 

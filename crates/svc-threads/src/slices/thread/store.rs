@@ -292,6 +292,41 @@ pub async fn page_of_member(
     .await?)
 }
 
+/// One page of the children of `parent` that `member` is a member of, the
+/// oldest first (creation, then id): those after `cursor` when one is given.
+/// One statement, on `thread_child_idx`.
+///
+/// The cursor positions the page only when it names one of these children —
+/// a child of `parent` that `member` is a member of. Any other id (a child
+/// they are not a member of, another thread, an id nobody created) resolves to
+/// no row, the comparison to `NULL`, and the page is empty: a cursor never
+/// tells where a thread the caller does not see stands.
+pub async fn children_page_of_member(
+    pg: &PgPool,
+    member: Uuid,
+    parent: Uuid,
+    cursor: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<Uuid>, EngineError> {
+    Ok(sqlx::query_scalar(
+        "SELECT t.id FROM threads.thread t \
+         JOIN threads.thread_member m ON m.thread_id = t.id AND m.user_id = $1 \
+         WHERE t.parent_thread_id = $2 \
+           AND ($3::uuid IS NULL \
+            OR (t.created_at, t.id) > \
+               (SELECT c.created_at, c.id FROM threads.thread c \
+                JOIN threads.thread_member cm ON cm.thread_id = c.id AND cm.user_id = $1 \
+                WHERE c.id = $3 AND c.parent_thread_id = $2)) \
+         ORDER BY t.created_at ASC, t.id ASC LIMIT $4",
+    )
+    .bind(member)
+    .bind(parent)
+    .bind(cursor)
+    .bind(limit)
+    .fetch_all(pg)
+    .await?)
+}
+
 /// Every thread: the members offer's reconcile. Five statements.
 pub async fn all_threads(conn: &mut PgConnection) -> Result<Vec<ThreadState>, EngineError> {
     let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM threads.thread ORDER BY id")

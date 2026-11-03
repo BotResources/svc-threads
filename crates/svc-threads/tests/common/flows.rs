@@ -21,8 +21,8 @@ use uuid::Uuid;
 use super::commands::{Answer, commanding_service, send, send_as};
 use super::content::{self, Agent};
 use super::{
-    PUSH_TIMEOUT, Person, Q_CONTEXT_FOR, Q_MESSAGES, Q_THREAD, Q_THREADS, QUIET_WINDOW,
-    TestContext, eventually, gql,
+    PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_MESSAGES, Q_THREAD, Q_THREADS,
+    QUIET_WINDOW, TestContext, eventually, gql,
 };
 
 // ── commands and their one answer ───────────────────────────────────────────
@@ -559,6 +559,39 @@ pub async fn thread_list(ctx: &TestContext, passport: &Passport) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// One page of the children of `thread` as `passport` sees them: the raw
+/// answer.
+pub async fn child_threads_answer(
+    ctx: &TestContext,
+    passport: &Passport,
+    thread: Uuid,
+    size: i64,
+    after: Option<Uuid>,
+) -> Value {
+    ctx.run(
+        passport,
+        Q_CHILD_THREADS,
+        json!({ "thread": thread, "size": size, "after": after }),
+    )
+    .await
+}
+
+/// One page of the children of `thread` as `passport` sees them, in order,
+/// asserting the answer carries no error.
+pub async fn child_threads(
+    ctx: &TestContext,
+    passport: &Passport,
+    thread: Uuid,
+    size: i64,
+    after: Option<Uuid>,
+) -> Vec<Value> {
+    let answer = child_threads_answer(ctx, passport, thread, size, after).await;
+    gql::data(&answer, "threadsChildThreads")
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("threadsChildThreads answers a list: {answer}"))
 }
 
 /// The ids of `passport`'s list, in order.

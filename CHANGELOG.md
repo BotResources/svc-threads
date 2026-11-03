@@ -17,9 +17,32 @@ Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A
 title is set by command (`thread.set_title`, unchanged) or by a runner,
 directly (`threadsSetTitle(threadId, title)`, without any Job); naming a thread
 is the commanding services' and the runners' concern (the agents service names
-a thread after its first message). Threads no longer talks to Jobs.
-`contract-threads` 0.7.0 removes the title Job's published language (see its
-changelog).
+a thread after its first message). Threads no longer talks to Jobs. A member
+lists the child threads of a thread. `contract-threads` 0.7.0 removes the title
+Job's published language (see its changelog).
+
+### Added
+
+- **`threadsChildThreads(threadId: UUID!, size: Int!, after: UUID):
+  [ThreadView!]!`**: one page of the child threads of a thread that the caller
+  is a member of, the oldest first (creation, then id), with the view of the
+  thread list (`threadsThreads`) — `parentThreadId` and `originBlockId`
+  included — and the same admission (an active user of the roster,
+  `ACTIVE_USER_REQUIRED` otherwise). A child the caller is not a member of is
+  left out without error. The list still works once the parent is deleted; it
+  is empty for a thread that does not exist or has no child the caller sees.
+  `after` names the last child of the previous page; an `after` that is not a
+  child of that thread the caller is a member of (a child they do not see,
+  another thread, an id nobody created) gives an empty page, as an unknown
+  `before` does on the thread list. `size` is bounded as on the thread list
+  (from 1, `WINDOW_SIZE_INVALID`; a page larger than the engine's window
+  capacity is refused `WINDOW_TOO_LARGE` as there). A query only: no
+  subscription, no command, no fact. One statement selects the page; the
+  children are then read and projected as the thread list's are.
+- **Migration `9800000007`**: the index `thread_child_idx` on
+  `threads.thread (parent_thread_id, created_at, id)`, partial (`WHERE
+  parent_thread_id IS NOT NULL`). A plain `CREATE INDEX` in the migration's
+  transaction, not `CONCURRENTLY`: `migrate` runs while no pod serves.
 
 ### Removed
 
@@ -72,6 +95,14 @@ changelog).
   nobody on the whole command stream instead of on Jobs' subjects, on an
   untitled thread and counting from before its first message — the gesture
   that started a title Job up to 0.6.
+- T33: listing the child threads of a thread — a member lists the children
+  they are a member of, oldest first, each with its origin block and the view
+  of the thread list, by pages after a child; a child they are not a member of
+  is left out; the list survives the parent's deletion; a thread without child
+  and an unknown id give an empty list. A second test pins what the
+  specification leaves open: an `after` that is not a child the caller sees
+  gives an empty page, a size out of bounds is refused `WINDOW_SIZE_INVALID`
+  and a service account `ACTIVE_USER_REQUIRED`.
 - T32 (proposed, not yet in the registry): a runner sets a thread's title —
   acknowledged, read by the members, live on a member's thread feed and on the
   owner's list, recorded `by: RUNNER` with the runner as actor; the same title

@@ -1,8 +1,8 @@
-//! The thread roots of the human surface: the caller's threads, one thread, the
-//! caller's read mark, and the live list. Every root asks the human admission
-//! first, so a caller Threads does not admit is refused with its code before
-//! any read; a thread the caller is not a member of is `null`, exactly as one
-//! that does not exist.
+//! The thread roots of the human surface: the caller's threads, the children of
+//! a thread, one thread, the caller's read mark, and the live list. Every root
+//! asks the human admission first, so a caller Threads does not admit is
+//! refused with its code before any read; a thread the caller is not a member
+//! of is `null`, exactly as one that does not exist.
 
 use async_graphql::{Context, Object, Result, Subscription};
 use futures_util::{Stream, StreamExt};
@@ -42,6 +42,31 @@ impl ThreadQuery {
         // recently active first.
         threads.sort_by_key(|thread| std::cmp::Reverse((thread.last_activity_at, thread.id)));
         Ok(threads)
+    }
+
+    /// One page of the child threads of a thread that the caller is a member
+    /// of, the oldest first (creation, then id); `after` names the last child
+    /// of the previous page. A child the caller is not a member of is left out;
+    /// the list still works once the parent is deleted, and is empty for a
+    /// thread that does not exist or has no child the caller sees. An `after`
+    /// that is not one of these children gives an empty page.
+    async fn threads_child_threads(
+        &self,
+        ctx: &Context<'_>,
+        thread_id: Uuid,
+        size: WindowSize,
+        after: Option<Uuid>,
+    ) -> Result<Vec<ThreadView>> {
+        access::human_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
+        let mut children = Query::<ThreadsPrincipal>::new(ctx)?
+            .fetch_view_window::<ThreadsView>(&ThreadsWindow::children(
+                thread_id,
+                Page::new(after, size),
+            ))
+            .await?;
+        // A children page is a set of keys (see `ThreadsView::populate`).
+        children.sort_by_key(|child| (child.created_at, child.id));
+        Ok(children)
     }
 
     /// One thread, or `null` when the caller is not a member of it — exactly as

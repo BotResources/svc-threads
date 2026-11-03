@@ -48,6 +48,7 @@ mod tests {
         let sdl = sdl();
         for root in [
             "threadsThreads(",
+            "threadsChildThreads(",
             "threadsThread(",
             "threadsMessages(",
             "threadsArtifactDownload(",
@@ -74,6 +75,23 @@ mod tests {
         assert!(
             !sdl.contains("threadsFailTitleJob("),
             "threadsFailTitleJob is still a root:\n{sdl}"
+        );
+    }
+
+    /// The children of a thread are read like the caller's list, the same
+    /// view, by pages after a given child.
+    #[test]
+    fn the_children_of_a_thread_are_a_page_of_thread_views_after_a_child() {
+        let sdl = sdl();
+        assert!(
+            sdl.contains(
+                "threadsChildThreads(threadId: UUID!, size: Int!, after: UUID): [ThreadView!]!"
+            ),
+            "threadsChildThreads takes a thread, a size and an optional child:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("threadsChildThreadsDeltas("),
+            "the children of a thread are a query only:\n{sdl}"
         );
     }
 

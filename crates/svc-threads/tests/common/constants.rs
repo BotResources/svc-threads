@@ -67,6 +67,8 @@ pub const DECLARED_SCOPES: [&str; 1] = [SCOPE_RUNNER];
 /// Named by the registry.
 pub const ACTIVE_USER_REQUIRED: &str = "ACTIVE_USER_REQUIRED";
 pub const THREAD_NOT_FOUND: &str = "THREAD_NOT_FOUND";
+/// A page size out of its bounds (from 1), as the engine refuses it.
+pub const WINDOW_SIZE_INVALID: &str = "WINDOW_SIZE_INVALID";
 pub const MESSAGE_NOT_FOUND: &str = "MESSAGE_NOT_FOUND";
 pub const KEY_REUSED: &str = "KEY_REUSED";
 pub const TITLE_EMPTY: &str = "TITLE_EMPTY";
@@ -94,6 +96,14 @@ pub const Q_THREADS: &str = "query($size: Int!, $before: UUID) { \
         members { userId displayName inRoster } resources { key ids } } }";
 
 pub const Q_THREAD: &str = "query($id: UUID!) { threadsThread(id: $id) { \
+    id ownerId title parentThreadId originBlockId status resolvedBy resolvedAt createdAt \
+    lastActivityAt version readMark affordances members { userId displayName inRoster } \
+    resources { key ids } } }";
+
+/// The children of a thread, each with every field `Q_THREAD` reads: one
+/// child's view compares whole with the thread's.
+pub const Q_CHILD_THREADS: &str = "query($thread: UUID!, $size: Int!, $after: UUID) { \
+    threadsChildThreads(threadId: $thread, size: $size, after: $after) { \
     id ownerId title parentThreadId originBlockId status resolvedBy resolvedAt createdAt \
     lastActivityAt version readMark affordances members { userId displayName inRoster } \
     resources { key ids } } }";

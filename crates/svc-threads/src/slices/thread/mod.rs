@@ -21,7 +21,10 @@
 //! - `graphql`: the roots.
 //!
 //! Reactivity ledger of the threads view (`threadsThreads`, `threadsThread`,
-//! `threadsThreadsDeltas`, and the thread member of `threadsThreadDeltas`):
+//! `threadsChildThreads`, `threadsThreadsDeltas`, and the thread member of
+//! `threadsThreadDeltas`). `threadsChildThreads` is a query only — a page of a
+//! parent's children the caller is a member of, the same projection — with no
+//! live window, so its rows follow no impact of their own:
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|

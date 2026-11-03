@@ -177,6 +177,22 @@ in that output.
   runner's service account (`actor_kind` `service`), no acting user; a command's
   says `by: "COMMAND"` (T32, proposed by the oracle).
 
+- The children of a thread, a query of the human surface (T33):
+
+  ```graphql
+  threadsChildThreads(threadId: UUID!, size: Int!, after: UUID): [ThreadView!]!
+  ```
+
+  The children of `threadId` the caller is a member of, the oldest first
+  (`createdAt`, then `id`), each the very `ThreadView` `threadsThread` answers
+  for it; `after` is the last child of the previous page. An `after` that is
+  not a child of `threadId` the caller is a member of gives an empty page; a
+  thread that does not exist, or whose children the caller sees none of, an
+  empty list. `size` out of bounds is refused `WINDOW_SIZE_INVALID`, a caller
+  the human surface does not admit `ACTIVE_USER_REQUIRED`. The suite reads it
+  with `Q_CHILD_THREADS` (`common::constants`), which selects every field
+  `Q_THREAD` selects.
+
 ## 0.7.0 removals
 
 - `contract-threads` 0.7.0 removes the `title_job` module: `TitleJobConfig`
