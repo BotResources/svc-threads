@@ -14,21 +14,21 @@ heading exists.
 ## 0.7.0 - 2026-11-03
 
 Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A
-title is set by command only (`thread.set_title`, unchanged); naming a thread
-is the commanding services' concern (the agents service names a thread after
-its first message). Threads no longer talks to Jobs. `contract-threads` 0.7.0
-removes the title Job's published language (see its changelog).
+title is set by command (`thread.set_title`, unchanged) or by a runner,
+directly (`threadsSetTitle(threadId, title)`, without any Job); naming a thread
+is the commanding services' and the runners' concern (the agents service names
+a thread after its first message). Threads no longer talks to Jobs.
+`contract-threads` 0.7.0 removes the title Job's published language (see its
+changelog).
 
 ### Removed
 
 - **The title Job.** A thread's first `COMPLETED` message no longer creates a
   Job; a title set by command and a thread's deletion (on command, or because
   its owner left the roster) no longer cancel one.
-- **The runner's title operations** `threadsSetTitle(threadId, jobId, title)`
-  and `threadsFailTitleJob(threadId, jobId, reasonCode, message)`, with their
-  refusals `JOB_NOT_ACTIVE` and `FAILURE_REASON_INVALID`. `threads:runner` now
-  allows reading a thread's context and requesting an artifact upload, and
-  nothing else. The SDL loses both mutation roots; nothing else in it changes.
+- **`threadsFailTitleJob(threadId, jobId, reasonCode, message)`**, with the
+  refusals `JOB_NOT_ACTIVE` and `FAILURE_REASON_INVALID`: there is no title Job
+  to declare failed. The SDL loses this mutation root.
 - **Every Jobs consumption**: Threads no longer publishes
   `integration.cmd.jobs.job.create.v1`, `job.finish.v2`, `job.fail.v2` or
   `job.cancel.v2`, and no longer consumes `integration.evt.jobs.job.
@@ -41,12 +41,28 @@ removes the title Job's published language (see its changelog).
 
 ### Changed
 
+- **Breaking for runner clients: `threadsSetTitle(threadId: UUID!, title:
+  String!): MutationAck!`** — the `jobId` argument is gone, and with it the
+  title-Job gate. Any service account holding `threads:runner` sets the title
+  of any thread (a default title, the title of a thread it created), exactly
+  as `thread.set_title` does: the same transition (1 to 200 characters,
+  `TITLE_EMPTY` / `TITLE_TOO_LONG`; the same title is acknowledged and changes
+  nothing; a resolved or closed thread's title can still change), the same
+  save and the same live delta to the thread's members. A caller without the
+  scope is refused `RUNNER_SCOPE_REQUIRED`, a thread that does not exist
+  `THREAD_NOT_FOUND`. A runner client that still sends `jobId` (the runner
+  kit's `ThreadClient::set_title` of the title-Job era) is refused by GraphQL
+  validation (unknown argument) and must drop it. `threads:runner` now allows
+  reading a thread's context, requesting an artifact upload and setting a
+  thread's title.
+- **`TitleChanged` says who set the title**: `by: COMMAND` for
+  `thread.set_title`, `by: RUNNER` for `threadsSetTitle` (the fact's actor is
+  then the runner's service account, with no acting user).
 - **Migration `9800000006`** drops `threads.title_job`. A title Job still
   `RUNNING` when it runs is forgotten: Threads neither finishes nor cancels it
-  at Jobs, and its runner finds no title operation to call (README, *Deploy:
-  0.6 → 0.7*). Past facts are not rewritten: a `TitleChanged` fact a title Job
-  recorded keeps `by: TITLE_JOB`; from now on every `TitleChanged` says
-  `by: COMMAND`.
+  at Jobs (README, *Deploy: 0.6 → 0.7*); its runner's `threadsSetTitle` with a
+  `jobId` is refused as above. Past facts are not rewritten: a `TitleChanged`
+  fact a title Job recorded keeps `by: TITLE_JOB`.
 
 ### Tests
 
@@ -54,6 +70,13 @@ removes the title Job's published language (see its changelog).
   lose their title-Job clauses: neither expects a `job.cancel`, and T17 no
   longer publishes Jobs' `job.cancelled`. T27 proves that Threads commands
   nobody on the whole command stream instead of on Jobs' subjects.
+- T32 (proposed, not yet in the registry): a runner sets a thread's title —
+  acknowledged, read by the members, live on a member's thread feed and on the
+  owner's list, recorded `by: RUNNER` with the runner as actor; the same title
+  changes nothing; an empty or 201-character title, a member, a service
+  account without `threads:runner` and an unknown thread are each refused with
+  their code and change nothing; a resolved, then closed, thread's title can
+  still be set.
 
 ## 0.6.0 - 2026-10-29
 

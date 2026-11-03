@@ -156,3 +156,23 @@ in that output.
   and `fail`, version 2. `closure` is the library's closure reason JSON.
 - The closing fact's payload carries `closure`, one of `completed`,
   `budget_exhausted`, `cancelled`, `interrupted`, `failed`.
+
+## 0.7.0 changes
+
+- The title Job is gone: no `job.*` command, no Jobs stand-in in the harness,
+  no `threadsFailTitleJob` root (T12 deleted).
+- The runner's title operation stays, without its `jobId` (breaking for runner
+  clients such as the runner kit's `ThreadClient::set_title`):
+
+  ```graphql
+  threadsSetTitle(threadId: UUID!, title: String!): MutationAck!
+  ```
+
+  Open to a service account holding `threads:runner`, for any thread
+  (`RUNNER_SCOPE_REQUIRED` otherwise, a human caller included); the same
+  decision as `thread.set_title` (`TITLE_EMPTY`, `TITLE_TOO_LONG`, the same
+  title acknowledged and changing nothing, a resolved or closed thread's title
+  still settable); `THREAD_NOT_FOUND` for a thread that does not exist. Its
+  `TitleChanged` fact's payload is `{ title, by: "RUNNER" }`, its actor the
+  runner's service account (`actor_kind` `service`), no acting user; a command's
+  says `by: "COMMAND"` (T32, proposed by the oracle).

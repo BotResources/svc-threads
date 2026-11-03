@@ -4,9 +4,11 @@
 //! - `context`: a thread's context — the agent context of the agent a runner
 //!   names (the library's projected thread), or the whole active branch as a
 //!   `br-llm-messages/5` conversation; plus its members and resources;
-//! - `graphql`: the root.
+//! - `graphql`: the roots — `threadsContext`, and `threadsSetTitle`, whose
+//!   decision, write and impact are the thread capability's
+//!   (`thread::runner_title`, the second ingress of `thread.set_title`).
 //!
-//! The artifact upload request, the other runner operation, belongs to the
+//! The artifact upload request, the third runner operation, belongs to the
 //! artifact capability.
 
 pub mod context;
@@ -22,7 +24,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_projector(context::ContextView)?;
     engine.register_schema_slice(SliceFragment::derive::<
         graphql::RunnerQuery,
-        async_graphql::EmptyMutation,
+        graphql::RunnerMutation,
         async_graphql::EmptySubscription,
     >(crate::slices::FRAGMENT))?;
     Ok(())

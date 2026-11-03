@@ -14,8 +14,8 @@ member's read mark — and serves them, live, to their members.
 - Threads publishes the members of each thread (`threads.members.{thread_id}`),
   so that other services decide locally.
 - Threads runs no AI logic. A conversation's title is set by command
-  (`thread.set_title`); naming a conversation is the commanding services'
-  concern.
+  (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
+  naming a conversation is the commanding services' and the runners' concern.
 
 **Status: 0.7.0.** See [CHANGELOG.md](CHANGELOG.md).
 
@@ -59,12 +59,20 @@ honouring POST-policy checksum conditions.
 0.7 drops the title Job: Threads no longer publishes `job.create`,
 `job.finish`, `job.fail` or `job.cancel`, no longer consumes Jobs'
 `creation_rejected`, `failed` or `cancelled`, and no longer serves
-`threadsSetTitle` / `threadsFailTitleJob`.
+`threadsFailTitleJob`. `threadsSetTitle` stays, without its `jobId`:
+`threadsSetTitle(threadId, title)`, open to any `threads:runner` service
+account for any thread.
 
+- **Runner clients move with Threads.** The two forms of `threadsSetTitle`
+  do not cross: 0.7 refuses the 0.6 call `threadsSetTitle(threadId, jobId,
+  title)` (GraphQL validation: unknown argument), and 0.6 refuses the 0.7 call
+  (missing `jobId`). A runner that sets titles (the runner kit's
+  `ThreadClient::set_title`) is upgraded to the two-argument form in the same
+  rollout.
 - **Migration `9800000006`** drops `threads.title_job`. A title Job still
-  `RUNNING` at the upgrade is forgotten: Threads neither finishes nor cancels it
-  at Jobs, and its runner finds no title operation to call. To end them
-  cleanly, list them before the rollout
+  `RUNNING` at the upgrade is forgotten: Threads neither finishes nor cancels
+  it at Jobs, and its runner's `threadsSetTitle` with a `jobId` is refused. To
+  end them cleanly, list them before the rollout
   (`SELECT job_id FROM threads.title_job WHERE state = 'RUNNING'`) and cancel
   them at Jobs. The `TitleChanged` facts already recorded keep their
   `by: TITLE_JOB`.

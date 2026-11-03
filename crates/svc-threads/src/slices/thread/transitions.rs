@@ -39,11 +39,13 @@ literal_enum! {
 }
 
 literal_enum! {
-    /// Who set a title, as its `TitleChanged` fact says. Only a command does
-    /// since 0.7; the facts of 0.6 and earlier may also say `TITLE_JOB`, and
-    /// stay as they were recorded.
+    /// Who set a title, as its `TitleChanged` fact says: a `thread.set_title`
+    /// command, or a runner through its `threadsSetTitle` operation (the fact's
+    /// actor is then the runner's service account). The facts of 0.6 and
+    /// earlier may also say `TITLE_JOB`, and stay as they were recorded.
     pub enum TitleSource {
         Command => "COMMAND",
+        Runner => "RUNNER",
     }
 }
 
@@ -103,7 +105,7 @@ pub enum ParentLookup {
 }
 
 /// The one refusal of a title out of its domain, whichever gesture brought it:
-/// a creation or `thread.set_title`.
+/// a creation, `thread.set_title` or a runner's `threadsSetTitle`.
 fn title_refused(error: ThreadTitleError) -> Refusal {
     let refusal = Refusal::new(error.reason_code());
     match error {
@@ -421,11 +423,14 @@ impl ThreadState {
         Ok(Ok(Applied::Changed))
     }
 
-    /// Sets the title (`thread.set_title`): 1 to 200 characters; the same
-    /// title changes nothing.
+    /// Sets the title, whichever gesture brought it (`thread.set_title` or a
+    /// runner's `threadsSetTitle`): 1 to 200 characters; the same title changes
+    /// nothing. Not judged on the status nor the resolution: a resolved or a
+    /// closed thread's title can still change.
     pub fn set_title(
         &mut self,
         raw: &str,
+        source: TitleSource,
         meta: &FactMeta,
     ) -> Result<Result<Applied, Refusal>, EngineError> {
         let title = match ThreadTitle::parse(raw) {
@@ -442,7 +447,7 @@ impl ThreadState {
             TITLE_CHANGED,
             &TitleFact {
                 title: raw,
-                by: TitleSource::Command,
+                by: source,
             },
             meta,
         )?;

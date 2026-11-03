@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::ThreadCause;
 use super::state::{Thread, ThreadState};
-use super::transitions::{self, Applied, DeletionReason, ParentLookup};
+use super::transitions::{self, Applied, DeletionReason, ParentLookup, TitleSource};
 use crate::command::{Call, Inbound, Refusal, answer_thread};
 use crate::directory;
 use crate::facts::{self, FactMeta, FactNoun};
@@ -38,8 +38,10 @@ type Verdict = Result<Applied, Refusal>;
 
 /// Saves a changed thread and stages the impact of the change: the thread
 /// itself for its viewers, and the principal facts of every user whose
-/// membership moved, so their windows over the thread follow at once.
-async fn save_changed(
+/// membership moved, so their windows over the thread follow at once. Shared
+/// with the runner's title operation, so that both ingresses of a title change
+/// write and impact alike.
+pub(super) async fn save_changed(
     ops: &mut Ops<'_>,
     thread: &ThreadState,
     cause: ThreadCause,
@@ -198,7 +200,7 @@ pub fn set_title<'r>(
 ) -> BoxFuture<'r, Result<(), Fault>> {
     Box::pin(async move {
         on_thread!(cx, command, |thread, call| {
-            let verdict = thread.set_title(&command.title, &call.meta)?;
+            let verdict = thread.set_title(&command.title, TitleSource::Command, &call.meta)?;
             Ok((verdict, ThreadCause::TitleChanged, Vec::new()))
         })
     })

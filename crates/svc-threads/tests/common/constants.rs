@@ -125,6 +125,10 @@ pub const M_REQUEST_UPLOAD: &str = "mutation($thread: UUID!, $artifact: UUID!, $
     threadsRequestArtifactUpload(threadId: $thread, artifactId: $artifact, name: $name, \
     mediaType: $mediaType, size: $size, sha256: $sha256) { url fields } }";
 
+/// A runner sets a thread's title (0.7.0: no Job named).
+pub const M_SET_TITLE: &str = "mutation($thread: UUID!, $title: String!) { \
+    threadsSetTitle(threadId: $thread, title: $title) { success } }";
+
 pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(size: $size) { \
     __typename \
     ... on ThreadsReset { revision views { ... on ThreadView { id title version } } } \

@@ -20,9 +20,10 @@ longer runs a title Job.
   crate root included) and the constants `CONTEXT_ROOT` (`threadsContext`),
   `TITLE_ROOT` (`threadsSetTitle`) and `FAILURE_ROOT` (`threadsFailTitleJob`).
   Threads creates no Job, so no Job configuration names its runner
-  operations; `threadsContext` is still served, under the same name. A
-  consumer that read these names must drop them (a minor bump on the 0.x
-  line).
+  operations; `threadsContext` is still served, under the same name, and so is
+  `threadsSetTitle`, now `threadsSetTitle(threadId, title)` without a Job (see
+  the `svc-threads` 0.7.0 changelog). A consumer that read these names must
+  drop them (a minor bump on the 0.x line).
 
 ### Changed
 

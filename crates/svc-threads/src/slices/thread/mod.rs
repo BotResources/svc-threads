@@ -6,6 +6,8 @@
 //! - `transitions`: the guarded transition of each command, which is its one
 //!   decision, and the facts it records;
 //! - `commands`: the reactions to the thread commands, each answered once;
+//! - `runner_title`: a runner's `threadsSetTitle`, the second ingress of
+//!   `thread.set_title` (same transition, same save and impact);
 //! - `resolution`: resolving and reopening a thread, and the gate it puts on
 //!   the message commands;
 //! - `departure`: the threads of an owner who left the roster;
@@ -23,7 +25,7 @@
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | thread row (title, status, last activity, origin) | set title, close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
+//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
 //! | resolution (resolved by, resolved at) | resolve, reopen | resource, `thread` noun | Upsert |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
@@ -44,6 +46,7 @@ pub mod graphql;
 pub mod offer;
 pub mod read_mark;
 pub mod resolution;
+pub mod runner_title;
 pub mod state;
 pub mod store;
 pub mod transitions;
@@ -98,6 +101,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_reaction("threads-thread-delete", commands::delete)?;
 
     engine.register_mutation::<read_mark::SetReadMark, _>(read_mark::set_read_mark)?;
+    engine.register_mutation::<runner_title::RunnerSetTitle, _>(runner_title::runner_set_title)?;
 
     engine.register_mutation::<departure::DeleteDepartedOwnersThread, _>(
         departure::delete_departed_owners_thread,

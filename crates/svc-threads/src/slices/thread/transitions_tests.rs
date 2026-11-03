@@ -284,24 +284,70 @@ fn resource_ids_are_a_set_per_key_and_an_emptied_key_disappears() {
 #[test]
 fn a_title_is_1_to_200_characters_and_the_same_title_changes_nothing() {
     let mut thread = thread_with(&[Uuid::now_v7()]);
-    assert_eq!(
-        refused(thread.set_title(&"x".repeat(201), &meta()).unwrap()),
-        ReasonCode::TitleTooLong
-    );
-    assert_eq!(
-        refused(thread.set_title("", &meta()).unwrap()),
-        ReasonCode::TitleEmpty
-    );
+    for source in [TitleSource::Command, TitleSource::Runner] {
+        assert_eq!(
+            refused(thread.set_title(&"x".repeat(201), source, &meta()).unwrap()),
+            ReasonCode::TitleTooLong
+        );
+        assert_eq!(
+            refused(thread.set_title("", source, &meta()).unwrap()),
+            ReasonCode::TitleEmpty
+        );
+    }
     assert!(thread.pending.is_empty(), "a refused title records nothing");
     assert_eq!(
-        thread.set_title("Q3 review", &meta()).unwrap(),
+        thread
+            .set_title("Q3 review", TitleSource::Command, &meta())
+            .unwrap(),
         Ok(Applied::Changed)
     );
     assert_eq!(
-        thread.set_title("Q3 review", &meta()).unwrap(),
-        Ok(Applied::Unchanged)
+        thread
+            .set_title("Q3 review", TitleSource::Runner, &meta())
+            .unwrap(),
+        Ok(Applied::Unchanged),
+        "whoever sets it, the same title changes nothing"
     );
     assert_eq!(fact_types(&thread), [TITLE_CHANGED]);
+}
+
+#[test]
+fn a_title_fact_says_who_set_it() {
+    let mut thread = thread_with(&[Uuid::now_v7()]);
+    thread
+        .set_title("By command", TitleSource::Command, &meta())
+        .unwrap()
+        .unwrap();
+    thread
+        .set_title("By a runner", TitleSource::Runner, &meta())
+        .unwrap()
+        .unwrap();
+    let facts = thread.pending_facts();
+    let said: Vec<(&str, &str)> = facts
+        .iter()
+        .map(|fact| {
+            (
+                fact.payload["title"].as_str().unwrap(),
+                fact.payload["by"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(said, [("By command", "COMMAND"), ("By a runner", "RUNNER")]);
+}
+
+#[test]
+fn a_closed_thread_title_can_still_change() {
+    let mut thread = thread_with(&[Uuid::now_v7()]);
+    thread
+        .close(ClosingStatus::Completed, &meta())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        thread
+            .set_title("Closed, named", TitleSource::Runner, &meta())
+            .unwrap(),
+        Ok(Applied::Changed)
+    );
 }
 
 #[test]

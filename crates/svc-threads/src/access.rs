@@ -9,8 +9,8 @@
 //!   out of it or deactivated are refused everything. Super-user status gives
 //!   nothing; past admission, a thread is seen by its members only, and one the
 //!   caller is not a member of is reported as not found.
-//! - The runner surface (a thread's context, an artifact upload) admits a
-//!   service account holding `threads:runner`, for any thread.
+//! - The runner surface (a thread's context, an artifact upload, a thread's
+//!   title) admits a service account holding `threads:runner`, for any thread.
 
 use service_engine::gate::{Gate, Reason};
 

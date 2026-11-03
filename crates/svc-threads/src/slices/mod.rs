@@ -24,7 +24,7 @@ service_engine::compose_service! {
     slice thread ["thread"] { query = thread::graphql::ThreadQuery, mutation = thread::graphql::ThreadMutation, subscription = thread::graphql::ThreadSubscription }
     slice message ["message"] { query = message::graphql::MessageQuery, subscription = message::graphql::MessageSubscription }
     slice artifact ["artifact"] { query = artifact::graphql::ArtifactQuery, mutation = artifact::graphql::ArtifactMutation, subscription = async_graphql::EmptySubscription }
-    slice runner ["runner"] { query = runner::graphql::RunnerQuery, subscription = async_graphql::EmptySubscription }
+    slice runner ["runner"] { query = runner::graphql::RunnerQuery, mutation = runner::graphql::RunnerMutation, subscription = async_graphql::EmptySubscription }
 }
 
 #[cfg(test)]
@@ -54,6 +54,7 @@ mod tests {
             "threadsContext(",
             "threadsSetReadMark(",
             "threadsRequestArtifactUpload(",
+            "threadsSetTitle(",
             "threadsThreadsDeltas(",
             "threadsThreadDeltas(",
         ] {
@@ -61,12 +62,19 @@ mod tests {
         }
     }
 
+    /// The runner sets a title without naming a Job, and has no title Job to
+    /// declare failed.
     #[test]
-    fn the_title_job_roots_are_gone() {
+    fn the_runner_sets_a_title_without_a_job_and_the_failure_root_is_gone() {
         let sdl = sdl();
-        for root in ["threadsSetTitle(", "threadsFailTitleJob("] {
-            assert!(!sdl.contains(root), "{root} is still a root:\n{sdl}");
-        }
+        assert!(
+            sdl.contains("threadsSetTitle(threadId: UUID!, title: String!): MutationAck!"),
+            "threadsSetTitle takes a thread and a title only:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("threadsFailTitleJob("),
+            "threadsFailTitleJob is still a root:\n{sdl}"
+        );
     }
 
     /// Every subscription root reaches its own resolver — which, with no engine
