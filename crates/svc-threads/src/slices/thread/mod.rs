@@ -1,13 +1,13 @@
-//! The thread capability: a thread, its members, resources, read marks and
-//! title Job; the thread commands; the thread views; the members KV offer.
+//! The thread capability: a thread, its members, resources and read marks;
+//! the thread commands; the thread views; the members KV offer.
 //!
 //! - `state`: the canonical thread, its visibility (membership) and its unsaved
 //!   changes;
 //! - `transitions`: the guarded transition of each command, which is its one
 //!   decision, and the facts it records;
-//! - `title_job`: the title Job with Jobs, its runner's operations and Jobs'
-//!   events;
 //! - `commands`: the reactions to the thread commands, each answered once;
+//! - `runner_title`: a runner's `threadsSetTitle`, the second ingress of
+//!   `thread.set_title` (same transition, same save and impact);
 //! - `resolution`: resolving and reopening a thread, and the gate it puts on
 //!   the message commands;
 //! - `departure`: the threads of an owner who left the roster;
@@ -21,13 +21,15 @@
 //! - `graphql`: the roots.
 //!
 //! Reactivity ledger of the threads view (`threadsThreads`, `threadsThread`,
-//! `threadsThreadsDeltas`, and the thread member of `threadsThreadDeltas`):
+//! `threadsChildThreads`, `threadsThreadsDeltas`, and the thread member of
+//! `threadsThreadDeltas`). `threadsChildThreads` is a query only — a page of a
+//! parent's children the caller is a member of, the same projection — with no
+//! live window, so its rows follow no impact of their own:
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | thread row (title, status, last activity, origin) | set title (command or title Job), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
+//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
 //! | resolution (resolved by, resolved at) | resolve, reopen | resource, `thread` noun | Upsert |
-//! | title Job | started, ended by its runner or by Jobs, cancelled | resource, `thread` noun | none shown (no field) — re-render, no delta |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
 //! | read marks | the member's own gesture | resource, `thread_reader` noun (re-render by key, no list repopulation) | Upsert to the reader (only their own mark shows); no delta to the others |
@@ -47,9 +49,9 @@ pub mod graphql;
 pub mod offer;
 pub mod read_mark;
 pub mod resolution;
+pub mod runner_title;
 pub mod state;
 pub mod store;
-pub mod title_job;
 pub mod transitions;
 pub mod view;
 
@@ -71,7 +73,6 @@ literal_enum! {
         MembersChanged => "MEMBERS_CHANGED",
         ResourcesChanged => "RESOURCES_CHANGED",
         TitleChanged => "TITLE_CHANGED",
-        TitleJobEnded => "TITLE_JOB_ENDED",
         Closed => "CLOSED",
         Resolved => "RESOLVED",
         Reopened => "REOPENED",
@@ -102,17 +103,8 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_reaction("threads-thread-reopen", commands::reopen)?;
     engine.register_reaction("threads-thread-delete", commands::delete)?;
 
-    engine.register_reaction(
-        "threads-title-job-rejected",
-        title_job::on_creation_rejected,
-    )?;
-    engine.register_reaction("threads-title-job-failed", title_job::on_failed)?;
-    engine.register_reaction("threads-title-job-cancelled", title_job::on_cancelled)?;
-    engine.register_mutation::<title_job::RunnerSetTitle, _>(title_job::runner_set_title)?;
-    engine
-        .register_mutation::<title_job::RunnerFailTitleJob, _>(title_job::runner_fail_title_job)?;
-
     engine.register_mutation::<read_mark::SetReadMark, _>(read_mark::set_read_mark)?;
+    engine.register_mutation::<runner_title::RunnerSetTitle, _>(runner_title::runner_set_title)?;
 
     engine.register_mutation::<departure::DeleteDepartedOwnersThread, _>(
         departure::delete_departed_owners_thread,

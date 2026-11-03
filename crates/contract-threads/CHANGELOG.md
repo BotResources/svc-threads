@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.7.0 - 2026-11-03
+
+The published language of Threads 0.7 (registry patch 0.7.0): Threads no
+longer runs a title Job.
+
+### Removed
+
+- **Breaking:** the `title_job` module — `TitleJobConfig` (its re-export at the
+  crate root included) and the constants `CONTEXT_ROOT` (`threadsContext`),
+  `TITLE_ROOT` (`threadsSetTitle`) and `FAILURE_ROOT` (`threadsFailTitleJob`).
+  Threads creates no Job, so no Job configuration names its runner
+  operations; `threadsContext` is still served, under the same name, and so is
+  `threadsSetTitle`, now `threadsSetTitle(threadId, title)` without a Job (see
+  the `svc-threads` 0.7.0 changelog). A consumer that read these names must
+  drop them (a minor bump on the 0.x line).
+
+### Changed
+
+- The documentation of `SetTitle` and `DeleteThread` no longer mentions the
+  title Job. Their wire is unchanged.
+
 ## 0.6.0 - 2026-10-29
 
 The published language of Threads 0.6 (registry patch 0.6.0): a writer keeps a

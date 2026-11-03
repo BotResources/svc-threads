@@ -11,6 +11,106 @@ heading exists.
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-03
+
+Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A
+title is set by command (`thread.set_title`, unchanged) or by a runner,
+directly (`threadsSetTitle(threadId, title)`, without any Job); naming a thread
+is the commanding services' and the runners' concern (the agents service names
+a thread after its first message). Threads no longer talks to Jobs. A member
+lists the child threads of a thread. `contract-threads` 0.7.0 removes the title
+Job's published language (see its changelog).
+
+### Added
+
+- **`threadsChildThreads(threadId: UUID!, size: Int!, after: UUID):
+  [ThreadView!]!`**: one page of the child threads of a thread that the caller
+  is a member of, the oldest first (creation, then id), with the view of the
+  thread list (`threadsThreads`) — `parentThreadId` and `originBlockId`
+  included — and the same admission (an active user of the roster,
+  `ACTIVE_USER_REQUIRED` otherwise). A child the caller is not a member of is
+  left out without error. The list still works once the parent is deleted; it
+  is empty for a thread that does not exist or has no child the caller sees.
+  `after` names the last child of the previous page; an `after` that is not a
+  child of that thread the caller is a member of (a child they do not see,
+  another thread, an id nobody created) gives an empty page, as an unknown
+  `before` does on the thread list. `size` is bounded as on the thread list
+  (from 1, `WINDOW_SIZE_INVALID`; a page larger than the engine's window
+  capacity is refused `WINDOW_TOO_LARGE` as there). A query only: no
+  subscription, no command, no fact. One statement selects the page; the
+  children are then read and projected as the thread list's are.
+- **Migration `9800000007`**: the index `thread_child_idx` on
+  `threads.thread (parent_thread_id, created_at, id)`, partial (`WHERE
+  parent_thread_id IS NOT NULL`). A plain `CREATE INDEX` in the migration's
+  transaction, not `CONCURRENTLY`: `migrate` runs while no pod serves.
+
+### Removed
+
+- **The title Job.** A thread's first `COMPLETED` message no longer creates a
+  Job; a title set by command and a thread's deletion (on command, or because
+  its owner left the roster) no longer cancel one.
+- **`threadsFailTitleJob(threadId, jobId, reasonCode, message)`**, with the
+  refusals `JOB_NOT_ACTIVE` and `FAILURE_REASON_INVALID`: there is no title Job
+  to declare failed. The SDL loses this mutation root.
+- **Every Jobs consumption**: Threads no longer publishes
+  `integration.cmd.jobs.job.create.v1`, `job.finish.v2`, `job.fail.v2` or
+  `job.cancel.v2`, and no longer consumes `integration.evt.jobs.job.
+  creation_rejected.v1`, `job.failed.v1` or `job.cancelled.v1`: the durables
+  `threads-title-job-rejected`, `threads-title-job-failed` and
+  `threads-title-job-cancelled` are no longer registered. The `contract-jobs`
+  dependency is gone.
+- **`THREADS_TITLE_RUNNER_TYPE`** is no longer read.
+- The delta cause `TITLE_JOB_ENDED` is no longer emitted.
+
+### Changed
+
+- **Breaking for runner clients: `threadsSetTitle(threadId: UUID!, title:
+  String!): MutationAck!`** — the `jobId` argument is gone, and with it the
+  title-Job gate. Any service account holding `threads:runner` sets the title
+  of any thread (a default title, the title of a thread it created), exactly
+  as `thread.set_title` does: the same transition (1 to 200 characters,
+  `TITLE_EMPTY` / `TITLE_TOO_LONG`; the same title is acknowledged and changes
+  nothing; a resolved or closed thread's title can still change), the same
+  save and the same live delta to the thread's members. A caller without the
+  scope is refused `RUNNER_SCOPE_REQUIRED`, a thread that does not exist
+  `THREAD_NOT_FOUND`. A runner client that still sends `jobId` (the runner
+  kit's `ThreadClient::set_title` of the title-Job era) is refused by GraphQL
+  validation (unknown argument) and must drop it. `threads:runner` now allows
+  reading a thread's context, requesting an artifact upload and setting a
+  thread's title.
+- **`TitleChanged` says who set the title**: `by: COMMAND` for
+  `thread.set_title`, `by: RUNNER` for `threadsSetTitle` (the fact's actor is
+  then the runner's service account, with no acting user).
+- **Migration `9800000006`** drops `threads.title_job`. A title Job still
+  `RUNNING` when it runs is forgotten: Threads neither finishes nor cancels it
+  at Jobs (README, *Deploy: 0.6 → 0.7*); its runner's `threadsSetTitle` with a
+  `jobId` is refused as above. Past facts are not rewritten: a `TitleChanged`
+  fact a title Job recorded keeps `by: TITLE_JOB`.
+
+### Tests
+
+- T12 (the title Job) is deleted with the harness's Jobs stand-in. T14 and T17
+  lose their title-Job clauses: neither expects a `job.cancel`, and T17 no
+  longer publishes Jobs' `job.cancelled`. T27 proves that Threads commands
+  nobody on the whole command stream instead of on Jobs' subjects, on an
+  untitled thread and counting from before its first message — the gesture
+  that started a title Job up to 0.6.
+- T33: listing the child threads of a thread — a member lists the children
+  they are a member of, oldest first, each with its origin block and the view
+  of the thread list, by pages after a child; a child they are not a member of
+  is left out; the list survives the parent's deletion; a thread without child
+  and an unknown id give an empty list. A second test pins what the
+  specification leaves open: an `after` that is not a child the caller sees
+  gives an empty page, a size out of bounds is refused `WINDOW_SIZE_INVALID`
+  and a service account `ACTIVE_USER_REQUIRED`.
+- T32 (proposed, not yet in the registry): a runner sets a thread's title —
+  acknowledged, read by the members, live on a member's thread feed and on the
+  owner's list, recorded `by: RUNNER` with the runner as actor; the same title
+  changes nothing; an empty or 201-character title, a member, a service
+  account without `threads:runner` and an unknown thread are each refused with
+  their code and change nothing; a resolved, then closed, thread's title can
+  still be set.
+
 ## 0.6.0 - 2026-10-29
 
 Threads 0.6 (registry patch 0.6.0): a writer keeps a waiting stream alive and

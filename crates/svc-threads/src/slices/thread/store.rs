@@ -1,12 +1,12 @@
 //! `threads.thread` and the rows that are part of a thread's state —
-//! `thread_member`, `thread_resource`, `read_mark`, `title_job` — through the
-//! engine's `Persistence` seam, soft EDA.
+//! `thread_member`, `thread_resource`, `read_mark` — through the engine's
+//! `Persistence` seam, soft EDA.
 //!
-//! A batch read is four statements whatever its size: the threads with their
-//! title Job, their members with the roster copy's name, their resources, their
-//! read marks. A save writes the thread row and its title Job whole, applies the
-//! row changes its transition made (members, resources, read marks) and appends
-//! the facts of the change, in the pipeline's transaction.
+//! A batch read is four statements whatever its size: the threads, their
+//! members with the roster copy's name, their resources, their read marks. A
+//! save writes the thread row whole, applies the row changes its transition
+//! made (members, resources, read marks) and appends the facts of the change,
+//! in the pipeline's transaction.
 //!
 //! Concurrency: the engine serialises commands on one key with a per-key
 //! transaction advisory lock taken when the pipeline loads it; `lock` adds a row
@@ -29,8 +29,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use super::state::{
-    MEMBER_DIM, Member, Resolution, ThreadChange, ThreadOrigin, ThreadState, TitleJob,
-    TitleJobState, UnknownStoredValue,
+    MEMBER_DIM, Member, Resolution, ThreadChange, ThreadOrigin, ThreadState, UnknownStoredValue,
 };
 use crate::directory::KNOWN_USERS_TABLE;
 use crate::facts::{self, FactNoun};
@@ -39,9 +38,7 @@ use crate::fault::corrupt;
 pub const TABLE: &str = "threads.thread";
 const COLUMNS: &str = "t.id, t.owner_id, t.title, t.parent_thread_id, t.origin_block_id, \
                        t.status, t.resolved_by, t.resolved_at, t.created_at, \
-                       t.last_activity_at, t.version, \
-                       j.job_id AS title_job_id, j.state AS title_job_state, \
-                       j.created_at AS title_job_created_at, j.ended_at AS title_job_ended_at";
+                       t.last_activity_at, t.version";
 
 pub struct ThreadStore;
 
@@ -86,7 +83,6 @@ impl Persistence for ThreadStore {
             .bind(thread.resolution.map(|resolution| resolution.at))
             .execute(&mut *conn)
             .await?;
-            write_title_job(conn, thread).await?;
             for change in changes {
                 apply(conn, thread.id, change).await?;
             }
@@ -128,7 +124,6 @@ impl Persistence for ThreadStore {
             for (key, ids) in &thread.resources {
                 set_resource(conn, thread.id, key, ids).await?;
             }
-            write_title_job(conn, thread).await?;
             facts::append(
                 conn,
                 FactNoun::Thread,
@@ -140,8 +135,8 @@ impl Persistence for ThreadStore {
         })
     }
 
-    /// The thread row; its members, resources, messages, entries, blocks, annotations, read
-    /// marks and title Job go with it by cascade. Its artifacts do not: they are
+    /// The thread row; its members, resources, messages, entries, blocks,
+    /// annotations and read marks go with it by cascade. Its artifacts do not: they are
     /// deleted first, through their own store, so that their bytes are
     /// released.
     fn delete<'a>(
@@ -252,25 +247,6 @@ async fn set_resource(
     Ok(())
 }
 
-async fn write_title_job(conn: &mut PgConnection, thread: &ThreadState) -> Result<(), EngineError> {
-    let Some(job) = &thread.title_job else {
-        return Ok(());
-    };
-    sqlx::query(
-        "INSERT INTO threads.title_job (thread_id, job_id, state, created_at, ended_at) \
-         VALUES ($1, $2, $3, $4, $5) \
-         ON CONFLICT (thread_id) DO UPDATE SET state = EXCLUDED.state, ended_at = EXCLUDED.ended_at",
-    )
-    .bind(thread.id)
-    .bind(job.job_id)
-    .bind(job.state.as_db())
-    .bind(job.created_at)
-    .bind(job.ended_at)
-    .execute(conn)
-    .await?;
-    Ok(())
-}
-
 /// The threads of the members named, one read bounded by the engine's ceiling.
 impl CohortIndex for ThreadStore {
     fn keys_in_cohorts<'a>(
@@ -316,6 +292,41 @@ pub async fn page_of_member(
     .await?)
 }
 
+/// One page of the children of `parent` that `member` is a member of, the
+/// oldest first (creation, then id): those after `cursor` when one is given.
+/// One statement, on `thread_child_idx`.
+///
+/// The cursor positions the page only when it names one of these children —
+/// a child of `parent` that `member` is a member of. Any other id (a child
+/// they are not a member of, another thread, an id nobody created) resolves to
+/// no row, the comparison to `NULL`, and the page is empty: a cursor never
+/// tells where a thread the caller does not see stands.
+pub async fn children_page_of_member(
+    pg: &PgPool,
+    member: Uuid,
+    parent: Uuid,
+    cursor: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<Uuid>, EngineError> {
+    Ok(sqlx::query_scalar(
+        "SELECT t.id FROM threads.thread t \
+         JOIN threads.thread_member m ON m.thread_id = t.id AND m.user_id = $1 \
+         WHERE t.parent_thread_id = $2 \
+           AND ($3::uuid IS NULL \
+            OR (t.created_at, t.id) > \
+               (SELECT c.created_at, c.id FROM threads.thread c \
+                JOIN threads.thread_member cm ON cm.thread_id = c.id AND cm.user_id = $1 \
+                WHERE c.id = $3 AND c.parent_thread_id = $2)) \
+         ORDER BY t.created_at ASC, t.id ASC LIMIT $4",
+    )
+    .bind(member)
+    .bind(parent)
+    .bind(cursor)
+    .bind(limit)
+    .fetch_all(pg)
+    .await?)
+}
+
 /// Every thread: the members offer's reconcile. Five statements.
 pub async fn all_threads(conn: &mut PgConnection) -> Result<Vec<ThreadState>, EngineError> {
     let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM threads.thread ORDER BY id")
@@ -334,7 +345,6 @@ async fn read_many(
 ) -> Result<Vec<(Uuid, ThreadState)>, EngineError> {
     let rows = sqlx::query(&format!(
         "SELECT {COLUMNS} FROM {TABLE} t \
-         LEFT JOIN threads.title_job j ON j.thread_id = t.id \
          WHERE t.id = ANY($1)"
     ))
     .bind(keys)
@@ -381,18 +391,6 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
             }));
         }
     };
-    let job_id: Option<Uuid> = row.try_get("title_job_id")?;
-    let job_state: Option<String> = row.try_get("title_job_state")?;
-    let job_created_at: Option<DateTime<Utc>> = row.try_get("title_job_created_at")?;
-    let title_job = match (job_id, job_state, job_created_at) {
-        (Some(job_id), Some(state), Some(created_at)) => Some(TitleJob {
-            job_id,
-            state: TitleJobState::from_db(&state).map_err(corrupt)?,
-            created_at,
-            ended_at: row.try_get("title_job_ended_at")?,
-        }),
-        _ => None,
-    };
     let resolved_by: Option<Uuid> = row.try_get("resolved_by")?;
     let resolved_at: Option<DateTime<Utc>> = row.try_get("resolved_at")?;
     let resolution = match (resolved_by, resolved_at) {
@@ -419,7 +417,6 @@ fn thread_of_row(row: &PgRow) -> Result<ThreadState, EngineError> {
         members: BTreeMap::new(),
         resources: BTreeMap::new(),
         read_marks: BTreeMap::new(),
-        title_job,
         pending: Vec::new(),
     })
 }

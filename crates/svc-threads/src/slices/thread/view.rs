@@ -1,9 +1,10 @@
 //! The caller's threads, for the queries, the snapshot and the live deltas: one
 //! projection, [`ThreadsView`], whatever the entry point.
 //!
-//! A window is either one thread (`threadsThread`, the live feed of one thread)
-//! or one page of the caller's list, the most recently active first
-//! (`threadsThreads`, `threadsThreadsDeltas`). Visibility is membership
+//! A window is one thread (`threadsThread`, the live feed of one thread), one
+//! page of the caller's list, the most recently active first (`threadsThreads`,
+//! `threadsThreadsDeltas`), or one page of the children of a thread, the oldest
+//! first (`threadsChildThreads`). Visibility is membership
 //! ([`super::state::Thread`]): a thread the caller is not a member of is
 //! invisible, exactly as one that does not exist.
 
@@ -100,26 +101,46 @@ pub struct ThreadView {
     pub affordances: Affordances,
 }
 
-/// What a window of [`ThreadsView`] is: one thread, or one page of the
-/// caller's list.
+/// What a window of [`ThreadsView`] is: one thread, one page of the caller's
+/// list, or one page of the children of a thread.
+///
+/// `children` is skipped when absent so that the two older windows encode as
+/// they did before it existed: the pods of one rollout agree on them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadsWindow {
     thread: Option<Uuid>,
     page: Option<Page<Uuid>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    children: Option<ChildrenPage>,
+}
+
+/// One page of the children of `parent`, the oldest first; the page's cursor is
+/// the child after which it starts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChildrenPage {
+    parent: Uuid,
+    page: Page<Uuid>,
 }
 
 impl ThreadsWindow {
     pub fn one(thread: Uuid) -> Self {
         Self {
             thread: Some(thread),
-            page: None,
+            ..Self::default()
         }
     }
 
     pub fn page(page: Page<Uuid>) -> Self {
         Self {
-            thread: None,
             page: Some(page),
+            ..Self::default()
+        }
+    }
+
+    pub fn children(parent: Uuid, page: Page<Uuid>) -> Self {
+        Self {
+            children: Some(ChildrenPage { parent, page }),
+            ..Self::default()
         }
     }
 }
@@ -145,11 +166,12 @@ impl Projector for ThreadsView {
         cx: &Populate<'_, ThreadsPrincipal>,
         query: &ThreadsWindow,
     ) -> Result<Population<Uuid>, EngineError> {
-        match (query.thread, &query.page, cx.principal().active_user()) {
+        let member = cx.principal().active_user();
+        match (query.thread, &query.page, &query.children, member) {
             // One thread: its key, seen or not — the visibility gate decides,
             // and a thread the caller joins later enters the window then.
-            (Some(thread), _, _) => Ok(Population::Keys(BTreeSet::from([thread]))),
-            (None, Some(page), Some(member)) => {
+            (Some(thread), _, _, _) => Ok(Population::Keys(BTreeSet::from([thread]))),
+            (None, Some(page), _, Some(member)) => {
                 let keys = store::page_of_member(
                     cx.pool(),
                     member,
@@ -158,6 +180,19 @@ impl Projector for ThreadsView {
                 )
                 .await?;
                 Ok(page.population(keys))
+            }
+            // A fixed set: the query root orders it, the oldest first. Served
+            // to queries only, it is never an open head.
+            (None, None, Some(children), Some(member)) => {
+                let keys = store::children_page_of_member(
+                    cx.pool(),
+                    member,
+                    children.parent,
+                    children.page.cursor().copied(),
+                    cx.limit(&children.page),
+                )
+                .await?;
+                Ok(Population::Keys(keys.into_iter().collect()))
             }
             _ => Ok(Population::Keys(BTreeSet::new())),
         }
@@ -344,6 +379,36 @@ mod tests {
             ThreadsView::project(&thread, &other).unwrap().read_mark,
             Some(theirs)
         );
+    }
+
+    /// The pods of one rollout share the windows of the live list and of one
+    /// thread: adding the children window changes neither encoding.
+    #[test]
+    fn the_children_window_leaves_the_older_windows_encoded_as_before() {
+        let thread = Uuid::now_v7();
+        let size = service_engine::WindowSize::new(10).unwrap();
+        assert_eq!(
+            serde_json::to_value(ThreadsWindow::one(thread)).unwrap(),
+            serde_json::json!({ "thread": thread, "page": null })
+        );
+        assert_eq!(
+            serde_json::to_value(ThreadsWindow::page(Page::head(size))).unwrap(),
+            serde_json::json!({ "thread": null, "page": { "before": null, "size": 10 } })
+        );
+        let decoded: ThreadsWindow =
+            serde_json::from_value(serde_json::json!({ "thread": thread, "page": null })).unwrap();
+        assert!(decoded.children.is_none());
+
+        let after = Uuid::now_v7();
+        let children = ThreadsWindow::children(thread, Page::new(Some(after), size));
+        let encoded = serde_json::to_value(&children).unwrap();
+        assert_eq!(
+            encoded["children"],
+            serde_json::json!({ "parent": thread, "page": { "before": after, "size": 10 } })
+        );
+        let decoded: ThreadsWindow = serde_json::from_value(encoded).unwrap();
+        let page = decoded.children.expect("the children window");
+        assert_eq!((page.parent, page.page.cursor()), (thread, Some(&after)));
     }
 
     #[test]

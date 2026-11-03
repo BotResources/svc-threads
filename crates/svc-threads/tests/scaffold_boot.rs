@@ -44,14 +44,13 @@ async fn the_schema_subcommand_prints_every_root_of_the_surface() {
     let sdl = common::schema_sdl().await;
     for root in [
         "threadsThreads(",
+        "threadsChildThreads(",
         "threadsThread(",
         "threadsMessages(",
         "threadsArtifactDownload(",
         "threadsContext(",
         "threadsSetReadMark(",
         "threadsRequestArtifactUpload(",
-        "threadsSetTitle(",
-        "threadsFailTitleJob(",
         "threadsThreadsDeltas(",
         "threadsThreadDeltas(",
     ] {

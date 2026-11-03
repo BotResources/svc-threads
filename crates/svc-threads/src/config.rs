@@ -1,13 +1,11 @@
-//! Threads' own configuration, beside the engine's ops contract: the title
-//! runner type, the stream idle window and the artifact upload window. Each has
-//! a default; `schema` and `migrate` read none of it.
+//! Threads' own configuration, beside the engine's ops contract: the stream
+//! idle window and the artifact upload window. Each has a default; `schema` and
+//! `migrate` read none of it.
 
 use std::time::Duration;
 
 use service_engine::error::EngineError;
 
-/// The runner type of the title Job (`THREADS_TITLE_RUNNER_TYPE`).
-pub const ENV_TITLE_RUNNER_TYPE: &str = "THREADS_TITLE_RUNNER_TYPE";
 /// How long a writer may push nothing before its `STREAMING` message is
 /// failed, in milliseconds (`THREADS_STREAM_IDLE_MS`).
 pub const ENV_STREAM_IDLE_MS: &str = "THREADS_STREAM_IDLE_MS";
@@ -15,7 +13,6 @@ pub const ENV_STREAM_IDLE_MS: &str = "THREADS_STREAM_IDLE_MS";
 /// its message, in milliseconds (`THREADS_UPLOAD_WINDOW_MS`).
 pub const ENV_UPLOAD_WINDOW_MS: &str = "THREADS_UPLOAD_WINDOW_MS";
 
-pub const DEFAULT_TITLE_RUNNER_TYPE: &str = "thread_title";
 pub const DEFAULT_STREAM_IDLE_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const DEFAULT_UPLOAD_WINDOW: Duration = Duration::from_secs(15 * 60);
 
@@ -33,7 +30,6 @@ pub fn installed() -> &'static ThreadsConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadsConfig {
-    pub title_runner_type: String,
     pub stream_idle_window: Duration,
     pub upload_window: Duration,
 }
@@ -41,7 +37,6 @@ pub struct ThreadsConfig {
 impl Default for ThreadsConfig {
     fn default() -> Self {
         Self {
-            title_runner_type: DEFAULT_TITLE_RUNNER_TYPE.to_string(),
             stream_idle_window: DEFAULT_STREAM_IDLE_WINDOW,
             upload_window: DEFAULT_UPLOAD_WINDOW,
         }
@@ -52,15 +47,6 @@ impl ThreadsConfig {
     pub fn from_env() -> Result<Self, EngineError> {
         let defaults = Self::default();
         Ok(Self {
-            title_runner_type: match std::env::var(ENV_TITLE_RUNNER_TYPE) {
-                Ok(runner_type) if !runner_type.trim().is_empty() => runner_type,
-                Ok(_) => {
-                    return Err(EngineError::Config(format!(
-                        "{ENV_TITLE_RUNNER_TYPE} is set but blank"
-                    )));
-                }
-                Err(_) => defaults.title_runner_type,
-            },
             stream_idle_window: millis(ENV_STREAM_IDLE_MS)?.unwrap_or(defaults.stream_idle_window),
             upload_window: millis(ENV_UPLOAD_WINDOW_MS)?.unwrap_or(defaults.upload_window),
         })

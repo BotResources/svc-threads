@@ -160,19 +160,6 @@ pub async fn in_roster(
     Ok(held.into_iter().collect())
 }
 
-/// The current display name of `user`, if the roster copy holds them.
-pub async fn display_name(
-    conn: &mut sqlx::PgConnection,
-    user: Uuid,
-) -> Result<Option<String>, EngineError> {
-    Ok(sqlx::query_scalar(&format!(
-        "SELECT display_name FROM {KNOWN_USERS_TABLE} WHERE user_id = $1"
-    ))
-    .bind(user)
-    .fetch_optional(conn)
-    .await?)
-}
-
 fn user_key(user_id: Uuid) -> KvKey {
     KvKey::new(br_core_directory::user_kv_key(user_id))
         .expect("the roster key of a UUID is a valid KV key")

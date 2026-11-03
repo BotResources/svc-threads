@@ -71,7 +71,7 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
         as_unknown,
         "U following T is refused as for an unknown thread"
     );
-    // The title Job's start and anything else the store set off settle first.
+    // Anything the store set off settles first.
     a_feed.drain().await;
     b_feed.drain().await;
 

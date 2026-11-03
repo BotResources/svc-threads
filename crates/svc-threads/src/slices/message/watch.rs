@@ -123,9 +123,11 @@ pub fn due<'r>(
         let Some(thread) = store::thread_of(cx.connection(), message.message_id).await? else {
             return Ok(());
         };
-        let Some(mut thread) = cx.load::<ThreadState>(&thread).await? else {
+        // The thread first, then the message: the one lock order of the
+        // service (`slices::thread::store`), which a thread's deletion takes too.
+        if cx.load::<ThreadState>(&thread).await?.is_none() {
             return Ok(());
-        };
+        }
         let Some(state) = cx.load::<MessageState>(&message.message_id).await? else {
             return Ok(());
         };
@@ -187,7 +189,6 @@ pub fn due<'r>(
                 closing::store_closed(
                     cx,
                     state,
-                    &mut thread,
                     &sealed,
                     &Closing::of(CloseKind::Watch),
                     Vec::new(),

@@ -9,7 +9,6 @@ pub mod message;
 pub mod reason;
 pub mod status;
 pub mod thread;
-pub mod title_job;
 pub mod v1;
 pub mod value;
 mod wire;
@@ -41,6 +40,5 @@ pub use thread::{
     AddMembers, AddResourceIds, CloseThread, CreateThread, DeleteThread, RemoveMembers,
     RemoveResourceIds, ReopenThread, ResolveThread, SetTitle,
 };
-pub use title_job::TitleJobConfig;
 pub use value::{SealDigest, SealDigestError, ThreadTitle, ThreadTitleError, TitleTooLong};
 pub use wire::UnknownLiteral;

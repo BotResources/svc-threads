@@ -13,16 +13,17 @@ member's read mark — and serves them, live, to their members.
 - Threads decides who may read: the members of a thread, and nobody else.
 - Threads publishes the members of each thread (`threads.members.{thread_id}`),
   so that other services decide locally.
-- Threads runs no AI logic; to name a new conversation it asks a runner through
-  Jobs.
+- Threads runs no AI logic. A conversation's title is set by command
+  (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
+  naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.6.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.7.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members KV value, the content model and the chunk format of its message stream, the title Job configuration. What a commanding service imports. |
+| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members KV value, the content model and the chunk format of its message stream. What a commanding service imports. |
 | [`crates/svc-threads`](crates/svc-threads) | The service, on [`br-service-engine`](https://github.com/BotResources/br-service-engine) (fatty manner, soft EDA, multi-pod), organized by capability under `src/slices/` (`thread`, `message`, `artifact`, `runner`). |
 
 ## Running
@@ -43,7 +44,6 @@ Threads' own settings, read at `serve`, each with its default:
 
 | Variable | Default | What it sets |
 |---|---|---|
-| `THREADS_TITLE_RUNNER_TYPE` | `thread_title` | the runner type of the title Job Threads asks Jobs to run |
 | `THREADS_STREAM_IDLE_MS` | `600000` (10 min) | how long a writer may push nothing before its `STREAMING` message is failed |
 | `THREADS_UPLOAD_WINDOW_MS` | `900000` (15 min) | how long an upload access stays valid, and a `PENDING` artifact waits for its message |
 
@@ -53,6 +53,75 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.6 → 0.7
+
+0.7 drops the title Job: Threads no longer publishes `job.create`,
+`job.finish`, `job.fail` or `job.cancel`, no longer consumes Jobs'
+`creation_rejected`, `failed` or `cancelled`, and no longer serves
+`threadsFailTitleJob`. `threadsSetTitle` stays, without its `jobId`:
+`threadsSetTitle(threadId, title)`, open to any `threads:runner` service
+account for any thread.
+
+Before the rollout:
+
+- **Runner clients move with Threads.** The two forms of `threadsSetTitle`
+  do not cross: 0.7 refuses the 0.6 call `threadsSetTitle(threadId, jobId,
+  title)` (GraphQL validation: unknown argument), and 0.6 refuses the 0.7 call
+  (missing `jobId`). A runner that sets titles (the runner kit's
+  `ThreadClient::set_title`) is upgraded to the two-argument form in the same
+  rollout.
+- **Running title Jobs are forgotten.** Migration `9800000006` drops
+  `threads.title_job`: a title Job still `RUNNING` at the upgrade is neither
+  finished nor cancelled at Jobs, and its runner's `threadsSetTitle` with a
+  `jobId` is refused. To end them cleanly, list them before the rollout
+  (`SELECT job_id FROM threads.title_job WHERE state = 'RUNNING'`) and cancel
+  them at Jobs. The `TitleChanged` facts already recorded keep their
+  `by: TITLE_JOB`.
+- **Take a database backup** right before `migrate`: it is the only way back
+  (below). Migration `9800000007` also builds the index of the child-thread
+  list (`thread_child_idx`, partial on `parent_thread_id`) in `migrate`'s
+  transaction, while no pod serves.
+
+The rollout:
+
+- **It is `Recreate`** (the engine's chart enforces it): every 0.6 pod stops
+  before a 0.7 pod starts. Never run `migrate` ahead of the rollout, nor beside
+  a running 0.6 pod: once `threads.title_job` is gone, that pod fails every
+  thread read and every command.
+- **`THREADS_TITLE_RUNNER_TYPE`** is no longer read: drop it from the
+  deployment's values (a leftover is ignored).
+
+After the rollout, in this order:
+
+1. **Check that no Jobs command is left in the outbox.** A `job.create` or
+   `job.cancel` a 0.6 pod staged but did not relay before it stopped is still
+   relayed by 0.7. Answers and outbound commands share the engine's outbox,
+   relayed strictly in id order and halting on the first failure; a publish
+   the bus refuses is never dead-lettered. Withdrawing the permission while
+   such a command is pending would therefore block every later
+   `thread.*` / `message.*` answer, for good. Once 0.7 is up, wait until
+
+   ```sql
+   SELECT count(*) FROM service_engine.integration_outbox
+    WHERE status = 'PENDING' AND subject LIKE 'integration.cmd.jobs.%';
+   ```
+
+   returns 0.
+2. **Only then withdraw the Jobs bus permissions**: publishing on
+   `integration.cmd.jobs.job.{create,finish,fail,cancel}.*` and consuming
+   `integration.evt.jobs.job.*`.
+3. **Remove the three stale durables** the 0.6 pods created on
+   `INTEGRATION_EVT` — 0.7 never binds them again, and nothing deletes them —
+   once the last 0.6 pod is gone (a running 0.6 pod re-creates them when it
+   opens or reopens them): `nats consumer rm INTEGRATION_EVT
+   threads-title-job-rejected`, `… threads-title-job-failed`,
+   `… threads-title-job-cancelled`.
+
+**No rollback to 0.6 once `migrate` has run.** A 0.6 pod does not crash on the
+0.7 schema, but every thread read and every command fails: 0.6 reads each
+thread with a `LEFT JOIN threads.title_job`, a table 0.7 dropped. The only way
+back is the database backup taken before `migrate`.
 
 ## Deploy: 0.4 → 0.5
 

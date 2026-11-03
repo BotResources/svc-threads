@@ -3,16 +3,15 @@
 //! elsewhere, stay.
 //!
 //! ENGINE GAP (br-service-engine v0.4.1): a mirror projection can write rows
-//! and stage impacts, but cannot run pipeline work — `cx.delete` (which retracts
-//! the members entry and releases artifact bytes), an outbox command (the title
-//! Job's `job.cancel`), or a scheduled reaction. The directory mirror therefore
-//! only marks the user out of the roster, and this module carries the
-//! consequence through the write pipeline: a cron job on the engine beat finds
-//! the threads whose owner the roster copy holds out of the roster — the
-//! canonical predicate itself, so nothing is lost if a pod dies, and a user
-//! retracted while Threads was down is caught once the mirror's reconciliation
-//! marks them — and deletes each through a registered mutation run by the
-//! engine's executor, as Threads itself. The engine would need a mirror
+//! and stage impacts, but cannot run pipeline work. Deleting a thread needs
+//! one: `cx.delete`, which retracts the members entry and releases artifact
+//! bytes. The directory mirror therefore only marks the user out of the
+//! roster, and this module carries the consequence through the write pipeline:
+//! a cron job on the engine beat finds the threads whose owner the roster copy
+//! holds out of the roster — the canonical predicate itself, so nothing is lost
+//! if a pod dies, and a user retracted while Threads was down is caught once
+//! the mirror's reconciliation marks them — and deletes each through a
+//! registered mutation run by the engine's executor, as Threads itself. The engine would need a mirror
 //! projection hook that can stage pipeline work (or a post-commit reaction on a
 //! known row) to make this event-driven.
 

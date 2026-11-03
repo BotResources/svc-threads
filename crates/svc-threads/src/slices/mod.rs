@@ -48,6 +48,7 @@ mod tests {
         let sdl = sdl();
         for root in [
             "threadsThreads(",
+            "threadsChildThreads(",
             "threadsThread(",
             "threadsMessages(",
             "threadsArtifactDownload(",
@@ -55,7 +56,6 @@ mod tests {
             "threadsSetReadMark(",
             "threadsRequestArtifactUpload(",
             "threadsSetTitle(",
-            "threadsFailTitleJob(",
             "threadsThreadsDeltas(",
             "threadsThreadDeltas(",
         ] {
@@ -63,16 +63,36 @@ mod tests {
         }
     }
 
+    /// The runner sets a title without naming a Job, and has no title Job to
+    /// declare failed.
     #[test]
-    fn the_title_job_roots_are_the_ones_the_contract_names() {
+    fn the_runner_sets_a_title_without_a_job_and_the_failure_root_is_gone() {
         let sdl = sdl();
-        for root in [
-            contract_threads::title_job::CONTEXT_ROOT,
-            contract_threads::title_job::TITLE_ROOT,
-            contract_threads::title_job::FAILURE_ROOT,
-        ] {
-            assert!(sdl.contains(&format!("{root}(")), "{root} is not a root");
-        }
+        assert!(
+            sdl.contains("threadsSetTitle(threadId: UUID!, title: String!): MutationAck!"),
+            "threadsSetTitle takes a thread and a title only:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("threadsFailTitleJob("),
+            "threadsFailTitleJob is still a root:\n{sdl}"
+        );
+    }
+
+    /// The children of a thread are read like the caller's list, the same
+    /// view, by pages after a given child.
+    #[test]
+    fn the_children_of_a_thread_are_a_page_of_thread_views_after_a_child() {
+        let sdl = sdl();
+        assert!(
+            sdl.contains(
+                "threadsChildThreads(threadId: UUID!, size: Int!, after: UUID): [ThreadView!]!"
+            ),
+            "threadsChildThreads takes a thread, a size and an optional child:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("threadsChildThreadsDeltas("),
+            "the children of a thread are a query only:\n{sdl}"
+        );
     }
 
     /// Every subscription root reaches its own resolver — which, with no engine

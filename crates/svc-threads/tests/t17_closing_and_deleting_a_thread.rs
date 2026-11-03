@@ -3,16 +3,18 @@
 //! > The harness closes thread T as CANCELLED: confirmed, T reads CANCELLED,
 //! > storing a message is refused THREAD_NOT_OPEN, closing it again as
 //! > COMPLETED is refused THREAD_NOT_OPEN; members still read it. Thread U,
-//! > with a running title Job, messages, an attached artifact, resources and
-//! > read marks, is deleted: confirmed; U is answered not found to its former
-//! > members, its artifact's bytes are gone, threads.members.{U} is retracted,
-//! > job.cancel is published for its title Job, and the Deleted fact says it
-//! > was deleted on command. The later job.cancelled changes nothing. Deleting
-//! > U again is refused THREAD_NOT_FOUND.
+//! > with messages, an attached artifact, resources and read marks, is
+//! > deleted: confirmed; U is answered not found to its former members, its
+//! > artifact's bytes are gone, threads.members.{U} is retracted, and the
+//! > Deleted fact says it was deleted on command. Deleting U again is refused
+//! > THREAD_NOT_FOUND.
 //!
-//! Channels: the answers (4), the members entry (4), Jobs' commands and facts
-//! (4), the threads as members read them (2), the live feed and list (3), the
-//! artifact's read access and the bucket, the fact log.
+//! The test keeps the name the registry's technical specification gives it
+//! (`…_and_its_title_job`); since 0.7 a thread has no title Job.
+//!
+//! Channels: the answers (4), the members entry (4), the threads as members
+//! read them (2), the live feed and list (3), the artifact's read access and
+//! the bucket, the fact log.
 
 mod common;
 
@@ -96,21 +98,14 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_title_job() {
-    // Given U, owned by O with member A: resources, a first user message (its
-    // title Job running), an AI answer attaching artifact X, A's read mark. A
-    // follows their list.
+    // Given U, owned by O with member A: resources, a first user message, an
+    // AI answer attaching artifact X, A's read mark. A follows their list.
     let ctx = TestContext::setup().await;
     let (o, a) = (ctx.enrol("olga").await, ctx.enrol("ada").await);
     let mut born = creation(Some(o.id), &[a.id]);
     born.resources = BTreeMap::from([("documents".to_string(), vec!["d1".to_string()])]);
     let u = create(&ctx, born).await;
     let m1 = say(&ctx, u, None, &a, "summarise this").await;
-    let job = ctx
-        .jobs
-        .await_create(u, "U's title Job")
-        .await
-        .payload
-        .job_id;
     let runner = ctx.service_account(true);
     let file = File::csv("summary\nok\n");
     let x = upload(&ctx, &runner.passport, u, &file).await;
@@ -163,8 +158,6 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
         ctx.published_members(u).await.is_none()
     })
     .await;
-    // And (4) job.cancel is published for its title Job, once.
-    ctx.jobs.await_one_cancel(job, "U's deletion").await;
     // And (3) A's list is told once that U left it.
     a_list
         .until("U leaves A's list", |delta| removes(delta, u))
@@ -199,23 +192,6 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
     for text in ["summarise this", "the summary is done"] {
         store::assert_nowhere(&ctx.pool, text, &[], "a text of U").await;
     }
-
-    // When Jobs then confirms the cancellation.
-    let facts_before = facts::count(&ctx.pool).await;
-    let commands_before = ctx.jobs.total();
-    let events_before = ctx.nats.event_stream_len().await;
-    ctx.jobs.cancelled(&ctx.nats, job).await;
-
-    // Then it changes nothing: no fact, no command, no event of Threads'.
-    ctx.jobs
-        .expect_nothing_beyond(commands_before, "the later job.cancelled")
-        .await;
-    assert_eq!(facts::count(&ctx.pool).await, facts_before);
-    assert_eq!(
-        ctx.nats.event_stream_len().await,
-        events_before + 1,
-        "only Jobs' own fact is on the event stream"
-    );
 
     // When U is deleted again.
     let again = command(&ctx, &delete(u, o.id)).await;

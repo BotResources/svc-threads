@@ -118,9 +118,8 @@ pub struct RemoveResourceIds {
 }
 thread_command!(RemoveResourceIds, "remove_resource_ids");
 
-/// `thread.set_title` — a title set by command while the title Job runs wins:
-/// Threads cancels the Job. Refused `THREAD_NOT_FOUND`, `TITLE_EMPTY`,
-/// `TITLE_TOO_LONG`.
+/// `thread.set_title` — the only way a thread gets a title after its
+/// creation. Refused `THREAD_NOT_FOUND`, `TITLE_EMPTY`, `TITLE_TOO_LONG`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetTitle {
     pub thread_id: Uuid,
@@ -178,9 +177,8 @@ pub struct ReopenThread {
 thread_command!(ReopenThread, "reopen");
 
 /// `thread.delete` — the thread with its members, resources, messages, items,
-/// blocks, artifacts (bytes included) and read marks; its running title Job is
-/// cancelled and its members entry retracted. Child threads survive. Refused
-/// `THREAD_NOT_FOUND`.
+/// blocks, artifacts (bytes included) and read marks; its members entry is
+/// retracted. Child threads survive. Refused `THREAD_NOT_FOUND`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteThread {
     pub thread_id: Uuid,

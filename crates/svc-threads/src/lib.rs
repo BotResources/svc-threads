@@ -17,8 +17,8 @@
 //!   the messages an earlier version stored, and the thread's live feed;
 //! - [`slices::artifact`]: the files runners attach to messages, in object
 //!   storage;
-//! - [`slices::runner`]: the operations reserved to runners — a thread's
-//!   context, and the title Job's.
+//! - [`slices::runner`]: the operation reserved to runners that reads a
+//!   thread's context (the upload request is the artifact capability's).
 //!
 //! Shared mechanics: [`boot`] (the engine boot kit), [`config`] (Threads' own
 //! settings), [`register`] (everything the engine is told), [`principal`] (who

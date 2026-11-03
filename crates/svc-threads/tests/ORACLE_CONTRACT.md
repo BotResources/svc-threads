@@ -63,7 +63,9 @@ content }`.
 - Unchanged from 0.4: `CompleteMessage`, `FailMessage`, `CancelMessage`,
   `DeleteMessage`, `StreamSeal`, every thread command, the four answer events,
   `ReasonCode`, `MessageStatus`, `ClosingStatus`, `PublishedThreadMembers`,
-  `members::members_key`, `MEMBERS_MANIFEST_KEY`, `TitleJobConfig`.
+  `members::members_key`, `MEMBERS_MANIFEST_KEY`. (`TitleJobConfig` was
+  part of this list until `contract-threads` 0.7.0 removed it with the title
+  Job.)
 - The suite never uses the 0.4 content types (`Block`, `Item`, `ChunkPart`,
   `LibraryEvent`, ...). It sends `store.v1` through `contract-threads` 0.4.0 by
   its git tag (dev-dependency `contract-threads-v0-4`), as a consumer still on
@@ -154,3 +156,59 @@ in that output.
   and `fail`, version 2. `closure` is the library's closure reason JSON.
 - The closing fact's payload carries `closure`, one of `completed`,
   `budget_exhausted`, `cancelled`, `interrupted`, `failed`.
+
+## 0.7.0 changes
+
+- The title Job is gone: no `job.*` command, no Jobs stand-in in the harness,
+  no `threadsFailTitleJob` root (T12 deleted).
+- The runner's title operation stays, without its `jobId` (breaking for runner
+  clients such as the runner kit's `ThreadClient::set_title`):
+
+  ```graphql
+  threadsSetTitle(threadId: UUID!, title: String!): MutationAck!
+  ```
+
+  Open to a service account holding `threads:runner`, for any thread
+  (`RUNNER_SCOPE_REQUIRED` otherwise, a human caller included); the same
+  decision as `thread.set_title` (`TITLE_EMPTY`, `TITLE_TOO_LONG`, the same
+  title acknowledged and changing nothing, a resolved or closed thread's title
+  still settable); `THREAD_NOT_FOUND` for a thread that does not exist. Its
+  `TitleChanged` fact's payload is `{ title, by: "RUNNER" }`, its actor the
+  runner's service account (`actor_kind` `service`), no acting user; a command's
+  says `by: "COMMAND"` (T32, proposed by the oracle).
+
+- The children of a thread, a query of the human surface (T33):
+
+  ```graphql
+  threadsChildThreads(threadId: UUID!, size: Int!, after: UUID): [ThreadView!]!
+  ```
+
+  The children of `threadId` the caller is a member of, the oldest first
+  (`createdAt`, then `id`), each the very `ThreadView` `threadsThread` answers
+  for it; `after` is the last child of the previous page. An `after` that is
+  not a child of `threadId` the caller is a member of gives an empty page; a
+  thread that does not exist, or whose children the caller sees none of, an
+  empty list. `size` out of bounds is refused `WINDOW_SIZE_INVALID`, a caller
+  the human surface does not admit `ACTIVE_USER_REQUIRED`. The suite reads it
+  with `Q_CHILD_THREADS` (`common::constants`), which selects every field
+  `Q_THREAD` selects.
+
+## 0.7.0 removals
+
+- `contract-threads` 0.7.0 removes the `title_job` module: `TitleJobConfig`
+  (and its re-export at the crate root) and the root-name constants
+  `CONTEXT_ROOT`, `TITLE_ROOT` and `FAILURE_ROOT`. The suite names roots in
+  `common::constants` only.
+- The title roots of the title-Job era: `threadsFailTitleJob(threadId, jobId,
+  reasonCode, message)` is gone, with `JOB_NOT_ACTIVE` and
+  `FAILURE_REASON_INVALID`; `threadsSetTitle(threadId, jobId, title)` is gone
+  in that form and returns as a generic runner operation without `jobId`
+  (above, *0.7.0 changes*; T32).
+- The harness's Jobs stand-in (`common::jobs`: the capture of the `job.*`
+  commands Threads sent and the `job.*` events the scenarios answered with),
+  `THREADS_TITLE_RUNNER_TYPE` and `TITLE_RUNNER_TYPE`. In their place,
+  `TestContext::commands_not_sent_by_the_scenario()` counts the integration
+  commands on the bus that the scenario did not send through
+  `flows::command`: read before and after a gesture, the difference is what
+  Threads commanded meanwhile (T27 proves it nothing, from before an untitled
+  thread's first message).
