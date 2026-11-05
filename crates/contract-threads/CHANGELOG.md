@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.8.0 - 2026-11-05
+
+The published language of Threads 0.8: the summary of each thread, a new KV
+offer beside the members entry.
+
+### Added
+
+- The `summary` module: `PublishedThreadSummary { thread_id, title,
+  parent_thread_id, origin_block_id, status, resolved_at, created_at,
+  last_activity_at }`, the value of `threads.thread_summary.{thread_id}` in
+  the `PUBLISHED_LANGUAGE` bucket; `SUMMARY_PREFIX`
+  (`threads.thread_summary.`), `SUMMARY_MANIFEST_KEY`
+  (`threads.thread_summary_manifest`), `SUMMARY_VERSION` (1), `summary_key`
+  and `thread_id_from_summary_key`. `title`, `parent_thread_id`,
+  `origin_block_id` and `resolved_at` are left out of the JSON when absent;
+  `status` is the `ThreadStatus` literal; dates are RFC 3339. Re-exported at
+  the crate root: `PublishedThreadSummary`, `SUMMARY_MANIFEST_KEY`,
+  `SUMMARY_PREFIX`, `SUMMARY_VERSION`.
+- A dependency on `chrono` (the workspace's, with `serde`), for the dates of
+  the summary.
+
+### Unchanged
+
+- `PublishedThreadMembers`, its key and its manifest version: a sealed offer
+  never changes. Every command and event keeps its wire.
+
 ## 0.7.0 - 2026-11-03
 
 The published language of Threads 0.7 (registry patch 0.7.0): Threads no

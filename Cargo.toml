@@ -10,7 +10,7 @@ repository = "https://github.com/BotResources/svc-threads"
 publish = false
 
 [workspace.dependencies]
-contract-threads = { path = "crates/contract-threads", version = "0.7.0" }
+contract-threads = { path = "crates/contract-threads", version = "0.8.0" }
 
 br-llm-messages = { git = "https://github.com/BotResources/br-llm-messages-rs", package = "br-llm-messages", tag = "br-llm-messages/v2.1.0", version = "2.1.0" }
 

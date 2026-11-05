@@ -8,6 +8,7 @@ pub mod members;
 pub mod message;
 pub mod reason;
 pub mod status;
+pub mod summary;
 pub mod thread;
 pub mod v1;
 pub mod value;
@@ -36,6 +37,7 @@ pub use message::{
 };
 pub use reason::ReasonCode;
 pub use status::{ClosingStatus, MessageStatus, ThreadStatus};
+pub use summary::{PublishedThreadSummary, SUMMARY_MANIFEST_KEY, SUMMARY_PREFIX, SUMMARY_VERSION};
 pub use thread::{
     AddMembers, AddResourceIds, CloseThread, CreateThread, DeleteThread, RemoveMembers,
     RemoveResourceIds, ReopenThread, ResolveThread, SetTitle,

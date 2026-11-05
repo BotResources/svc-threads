@@ -11,6 +11,46 @@ heading exists.
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-05
+
+Threads 0.8: Threads publishes the summary of each thread, so that a service
+lists conversations without asking it (Front Agents' list of a user's agent
+conversations is the first consumer). `contract-threads` 0.8.0 adds its
+published language (see its changelog). Additive: no command, event, root or
+existing KV entry changes.
+
+### Added
+
+- **The `thread_summary` KV offer**: one `threads.thread_summary.{thread_id}`
+  entry of the `PUBLISHED_LANGUAGE` bucket per thread —
+  `{ thread_id, title?, parent_thread_id?, origin_block_id?, status,
+  resolved_at?, created_at, last_activity_at }` — and its manifest
+  `threads.thread_summary_manifest` = `{"prefix": "threads.thread_summary.",
+  "version": 1}`. Published by the engine's offer machinery like the members
+  entry: staged in the transaction of every save or deletion of a thread,
+  drained by the offer's leader, reconciled whole at boot and periodically
+  (so the threads that exist before the upgrade are published by the first
+  pod that leads the offer), retracted when the thread is deleted (on
+  command, or because its owner left the roster).
+- **When the entry moves.** `last_activity_at` is the thread's existing last
+  activity, the order of a member's list: it moves when a message is stored —
+  a complete message, or a streamed message when its stream opens. A chunk of
+  a stream, its completion, an edit or a deletion of a message never save the
+  thread, so a streamed answer rewrites the entry once (at its opening), never
+  per chunk. A save that leaves the summary as it was (members, resources,
+  read marks) writes nothing: the relay finds the value already held. Staged
+  keys coalesce per thread until drained; no timer coalescing is added.
+- e2e T34 (`t34_the_summary_of_each_thread_is_published`): creation, title,
+  a complete message moving the activity, a streamed message moving it once
+  (its chunks and its completion leave the entry's revision unchanged),
+  resolution, a child thread's parent and origin, deletion retracting the
+  key.
+
+### Unchanged
+
+- `threads.members.{thread_id}` and its manifest (version 1): same key, same
+  payload, same triggers.
+
 ## 0.7.0 - 2026-11-03
 
 Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A

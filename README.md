@@ -12,18 +12,21 @@ member's read mark — and serves them, live, to their members.
   conversation coherent.
 - Threads decides who may read: the members of a thread, and nobody else.
 - Threads publishes the members of each thread (`threads.members.{thread_id}`),
-  so that other services decide locally.
+  so that other services decide locally, and the summary of each thread
+  (`threads.thread_summary.{thread_id}`: title, parent and origin, status,
+  resolution, creation, last activity), so that they list conversations
+  without asking it.
 - Threads runs no AI logic. A conversation's title is set by command
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.7.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.8.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members KV value, the content model and the chunk format of its message stream. What a commanding service imports. |
+| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members and summary KV values, the content model and the chunk format of its message stream. What a commanding service imports. |
 | [`crates/svc-threads`](crates/svc-threads) | The service, on [`br-service-engine`](https://github.com/BotResources/br-service-engine) (fatty manner, soft EDA, multi-pod), organized by capability under `src/slices/` (`thread`, `message`, `artifact`, `runner`). |
 
 ## Running
@@ -53,6 +56,15 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.7 → 0.8
+
+Additive. 0.8 publishes one more KV family, `threads.thread_summary.*`, and
+its manifest; nothing is migrated and no existing key, command, event or root
+changes. The first 0.8 pod that leads the offer reconciles the whole keyspace,
+so every existing thread gets its summary entry shortly after the rollout. A
+consumer of the summaries (Front Agents 0.9) is rolled out after Threads 0.8:
+before it, the family is empty and the consumer lists nothing.
 
 ## Deploy: 0.6 → 0.7
 

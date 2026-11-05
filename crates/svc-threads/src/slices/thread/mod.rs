@@ -1,5 +1,5 @@
 //! The thread capability: a thread, its members, resources and read marks;
-//! the thread commands; the thread views; the members KV offer.
+//! the thread commands; the thread views; the members and summary KV offers.
 //!
 //! - `state`: the canonical thread, its visibility (membership) and its unsaved
 //!   changes;
@@ -18,6 +18,9 @@
 //! - `view`: the caller's threads, for the queries, the snapshot and the live
 //!   deltas;
 //! - `offer`: `threads.members.{thread_id}`;
+//! - `summary_offer`: `threads.thread_summary.{thread_id}` (title, origin,
+//!   status, resolution, creation, last activity), for the services that list
+//!   conversations;
 //! - `graphql`: the roots.
 //!
 //! Reactivity ledger of the threads view (`threadsThreads`, `threadsThread`,
@@ -52,6 +55,7 @@ pub mod resolution;
 pub mod runner_title;
 pub mod state;
 pub mod store;
+pub mod summary_offer;
 pub mod transitions;
 pub mod view;
 
@@ -85,6 +89,7 @@ literal_enum! {
 pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError> {
     engine.register_projector(view::ThreadsFeed::default())?;
     engine.register_offer::<offer::MembersOffer>()?;
+    engine.register_offer::<summary_offer::SummaryOffer>()?;
 
     engine.register_reaction("threads-thread-create", commands::create)?;
     engine.register_reaction("threads-thread-add-members", commands::add_members)?;
