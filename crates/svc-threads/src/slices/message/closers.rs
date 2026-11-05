@@ -16,9 +16,9 @@ use super::commands::{Verdict, message_of, open_thread, refuse_on};
 use super::draft::TurnDraft;
 use super::stream::TurnContent;
 use crate::command::{Call, Inbound, Refusal, answer_message};
+use crate::fault::Fault;
 use crate::slices::thread::ThreadCause;
 use crate::slices::thread::state::Thread;
-use crate::fault::Fault;
 
 const SEAL_TRUNCATION_ATTEMPTS: u32 = 6;
 
@@ -190,7 +190,8 @@ async fn close_message(
         artifacts = refuse_on!(closing::precheck_completion(cx, &state, &preview, &closing).await?);
     }
     let sealed = refuse_on!(seal(cx, state.id, closer.seal).await?);
-    let outcome = closing::store_closed(cx, state, &sealed, &closing, artifacts, &call.meta).await?;
+    let outcome =
+        closing::store_closed(cx, state, &sealed, &closing, artifacts, &call.meta).await?;
     // The writer ended its answer: the thread's activity moves to the close,
     // so a conversation rises when an agent finishes answering, not only when
     // it starts. One save here and one at the stream's opening; never per
