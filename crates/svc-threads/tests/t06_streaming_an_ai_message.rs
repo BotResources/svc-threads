@@ -333,13 +333,35 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         .await
         .expect("a member reads the attached artifact");
     assert_eq!(fetch(&url).await, (200, file.bytes.clone()));
-    // And (3) A's feed carries the completion, and O's on the second pod.
+    // And (3) A's feed carries the completion, and O's on the second pod —
+    // M2 COMPLETED, and T, whose activity the close moved (0.8), in either
+    // order.
+    let closed_at =
+        common::flows::thread_view(&ctx, &a.passport, t).await["lastActivityAt"].clone();
     let sealed_live =
         |delta: &Value| upsert_of(delta, m2).is_some_and(|view| view["status"] == "COMPLETED");
-    a_feed.until("A sees M2 COMPLETED", sealed_live).await;
-    o_on_pod2
-        .until("O sees M2 COMPLETED on pod 2", sealed_live)
-        .await;
+    let t_moved =
+        |delta: &Value| upsert_of(delta, t).is_some_and(|view| view["lastActivityAt"] == closed_at);
+    let (mut a_sealed, mut a_moved) = (false, false);
+    while !(a_sealed && a_moved) {
+        let delta = a_feed
+            .until("A sees M2 COMPLETED and T's activity moved", |d| {
+                sealed_live(d) || t_moved(d)
+            })
+            .await;
+        a_sealed |= sealed_live(&delta);
+        a_moved |= t_moved(&delta);
+    }
+    let (mut o_sealed, mut o_moved) = (false, false);
+    while !(o_sealed && o_moved) {
+        let delta = o_on_pod2
+            .until("O sees M2 COMPLETED and T's activity moved on pod 2", |d| {
+                sealed_live(d) || t_moved(d)
+            })
+            .await;
+        o_sealed |= sealed_live(&delta);
+        o_moved |= t_moved(&delta);
+    }
 
     // And the facts recorded M2's opening, each entry, and its end — never a
     // chunk.

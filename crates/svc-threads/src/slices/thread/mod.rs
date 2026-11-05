@@ -31,7 +31,7 @@
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
+//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored, a streamed message closed by its writer | resource, `thread` noun | Upsert; the open head repopulates on activity |
 //! | resolution (resolved by, resolved at) | resolve, reopen | resource, `thread` noun | Upsert |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
@@ -83,6 +83,7 @@ literal_enum! {
         Deleted => "DELETED",
         ReadMarkSet => "READ_MARK_SET",
         MessageStored => "MESSAGE_STORED",
+        MessageClosed => "MESSAGE_CLOSED",
     }
 }
 

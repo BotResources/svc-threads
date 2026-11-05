@@ -12,11 +12,12 @@
 //! leaves untouched — and neither are the resources, the messages or the read
 //! marks.
 //!
-//! `last_activity_at` is the date of the thread's latest stored message (the
+//! `last_activity_at` is the date of the thread's latest message activity (the
 //! creation date while there is none), the very value Threads orders a member's
 //! list by. It moves when a message is stored — a complete message, or a
-//! streamed one when its stream opens — never on a chunk of a stream, so the
-//! entry is not rewritten while an answer streams.
+//! streamed one when its stream opens — and when the writer of a streamed
+//! message closes it (complete, fail or cancel); never on a chunk of a stream,
+//! so the entry is rewritten twice per streamed answer, not per chunk.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -64,8 +65,8 @@ pub struct PublishedThreadSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    /// The date of the latest stored message, or the creation date while there
-    /// is none.
+    /// The date of the latest message stored or streamed message closed by its
+    /// writer, or the creation date while there is none.
     pub last_activity_at: DateTime<Utc>,
 }
 

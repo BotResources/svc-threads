@@ -16,6 +16,8 @@ use super::commands::{Verdict, message_of, open_thread, refuse_on};
 use super::draft::TurnDraft;
 use super::stream::TurnContent;
 use crate::command::{Call, Inbound, Refusal, answer_message};
+use crate::slices::thread::ThreadCause;
+use crate::slices::thread::state::Thread;
 use crate::fault::Fault;
 
 const SEAL_TRUNCATION_ATTEMPTS: u32 = 6;
@@ -170,7 +172,9 @@ async fn close_message(
     call: &Call,
     closer: &Closer<'_>,
 ) -> Result<Verdict, Fault> {
-    refuse_on!(open_thread(cx, closer.thread).await?);
+    // The thread is loaded (and row-locked) before the message, as every
+    // message command does: one lock order, thread then message.
+    let mut thread = refuse_on!(open_thread(cx, closer.thread).await?);
     let state = refuse_on!(message_of(cx, closer.thread, closer.message).await?);
     if let Some(refusal) = state.not_streaming() {
         return Ok(Err(refusal));
@@ -186,7 +190,14 @@ async fn close_message(
         artifacts = refuse_on!(closing::precheck_completion(cx, &state, &preview, &closing).await?);
     }
     let sealed = refuse_on!(seal(cx, state.id, closer.seal).await?);
-    closing::store_closed(cx, state, &sealed, &closing, artifacts, &call.meta)
-        .await
-        .map(Ok)
+    let outcome = closing::store_closed(cx, state, &sealed, &closing, artifacts, &call.meta).await?;
+    // The writer ended its answer: the thread's activity moves to the close,
+    // so a conversation rises when an agent finishes answering, not only when
+    // it starts. One save here and one at the stream's opening; never per
+    // chunk. An idle stream failed by the watch is not a writer's close and
+    // moves nothing.
+    thread.record_activity(call.meta.occurred_at);
+    cx.save(&thread).await?;
+    cx.impact_caused::<Thread, _>(&thread.id, ThreadCause::MessageClosed)?;
+    Ok(Ok(outcome))
 }

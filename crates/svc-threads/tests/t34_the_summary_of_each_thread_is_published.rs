@@ -8,7 +8,8 @@
 //! > carries it, the activity unmoved. A's complete message M1 moves the
 //! > activity to M1's storage, the date T's members read. An AI message M2
 //! > opened STREAMING moves it once, at its opening; the chunks of its stream
-//! > and its completion rewrite nothing — the entry's revision holds. Resolving
+//! > rewrite nothing — the entry's revision holds; its completion moves it
+//! > once more, to the close, and the entry then holds. Resolving
 //! > T publishes its resolution, T still OPEN. A child C of T, started from a
 //! > block of T, carries T as its parent and that block as its origin. Deleting
 //! > T retracts its summary (and its members entry); C's summary stays,
@@ -180,20 +181,38 @@ async fn t34_each_thread_publishes_its_summary_which_follows_title_activity_and_
     );
     let completed = command(&ctx, &completion(t, m2, last_seq, &hash)).await;
 
-    // Then (4) M2 is COMPLETED and the entry is still the one its opening
-    // wrote: the completion rewrites nothing.
+    // Then (4) M2 is COMPLETED and the completion moves the activity, once: the
+    // entry is rewritten with the close's date — the date T's members read —
+    // and nothing else changes; then it holds.
     message_confirmed(&ctx, completed, MessageStatus::Completed, "M2 sealed").await;
-    let (sealed, revision_sealed) = settled(&ctx, t).await;
-    assert_eq!(
+    let (sealed, revision_sealed) =
+        summary_until(&ctx, t, "M2's completion moves T's activity", |entry| {
+            entry.last_activity_at > opened.last_activity_at
+        })
+        .await;
+    assert_ne!(
         revision_sealed, revision_opened,
         "the completion rewrote the summary"
     );
-    assert_eq!(sealed, opened);
+    assert_eq!(
+        sealed,
+        PublishedThreadSummary {
+            last_activity_at: sealed.last_activity_at,
+            ..opened.clone()
+        },
+        "the completion moves the activity alone"
+    );
     assert_eq!(
         sealed.last_activity_at,
         at(&thread_view(&ctx, &a.passport, t).await, "lastActivityAt"),
         "the summary's activity is the one T's members read"
     );
+    let (held, revision_held) = settled(&ctx, t).await;
+    assert_eq!(
+        revision_held, revision_sealed,
+        "the completion rewrote the summary once"
+    );
+    assert_eq!(held, sealed);
 
     // ── the resolution ───────────────────────────────────────────────────
 

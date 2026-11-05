@@ -11,12 +11,13 @@
 //! `threads.thread_summary_manifest`.
 //!
 //! What moves the entry, and how often: a thread is saved by its commands
-//! (title, close, resolve, members, resources, read marks) and when a message
-//! is stored — a complete message, or a streamed one when its stream opens —
-//! which moves `last_activity_at` (`ThreadState::record_activity`). A chunk of a
-//! stream, its completion and a message's edit or deletion never save the
-//! thread, so a streamed answer rewrites the entry once, at its opening, never
-//! per chunk. Saves that leave the summary as it was (members, resources, read
+//! (title, close, resolve, members, resources, read marks), when a message is
+//! stored — a complete message, or a streamed one when its stream opens — and
+//! when its writer closes a streamed message (complete, fail or cancel), each
+//! of which moves `last_activity_at` (`ThreadState::record_activity`). A chunk
+//! of a stream and a message's edit or deletion never save the thread, so a
+//! streamed answer rewrites the entry twice — at its opening and at its close —
+//! never per chunk. Saves that leave the summary as it was (members, resources, read
 //! marks) are staged too, but the relay finds the entry already holding that
 //! value and writes nothing; staged keys coalesce per thread until drained.
 //! No timer coalescing is needed on top.

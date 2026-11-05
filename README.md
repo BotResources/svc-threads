@@ -59,9 +59,12 @@ honouring POST-policy checksum conditions.
 
 ## Deploy: 0.7 → 0.8
 
-Additive. 0.8 publishes one more KV family, `threads.thread_summary.*`, and
-its manifest; nothing is migrated and no existing key, command, event or root
-changes. The first 0.8 pod that leads the offer reconciles the whole keyspace,
+0.8 publishes one more KV family, `threads.thread_summary.*`, and its
+manifest; nothing is migrated and no existing key, command or event changes.
+One behaviour changes: a streamed message closed by its writer (complete,
+fail, cancel) now moves the thread's `lastActivityAt`, so `threadsThreads`
+orders a thread by the end of its latest answer, not only its start (a
+`MESSAGE_CLOSED` delta cause). The first 0.8 pod that leads the offer reconciles the whole keyspace,
 so every existing thread gets its summary entry shortly after the rollout. A
 consumer of the summaries (Front Agents 0.9) is rolled out after Threads 0.8:
 before it, the family is empty and the consumer lists nothing.

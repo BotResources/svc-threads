@@ -493,8 +493,8 @@ impl ThreadState {
         Fact::new(DELETED, &DeletedFact { reason }, meta)
     }
 
-    /// A message was stored: the thread's activity moves to its date (the
-    /// order of its members' lists). Not a change of the thread: no fact, no
+    /// A message was stored, or a streamed message closed by its writer: the
+    /// thread's activity moves to that date (the order of its members' lists). Not a change of the thread: no fact, no
     /// version.
     pub fn record_activity(&mut self, at: DateTime<Utc>) {
         if at > self.last_activity_at {
