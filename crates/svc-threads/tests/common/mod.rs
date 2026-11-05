@@ -73,7 +73,7 @@ use br_test_harness::{
     E2eDatabase, FabricTestNats, GraphqlClient, SpawnedProcess, run_once, wait_until,
 };
 use br_util_nats_fabric::KvKey;
-use contract_threads::PublishedThreadMembers;
+use contract_threads::{PublishedThreadMembers, PublishedThreadSummary};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -799,6 +799,32 @@ impl TestContext {
             .get_with_revision(&key)
             .await
             .expect("read the published language")
+    }
+
+    /// The `threads.thread_summary.{thread_id}` entry and its revision, if
+    /// published: an unchanged revision proves nothing rewrote it.
+    pub async fn summary_entry(
+        &self,
+        thread: Uuid,
+    ) -> Option<(PublishedThreadSummary, br_util_nats_fabric::Revision)> {
+        let key = KvKey::new(contract_threads::summary::summary_key(thread))
+            .expect("a summary key is a valid KV key");
+        self.nats
+            .pl_reader::<PublishedThreadSummary>()
+            .await
+            .get_with_revision(&key)
+            .await
+            .expect("read the published language")
+    }
+
+    /// The raw manifest of the summary offer, if published.
+    pub async fn summary_manifest(&self) -> Option<Value> {
+        let key = KvKey::new(contract_threads::SUMMARY_MANIFEST_KEY)
+            .expect("the manifest key is a valid KV key");
+        self.nats
+            .pl_get_raw(&key)
+            .await
+            .map(|bytes| serde_json::from_slice(&bytes).expect("a JSON manifest"))
     }
 
     /// The raw manifest of the members offer, if published.

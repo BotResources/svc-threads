@@ -89,8 +89,9 @@ pub struct ThreadView {
     /// When it was resolved, set together with `resolvedBy`.
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    /// The date of the latest message, or the creation date while there is
-    /// none: the order of the list.
+    /// The date of the latest message — stored, or a streamed one closed by
+    /// its writer —, or the creation date while there is none: the order of
+    /// the list.
     pub last_activity_at: DateTime<Utc>,
     pub version: i64,
     pub members: Vec<MemberView>,

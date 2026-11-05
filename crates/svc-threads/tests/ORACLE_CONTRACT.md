@@ -212,3 +212,18 @@ in that output.
   `flows::command`: read before and after a gesture, the difference is what
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
+
+## 0.8.0 additions
+
+- `contract-threads` 0.8.0, module `summary`: `PublishedThreadSummary {
+  thread_id, title: Option<String>, parent_thread_id: Option<Uuid>,
+  origin_block_id: Option<Uuid>, status: ThreadStatus, resolved_at:
+  Option<DateTime<Utc>>, created_at, last_activity_at }`, `SUMMARY_PREFIX`
+  (`threads.thread_summary.`), `SUMMARY_MANIFEST_KEY`
+  (`threads.thread_summary_manifest`), `SUMMARY_VERSION` (1) and
+  `summary_key(thread_id)`.
+- `TestContext::summary_entry(thread)` reads the entry with its KV revision
+  (an unchanged revision proves nothing rewrote it), and
+  `TestContext::summary_manifest()` the raw manifest. T34 asserts the entry
+  against the thread as its members read it (`createdAt`, `lastActivityAt`,
+  `resolvedAt`, `parentThreadId`, `originBlockId`).

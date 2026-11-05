@@ -1,5 +1,5 @@
 //! The thread capability: a thread, its members, resources and read marks;
-//! the thread commands; the thread views; the members KV offer.
+//! the thread commands; the thread views; the members and summary KV offers.
 //!
 //! - `state`: the canonical thread, its visibility (membership) and its unsaved
 //!   changes;
@@ -18,6 +18,9 @@
 //! - `view`: the caller's threads, for the queries, the snapshot and the live
 //!   deltas;
 //! - `offer`: `threads.members.{thread_id}`;
+//! - `summary_offer`: `threads.thread_summary.{thread_id}` (title, origin,
+//!   status, resolution, creation, last activity), for the services that list
+//!   conversations;
 //! - `graphql`: the roots.
 //!
 //! Reactivity ledger of the threads view (`threadsThreads`, `threadsThread`,
@@ -28,7 +31,7 @@
 //!
 //! | input | change cause | impact | delta |
 //! |---|---|---|---|
-//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored | resource, `thread` noun | Upsert; the open head repopulates on activity |
+//! | thread row (title, status, last activity, origin) | set title (command or runner), close, a message stored, a streamed message closed by its writer | resource, `thread` noun | Upsert; the open head repopulates on activity |
 //! | resolution (resolved by, resolved at) | resolve, reopen | resource, `thread` noun | Upsert |
 //! | members | create, add/remove members | resource, `thread` noun + principal facts of each user added or removed (`MEMBERSHIP_DEPS`) | Upsert; Remove for a removed member (visibility lost); Upsert for an added one (visibility gained) |
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
@@ -52,6 +55,7 @@ pub mod resolution;
 pub mod runner_title;
 pub mod state;
 pub mod store;
+pub mod summary_offer;
 pub mod transitions;
 pub mod view;
 
@@ -79,12 +83,14 @@ literal_enum! {
         Deleted => "DELETED",
         ReadMarkSet => "READ_MARK_SET",
         MessageStored => "MESSAGE_STORED",
+        MessageClosed => "MESSAGE_CLOSED",
     }
 }
 
 pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError> {
     engine.register_projector(view::ThreadsFeed::default())?;
     engine.register_offer::<offer::MembersOffer>()?;
+    engine.register_offer::<summary_offer::SummaryOffer>()?;
 
     engine.register_reaction("threads-thread-create", commands::create)?;
     engine.register_reaction("threads-thread-add-members", commands::add_members)?;

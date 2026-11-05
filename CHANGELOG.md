@@ -11,6 +11,63 @@ heading exists.
 
 ## Unreleased
 
+## 0.8.0 - 2026-11-05
+
+Threads 0.8: Threads publishes the summary of each thread, so that a service
+lists conversations without asking it (Front Agents' list of a user's agent
+conversations is the first consumer). `contract-threads` 0.8.0 adds its
+published language (see its changelog). Additive: no command, event, root or
+existing KV entry changes.
+
+### Added
+
+- **The `thread_summary` KV offer**: one `threads.thread_summary.{thread_id}`
+  entry of the `PUBLISHED_LANGUAGE` bucket per thread —
+  `{ thread_id, title?, parent_thread_id?, origin_block_id?, status,
+  resolved_at?, created_at, last_activity_at }` — and its manifest
+  `threads.thread_summary_manifest` = `{"prefix": "threads.thread_summary.",
+  "version": 1}`. Published by the engine's offer machinery like the members
+  entry: staged in the transaction of every save or deletion of a thread,
+  drained by the offer's leader, reconciled whole at boot and periodically
+  (so the threads that exist before the upgrade are published by the first
+  pod that leads the offer), retracted when the thread is deleted (on
+  command, or because its owner left the roster).
+- **When the entry moves.** `last_activity_at` is the thread's last
+  activity, the order of a member's list: it moves when a message is stored —
+  a complete message, or a streamed message when its stream opens — and when
+  the writer of a streamed message closes it (see *Changed*). A chunk of a
+  stream, an edit or a deletion of a message never save the thread, so a
+  streamed answer rewrites the entry twice (opening and close), never per
+  chunk. A save that leaves the summary as it was (members, resources,
+  read marks) writes nothing: the relay finds the value already held. Staged
+  keys coalesce per thread until drained; no timer coalescing is added.
+- e2e T34 (`t34_the_summary_of_each_thread_is_published`): creation, title,
+  a complete message moving the activity, a streamed message moving it at its
+  opening (its chunks leave the entry's revision unchanged) and once more at
+  its completion,
+  resolution, a child thread's parent and origin, deletion retracting the
+  key.
+
+### Changed
+
+- **A streamed message closed by its writer moves the thread's last
+  activity.** `message.complete` (v1, v2), `message.fail` (v1, v2) and
+  `message.cancel` of a `STREAMING` message now load the thread (row lock,
+  thread before message, the order every message command takes), move its
+  `last_activity_at` to the close and save it — so a conversation rises when
+  an agent finishes answering, not only when it starts. This **changes the
+  order of `threadsThreads` / `threadsThreadsDeltas`**: a thread whose answer
+  just completed moves to the top of its members' lists (an `Upsert` with the
+  new cause `MESSAGE_CLOSED`, and the open head repopulates), and its
+  `lastActivityAt` reads the close's date. A stream failed by the idle watch
+  (`stream_idle`) is not a writer's close and moves nothing. No fact, no
+  version bump: activity is not a change of the thread.
+
+### Unchanged
+
+- `threads.members.{thread_id}` and its manifest (version 1): same key, same
+  payload, same triggers.
+
 ## 0.7.0 - 2026-11-03
 
 Threads 0.7 (registry patch 0.7.0): Threads no longer names a conversation. A
