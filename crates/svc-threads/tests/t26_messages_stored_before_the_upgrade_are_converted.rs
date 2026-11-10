@@ -510,7 +510,17 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     // The ARTIFACT block, an annotation after its entry, under its id.
     assert_eq!(
         entries_of(&v2)[2]["annotations"],
-        json!([{ "id": attaching_id, "index": 0, "kind": "ARTIFACT", "content": { "artifact_id": x } }]),
+        json!([{
+            "id": attaching_id,
+            "index": 0,
+            "kind": "ARTIFACT",
+            "content": {
+                "artifact_id": x,
+                "name": file.name,
+                "media_type": file.media_type,
+                "size": file.bytes.len(),
+            },
+        }]),
         "{v2}"
     );
     assert_eq!(entries_of(&v2)[0]["annotations"], json!([]));

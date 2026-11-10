@@ -259,7 +259,12 @@ async fn t25_a_message_stored_with_store_v1_is_converted_and_answered_on_the_sam
             "id": attaching_id,
             "index": 0,
             "kind": "ARTIFACT",
-            "content": { "artifact_id": artifact },
+            "content": {
+                "artifact_id": artifact,
+                "name": file.name,
+                "media_type": file.media_type,
+                "size": file.bytes.len(),
+            },
         }]),
         "{view}"
     );
