@@ -18,6 +18,7 @@ use service_engine::wire::Noun;
 use service_engine::{Cohort, Deps};
 use uuid::Uuid;
 
+use crate::access;
 use crate::facts::{Fact, FactMeta};
 use crate::literal::literal_enum;
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
@@ -52,6 +53,36 @@ impl Visibility for Artifact {
             .map(|user| Cohort::uuid(MEMBER_DIM, user))
             .into_iter()
             .collect()
+    }
+}
+
+/// The cohort dimension of the runners' reach.
+pub const RUNNER_DIM: &str = "runner";
+
+/// A runner reads back an `ATTACHED` artifact of any thread, as it reads any
+/// thread's context; a `PENDING` artifact is reached by nobody this way. Its
+/// one input is the runner admission (`threads:runner`, from the Passport): no
+/// principal fact.
+pub struct RunnerReach;
+
+impl Visibility for RunnerReach {
+    type Row = ArtifactState;
+    type Principal = ThreadsPrincipal;
+
+    fn cohorts(row: &ArtifactState) -> Cohorts {
+        if row.status == ArtifactStatus::Attached {
+            vec![Cohort::flag(RUNNER_DIM, true)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn memberships(principal: &ThreadsPrincipal) -> Cohorts {
+        if access::runner_surface(principal).is_allowed() {
+            vec![Cohort::flag(RUNNER_DIM, true)]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -224,18 +255,19 @@ mod tests {
         assert!(ArtifactStatus::from_db("pending").is_err());
     }
 
-    #[test]
-    fn only_a_pending_artifact_of_the_same_thread_is_attachable() {
-        let thread = Uuid::now_v7();
-        let meta = FactMeta {
+    fn meta() -> FactMeta {
+        FactMeta {
             actor: br_core_integration::Actor::Service(Uuid::now_v7().into()),
             acting_user_id: None,
             impersonator_id: None,
             correlation_id: Uuid::now_v7(),
             causation_id: None,
             occurred_at: Utc::now(),
-        };
-        let mut artifact = ArtifactState::requested(
+        }
+    }
+
+    fn requested(thread: Uuid) -> ArtifactState {
+        ArtifactState::requested(
             Declared {
                 id: Uuid::now_v7(),
                 thread_id: thread,
@@ -246,9 +278,45 @@ mod tests {
                 blob_ref: Uuid::now_v7(),
             },
             Utc::now(),
-            &meta,
+            &meta(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn a_runner_reaches_an_attached_artifact_of_any_thread_and_nobody_else_does() {
+        use crate::principal::tests::{active, person, service};
+
+        let runner = service(&[crate::scopes::RUNNER]);
+        let mut artifact = requested(Uuid::now_v7());
+        assert!(
+            !RunnerReach::visible(&artifact, &runner),
+            "a PENDING artifact is never given"
+        );
+        artifact.attach(Uuid::now_v7(), &meta()).unwrap();
+        assert!(RunnerReach::visible(&artifact, &runner));
+
+        let member = person(false, active());
+        artifact.members.insert(member.active_user().unwrap());
+        assert!(Artifact::visible(&artifact, &member), "a member's own path");
+        for (caller, what) in [
+            (service(&[]), "a service account without threads:runner"),
+            (member, "a member of its thread"),
+            (person(true, active()), "a super user"),
+        ] {
+            assert!(!RunnerReach::visible(&artifact, &caller), "{what}");
+        }
+        assert!(
+            !Artifact::visible(&artifact, &runner),
+            "a runner is no member: the members' path stays theirs"
+        );
+    }
+
+    #[test]
+    fn only_a_pending_artifact_of_the_same_thread_is_attachable() {
+        let thread = Uuid::now_v7();
+        let meta = meta();
+        let mut artifact = requested(thread);
         assert!(artifact.attachable_to(thread));
         assert!(!artifact.attachable_to(Uuid::now_v7()));
         artifact.attach(Uuid::now_v7(), &meta).unwrap();

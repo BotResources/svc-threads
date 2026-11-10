@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::access;
 use crate::fault::{corrupt, encode};
 use crate::principal::ThreadsPrincipal;
+use crate::slices::artifact::context::{self as artifact_context, ContextArtifact};
 use crate::slices::message::closing::judge_streams;
 use crate::slices::message::state::{MessageAuthor, MessageState};
 use crate::slices::message::store::{block_of_row, entry_of_row};
@@ -37,6 +38,8 @@ pub struct ThreadContext {
     pub projected_thread: Option<JsonScalar>,
     pub members: Vec<MemberView>,
     pub resources: Vec<ResourceView>,
+    /// The `ATTACHED` artifacts of the messages of the conversation, beside it.
+    pub artifacts: Vec<ContextArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -270,6 +273,8 @@ async fn read(
     if closed_meanwhile(conn, &branch.streaming()).await? {
         branch = read_branch(conn, chunks, key, agent).await?;
     }
+    let messages: Vec<Uuid> = branch.turns.iter().map(|turn| turn.message.id).collect();
+    let artifacts = artifact_context::of_messages(conn, &messages).await?;
     let records = branch
         .turns
         .iter()
@@ -301,7 +306,7 @@ async fn read(
             )
         }
     };
-    Ok(Some(context_of(&thread, read)))
+    Ok(Some(context_of(&thread, read, artifacts)))
 }
 
 async fn closed_meanwhile(
@@ -479,7 +484,7 @@ enum Read {
     Projected(serde_json::Value),
 }
 
-fn context_of(thread: &ThreadState, read: Read) -> ThreadContext {
+fn context_of(thread: &ThreadState, read: Read, artifacts: Vec<ContextArtifact>) -> ThreadContext {
     let (conversation, projected_thread) = match read {
         Read::Whole(json) => (Some(async_graphql::Json(json)), None),
         Read::Projected(json) => (None, Some(async_graphql::Json(json))),
@@ -505,6 +510,7 @@ fn context_of(thread: &ThreadState, read: Read) -> ThreadContext {
                 ids: ids.clone(),
             })
             .collect(),
+        artifacts,
     }
 }
 

@@ -3,7 +3,9 @@
 //!
 //! - `context`: a thread's context — the agent context of the agent a runner
 //!   names (the library's projected thread), or the whole active branch as a
-//!   `br-llm-messages/5` conversation; plus its members and resources;
+//!   `br-llm-messages/5` conversation; plus its members, its resources and the
+//!   attached artifacts of the conversation's messages (read, and signed on
+//!   demand, by the artifact capability: `artifact::context`);
 //! - `graphql`: the roots — `threadsContext`, and `threadsSetTitle`, whose
 //!   decision, write and impact are the thread capability's
 //!   (`thread::runner_title`, the second ingress of `thread.set_title`).

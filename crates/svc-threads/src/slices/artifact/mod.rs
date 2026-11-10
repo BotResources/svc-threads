@@ -1,14 +1,17 @@
 //! The artifact capability: the files runners and AIs produce for a thread, in
 //! Threads' object storage behind the engine's blob references.
 //!
-//! - `state`: the canonical artifact, its visibility (the thread's members) and
-//!   its facts;
+//! - `state`: the canonical artifact, its two visibilities (the thread's
+//!   members; runners, once attached) and its facts;
 //! - `store`: its row, soft EDA; it lists its blob reference, so deleting it
 //!   releases its bytes;
 //! - `lifecycle`: the upload request, attaching (by a message naming it), the
 //!   end of the upload window, removal with a message or a thread, and the
 //!   purge of the bytes once a removal committed;
-//! - `view`: the download's gate;
+//! - `view`: the download's two gates — a member of its thread, or a runner for
+//!   an attached artifact of any thread;
+//! - `read_access`: the time-bounded read access both sign through;
+//! - `context`: what a runner receives of artifacts with a thread's context;
 //! - `graphql`: the roots.
 //!
 //! A runner requests an upload for a thread and receives a time-bounded upload
@@ -18,10 +21,14 @@
 //! present with the declared digest; a `PENDING` artifact never attached is
 //! removed at the end of the upload window. A member reads it through a
 //! time-bounded read access once the engine verified its bytes; it lives as long
-//! as its message.
+//! as its message. A runner receives, with a thread's context, the attached
+//! artifacts of the messages of the conversation it receives, and a read access
+//! to each it asks for.
 
+pub mod context;
 pub mod graphql;
 pub mod lifecycle;
+pub mod read_access;
 pub mod state;
 pub mod store;
 pub mod view;
