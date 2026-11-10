@@ -20,7 +20,7 @@ member's read mark — and serves them, live, to their members.
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.9.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.9.1.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 

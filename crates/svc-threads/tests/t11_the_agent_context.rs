@@ -341,9 +341,14 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
             json!({ "id": annotation["id"], "kind": annotation["kind"], "content": annotation["content"] })
         })
         .collect();
+    let mut pinned_read = annotation_view(&pinned);
+    pinned_read["content"]["name"] = json!(file.name);
+    pinned_read["content"]["media_type"] = json!(file.media_type);
+    pinned_read["content"]["size"] = json!(file.bytes.len());
     assert_eq!(
         read,
-        vec![annotation_view(&pinned), annotation_view(&partial)]
+        vec![pinned_read, annotation_view(&partial)],
+        "a member reads the attached artifact's name, media type and size (0.9.1)"
     );
 
     let for_a2 = projected_of(&context(&ctx, &runner.passport, t, Some(&critic)).await);

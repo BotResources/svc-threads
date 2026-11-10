@@ -213,6 +213,17 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.9.1 changes
+
+- The `content` of an `ARTIFACT` annotation in a member's message view
+  (`threadsMessages`, `threadsThreadDeltas`) is `{ artifact_id, name,
+  media_type, size }`, read from the artifact attached to that message;
+  `{ artifact_id }` alone when the artifact is not attached to it (a stream's
+  annotation before its close). T06, T11, T25 and T26 assert the new content
+  where they read an `ARTIFACT` annotation; T13's
+  third scenario asserts it in the paged read, live and in a `Reset`, and
+  that a runner's conversation still carries no annotation.
+
 ## 0.9.0 additions
 
 - `ThreadContext.artifacts: [ContextArtifact!]!` and `ContextArtifact { id:

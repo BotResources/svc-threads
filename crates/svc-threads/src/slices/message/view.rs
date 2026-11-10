@@ -54,6 +54,7 @@ use super::stream::{MessageStream, TurnContent};
 use crate::directory::KNOWN_USER_NAMESPACE;
 use crate::fault::{corrupt, encode};
 use crate::principal::{MEMBERSHIP_DEPS, ROSTER_DEPS, ThreadsPrincipal};
+use crate::slices::artifact::label::ArtifactLabels;
 use crate::slices::thread::state::UnknownStoredValue;
 
 /// A message's status, as GraphQL shows it.
@@ -219,8 +220,15 @@ fn json_of<T: Serialize>(value: &T, what: &'static str) -> Result<JsonScalar, En
         .map_err(|source| encode(what, source))
 }
 
-/// The annotations placed after `entry`, as members see them.
-fn annotation_views(content: &Content, entry: Uuid) -> Result<Vec<AnnotationView>, EngineError> {
+/// The annotations placed after `entry` of `message`, as members see them:
+/// an `ARTIFACT` annotation's content with the artifact's label
+/// ([`ArtifactLabels::label`]).
+fn annotation_views(
+    message: Uuid,
+    content: &Content,
+    entry: Uuid,
+    labels: &ArtifactLabels,
+) -> Result<Vec<AnnotationView>, EngineError> {
     content
         .annotations
         .iter()
@@ -229,15 +237,20 @@ fn annotation_views(content: &Content, entry: Uuid) -> Result<Vec<AnnotationView
         .map(|(index, placed)| {
             let mut body = serde_json::to_value(&placed.annotation.body)
                 .map_err(|source| encode("an annotation", source))?;
+            let mut shown = body
+                .get_mut("content")
+                .map(serde_json::Value::take)
+                .unwrap_or_default();
+            if placed.annotation.kind() == AnnotationKind::Artifact
+                && let Some(fields) = shown.as_object_mut()
+            {
+                labels.label(message, fields);
+            }
             Ok(AnnotationView {
                 id: placed.annotation.id,
                 index: index as i32,
                 kind: placed.annotation.kind().into(),
-                content: async_graphql::Json(
-                    body.get_mut("content")
-                        .map(serde_json::Value::take)
-                        .unwrap_or_default(),
-                ),
+                content: async_graphql::Json(shown),
             })
         })
         .collect()
@@ -247,7 +260,11 @@ fn annotation_views(content: &Content, entry: Uuid) -> Result<Vec<AnnotationView
 /// entry as the library reads it back (its turn rebuilt from the records, so
 /// what is shown is what the library loads), each response still produced or
 /// interrupted as the library's draft snapshot.
-fn entry_views(message: &MessageState, content: &Content) -> Result<Vec<EntryView>, EngineError> {
+fn entry_views(
+    message: &MessageState,
+    content: &Content,
+    labels: &ArtifactLabels,
+) -> Result<Vec<EntryView>, EngineError> {
     if content.entries.is_empty() {
         return Ok(Vec::new());
     }
@@ -295,7 +312,7 @@ fn entry_views(message: &MessageState, content: &Content) -> Result<Vec<EntryVie
             kind: entry.kind().as_str().to_owned(),
             state: state_view(state)?,
             content: shown,
-            annotations: annotation_views(content, entry.id().as_uuid())?,
+            annotations: annotation_views(message.id, content, entry.id().as_uuid(), labels)?,
         });
     }
     Ok(views)
@@ -331,11 +348,12 @@ impl MessagesWindow {
 pub struct MessageFacts {
     rows: BTreeMap<Uuid, MessageState>,
     streams: BTreeMap<Uuid, Content>,
+    labels: ArtifactLabels,
 }
 
 /// The facts of a frame: the messages (five statements), the streams of those
-/// that stream, read concurrently, and one read of the identities to judge
-/// them.
+/// that stream, read concurrently, one read of the identities to judge them,
+/// and one read of the labels of the artifacts their annotations name.
 async fn read_facts(
     conn: &mut PgConnection,
     chunks: &service_engine::accumulator::ChunkReader,
@@ -359,8 +377,21 @@ async fn read_facts(
         .iter()
         .zip(judged)
         .map(|(message, judged)| Ok((message.id, judged.content()?)))
-        .collect::<Result<_, EngineError>>()?;
-    Ok(MessageFacts { rows, streams })
+        .collect::<Result<BTreeMap<Uuid, Content>, EngineError>>()?;
+    let named: Vec<Uuid> = rows
+        .values()
+        .map(|message| streams.get(&message.id).unwrap_or(&message.content))
+        .flat_map(|content| content.annotations.iter())
+        .filter_map(|placed| placed.annotation.body.artifact())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let labels = ArtifactLabels::read(conn, &named).await?;
+    Ok(MessageFacts {
+        rows,
+        streams,
+        labels,
+    })
 }
 
 static NOUNS: [NounName; 2] = [<Message as Noun>::NAME, <MessageStream as Noun>::NAME];
@@ -379,13 +410,14 @@ impl MessagesView {
     pub fn render(
         message: &MessageState,
         streamed: Option<&Content>,
+        labels: &ArtifactLabels,
         principal: &ThreadsPrincipal,
     ) -> Result<MessageView, EngineError> {
         let shown = match (message.status, streamed) {
             (MessageStatus::Streaming, Some(streamed)) => streamed,
             _ => &message.content,
         };
-        let entries = entry_views(message, shown)?;
+        let entries = entry_views(message, shown, labels)?;
         Ok(MessageView {
             id: message.id,
             thread_id: message.thread_id,
@@ -502,7 +534,7 @@ impl Projector for MessagesView {
             .rows
             .get(key)
             .filter(|message| <Message as Visibility>::visible(message, principal))
-            .map(|message| Self::render(message, facts.streams.get(key), principal))
+            .map(|message| Self::render(message, facts.streams.get(key), &facts.labels, principal))
             .transpose()
     }
 }
@@ -618,7 +650,13 @@ mod tests {
             .unwrap()
             .content()
             .unwrap();
-        let view = MessagesView::render(&message, Some(&streamed), &member).unwrap();
+        let view = MessagesView::render(
+            &message,
+            Some(&streamed),
+            &ArtifactLabels::default(),
+            &member,
+        )
+        .unwrap();
         assert_eq!(view.status, MessageStatusView::Streaming);
         assert_eq!(view.entries.len(), 1);
         assert_eq!(view.entries[0].kind, "model_response");
@@ -630,6 +668,66 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&view.affordances).unwrap(),
             serde_json::json!({ "markRead": { "allowed": true } })
+        );
+    }
+
+    #[test]
+    fn an_artifact_annotation_reads_the_label_of_the_artifact_its_message_attached() {
+        use contract_threads::{Annotation, AnnotationBody, ArtifactRef, PlacedAnnotation};
+
+        let member = person(false, active());
+        let user = member.user().unwrap();
+        let mut message = message_in(&[user]);
+        message.turn_kind = TurnKind::InputTurn;
+        let said = HumanMessage::new(
+            EntryId::from_uuid(Uuid::now_v7()).unwrap(),
+            HumanId::from_uuid(user).unwrap(),
+            vec![
+                PlainBlock::try_from(
+                    TextBlock::new(BlockId::from_uuid(Uuid::now_v7()).unwrap(), "hi").unwrap(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let entry = said.id().as_uuid();
+        let turn: Turn = InputTurn::new(message.turn_id().unwrap(), vec![said.into()])
+            .unwrap()
+            .into();
+        let artifact = Uuid::now_v7();
+        let named = PlacedAnnotation::new(
+            entry,
+            Annotation::new(
+                Uuid::now_v7(),
+                AnnotationBody::Artifact(ArtifactRef {
+                    artifact_id: artifact,
+                }),
+            ),
+        );
+        message.content = Content::of_turn(&turn, vec![named]).unwrap();
+        let content = |labels: &ArtifactLabels| {
+            MessagesView::render(&message, None, labels, &member)
+                .unwrap()
+                .entries[0]
+                .annotations[0]
+                .content
+                .0
+                .clone()
+        };
+        let labels = ArtifactLabels::of(artifact, message.id, "report.csv", "text/csv", 22);
+        assert_eq!(
+            content(&labels),
+            serde_json::json!({
+                "artifact_id": artifact,
+                "name": "report.csv",
+                "media_type": "text/csv",
+                "size": 22,
+            })
+        );
+        assert_eq!(
+            content(&ArtifactLabels::default()),
+            serde_json::json!({ "artifact_id": artifact }),
+            "its row gone, the annotation reads its id alone"
         );
     }
 
@@ -660,7 +758,8 @@ mod tests {
             .unwrap()
             .into();
         message.content = Content::of_turn(&turn, Vec::new()).unwrap();
-        let view = MessagesView::render(&message, None, &member).unwrap();
+        let view =
+            MessagesView::render(&message, None, &ArtifactLabels::default(), &member).unwrap();
         assert_eq!(view.author.name.as_deref(), Some("Ada"));
         assert_eq!(view.turn_kind, TurnKindView::InputTurn);
         assert_eq!(view.entries[0].kind, "human_message");

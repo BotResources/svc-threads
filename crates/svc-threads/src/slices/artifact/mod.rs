@@ -12,6 +12,8 @@
 //!   an attached artifact of any thread;
 //! - `read_access`: the time-bounded read access both sign through;
 //! - `context`: what a runner receives of artifacts with a thread's context;
+//! - `label`: what a member reads of an artifact beside the `ARTIFACT`
+//!   annotation naming it (name, media type, size), joined at read time;
 //! - `graphql`: the roots.
 //!
 //! A runner requests an upload for a thread and receives a time-bounded upload
@@ -27,6 +29,7 @@
 
 pub mod context;
 pub mod graphql;
+pub mod label;
 pub mod lifecycle;
 pub mod read_access;
 pub mod state;
