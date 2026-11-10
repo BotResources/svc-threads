@@ -213,6 +213,20 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.9.0 additions
+
+- `ThreadContext.artifacts: [ContextArtifact!]!` and `ContextArtifact { id:
+  UUID!, name: String!, mediaType: String!, size: Int!, sha256: String!,
+  messageId: UUID!, downloadUrl: String }`, the names a runner library binds
+  to. The suite reads them with `Q_CONTEXT_ARTIFACTS` (no `downloadUrl`) and
+  `Q_CONTEXT_ARTIFACT_ACCESS` (with it), whole or for an agent
+  (`common::constants`). T36 asserts the list whole against the declarations
+  of the files the runner uploaded, the absence of any URL when
+  `downloadUrl` is not selected, the bytes behind the one selected, and the
+  order of a message's artifacts by their annotations (proposed by the
+  oracle from the contract's ordering rule; the registry gesture names the
+  order of the messages only).
+
 ## 0.8.0 additions
 
 - `contract-threads` 0.8.0, module `summary`: `PublishedThreadSummary {

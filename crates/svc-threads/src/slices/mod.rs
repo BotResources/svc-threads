@@ -95,6 +95,45 @@ mod tests {
         );
     }
 
+    /// A runner's context carries the attached artifacts of its conversation,
+    /// each with a read access resolved on demand, under the names a runner
+    /// library binds to.
+    #[test]
+    fn the_runner_context_carries_its_artifacts_with_a_read_access_on_demand() {
+        let sdl = sdl();
+        assert!(
+            sdl.contains("\tartifacts: [ContextArtifact!]!\n"),
+            "ThreadContext.artifacts is missing:\n{sdl}"
+        );
+        let start = sdl
+            .find("type ContextArtifact {")
+            .unwrap_or_else(|| panic!("ContextArtifact is missing:\n{sdl}"));
+        let body = &sdl[start..start + sdl[start..].find("\n}").expect("a closed type")];
+        let mut fields: Vec<&str> = body
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|line| {
+                line.split_once(": ")
+                    .is_some_and(|(field, _)| field.chars().all(char::is_alphanumeric))
+            })
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "downloadUrl: String",
+                "id: UUID!",
+                "mediaType: String!",
+                "messageId: UUID!",
+                "name: String!",
+                "sha256: String!",
+                "size: Int!",
+            ],
+            "{body}"
+        );
+    }
+
     /// Every subscription root reaches its own resolver — which, with no engine
     /// behind this schema, answers a missing-context error.
     #[tokio::test]

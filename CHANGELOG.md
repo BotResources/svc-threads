@@ -11,6 +11,70 @@ heading exists.
 
 ## Unreleased
 
+## 0.9.0 - 2026-11-10
+
+Threads 0.9 (registry patch 0.9.0): a runner reads back the files of earlier
+turns. With a thread's context it receives the `ATTACHED` artifacts of the
+messages of the conversation it receives, and a time-bounded read access to
+each it asks for. Additive: no command, event, KV entry, table or migration
+changes; `contract-threads` is unchanged (0.8.0).
+
+### Added
+
+- **`ThreadContext.artifacts: [ContextArtifact!]!`** on `threadsContext`,
+  whole or as an agent context: the `ATTACHED` artifacts of the messages of
+  the conversation the runner receives (the active branch without its deleted
+  messages, its cancelled messages and its messages failed before their first
+  entry), beside the conversation — never inside it. In the order of their
+  messages on the branch, then of the `ARTIFACT` annotation naming each in its
+  message (its entry's position, then its own after that entry). A `PENDING`
+  artifact is never given, nor an artifact of a message on another branch.
+  Read in one statement for the whole conversation.
+- **`type ContextArtifact { id: UUID!, name: String!, mediaType: String!,
+  size: Int!, sha256: String!, messageId: UUID!, downloadUrl: String }`**:
+  `size` in bytes (`Int`, as the upload request's), `sha256` the lowercase
+  hexadecimal digest the upload was pinned to, `messageId` the message that
+  attached it. `downloadUrl` is a time-bounded read access to its bytes, the
+  engine's presigned GET, resolved only when selected: a context read that
+  does not select it signs nothing. It is `null` once the artifact is gone.
+- **The runner's gate on artifacts** (`RunnerArtifactsView`, visibility
+  `RunnerReach`): the engine signs a runner's read access behind a view over
+  the same artifact store, visible to a service account holding
+  `threads:runner` for an `ATTACHED` artifact of any thread, and to nobody
+  else. The admission of the context read is unchanged: a caller without
+  `threads:runner` is refused `RUNNER_SCOPE_REQUIRED` and never reaches an
+  artifact. The members' read access (`threadsArtifactDownload`) is unchanged;
+  both paths sign through one function, which waits alike for the engine's
+  promotion of verified bytes.
+- e2e T36 (`t36_a_runner_reads_back_the_artifacts_of_the_conversation`): the
+  artifacts of the active branch with their declaration and message, neither
+  a `PENDING` one nor one of another branch, the same for an agent context,
+  no read access unless asked for, the bytes read back through the one asked
+  for, the refusal without `threads:runner`; and the order of a message's
+  artifacts by their annotations.
+
+- **A failed signing nulls that access only.** When the read access of one
+  artifact cannot be signed, its `downloadUrl` is `null` and the failure is
+  reported as one GraphQL error at that field's path
+  (`["threadsContext","artifacts",i,"downloadUrl"]`); the context — its
+  conversation, members, resources and the other accesses — is answered
+  whole. `threadsContext: null` still means only that the thread does not
+  exist.
+
+### Cost
+
+- Selecting `downloadUrl` signs every artifact of the context. The engine
+  signs one reference at a time, so each costs three statements (its gated
+  load, two, then its blob read; more only while the engine has not yet
+  promoted verified bytes). A context read signs **at most 4 artifacts at
+  once** (`SIGNING_CONCURRENCY`), whatever their number, so it never holds
+  more than 4 of the pool's 20 connections for signing; the others wait
+  their turn, none is dropped. A runner that does not need the bytes leaves
+  `downloadUrl` unselected.
+- A read access no longer waits for the engine's promotion of an artifact
+  whose row is gone (deleted since the context was read): it answers `null`
+  at once, for members and runners alike.
+
 ## 0.8.0 - 2026-11-05
 
 Threads 0.8: Threads publishes the summary of each thread, so that a service

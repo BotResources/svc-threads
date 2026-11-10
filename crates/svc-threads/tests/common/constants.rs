@@ -124,6 +124,17 @@ pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $agent: String) { \
     threadsContext(threadId: $thread, agentId: $agent) { \
     threadId conversation projectedThread members { userId displayName } resources { key ids } } }";
 
+/// The attached artifacts a runner receives with a thread's context, whole or
+/// for an agent, without asking for any read access (0.9.0).
+pub const Q_CONTEXT_ARTIFACTS: &str = "query($thread: UUID!, $agent: String) { \
+    threadsContext(threadId: $thread, agentId: $agent) { \
+    threadId artifacts { id name mediaType size sha256 messageId } } }";
+
+/// The same, asking for a read access to each (0.9.0).
+pub const Q_CONTEXT_ARTIFACT_ACCESS: &str = "query($thread: UUID!, $agent: String) { \
+    threadsContext(threadId: $thread, agentId: $agent) { \
+    threadId artifacts { id name mediaType size sha256 messageId downloadUrl } } }";
+
 pub const Q_ARTIFACT_DOWNLOAD: &str = "query($thread: UUID!, $artifact: UUID!) { \
     threadsArtifactDownload(threadId: $thread, artifactId: $artifact) }";
 

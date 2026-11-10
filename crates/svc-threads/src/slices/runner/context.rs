@@ -22,6 +22,10 @@ use uuid::Uuid;
 use crate::access;
 use crate::fault::{corrupt, encode};
 use crate::principal::ThreadsPrincipal;
+use crate::slices::artifact::context::{
+    self as artifact_context, AttachedArtifact, ContextArtifact,
+};
+use crate::slices::artifact::read_access::SigningPermits;
 use crate::slices::message::closing::judge_streams;
 use crate::slices::message::state::{MessageAuthor, MessageState};
 use crate::slices::message::store::{block_of_row, entry_of_row};
@@ -31,12 +35,28 @@ use crate::slices::thread::store::ThreadStore;
 use crate::slices::thread::view::{MemberView, ResourceView};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[graphql(complex)]
 pub struct ThreadContext {
     pub thread_id: Uuid,
     pub conversation: Option<JsonScalar>,
     pub projected_thread: Option<JsonScalar>,
     pub members: Vec<MemberView>,
     pub resources: Vec<ResourceView>,
+    #[graphql(skip)]
+    pub artifacts: Vec<AttachedArtifact>,
+    /// The signings this read may run at once, shared by all its artifacts.
+    /// Never stored: every read decodes its context afresh, with its own.
+    #[graphql(skip)]
+    #[serde(skip)]
+    pub signing: SigningPermits,
+}
+
+#[async_graphql::ComplexObject]
+impl ThreadContext {
+    /// The `ATTACHED` artifacts of the messages of the conversation, beside it.
+    async fn artifacts(&self) -> Vec<ContextArtifact> {
+        ContextArtifact::of_read(&self.artifacts, &self.signing)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -270,6 +290,8 @@ async fn read(
     if closed_meanwhile(conn, &branch.streaming()).await? {
         branch = read_branch(conn, chunks, key, agent).await?;
     }
+    let messages: Vec<Uuid> = branch.turns.iter().map(|turn| turn.message.id).collect();
+    let artifacts = artifact_context::of_messages(conn, &messages).await?;
     let records = branch
         .turns
         .iter()
@@ -301,7 +323,7 @@ async fn read(
             )
         }
     };
-    Ok(Some(context_of(&thread, read)))
+    Ok(Some(context_of(&thread, read, artifacts)))
 }
 
 async fn closed_meanwhile(
@@ -479,7 +501,7 @@ enum Read {
     Projected(serde_json::Value),
 }
 
-fn context_of(thread: &ThreadState, read: Read) -> ThreadContext {
+fn context_of(thread: &ThreadState, read: Read, artifacts: Vec<AttachedArtifact>) -> ThreadContext {
     let (conversation, projected_thread) = match read {
         Read::Whole(json) => (Some(async_graphql::Json(json)), None),
         Read::Projected(json) => (None, Some(async_graphql::Json(json))),
@@ -505,6 +527,8 @@ fn context_of(thread: &ThreadState, read: Read) -> ThreadContext {
                 ids: ids.clone(),
             })
             .collect(),
+        artifacts,
+        signing: SigningPermits::default(),
     }
 }
 
@@ -512,6 +536,107 @@ fn context_of(thread: &ThreadState, read: Read) -> ThreadContext {
 mod tests {
     use super::*;
     use crate::principal::tests::{active, person, service};
+
+    fn with_artifacts(count: usize) -> ThreadContext {
+        ThreadContext {
+            thread_id: Uuid::now_v7(),
+            conversation: Some(async_graphql::Json(serde_json::json!({ "turns": [] }))),
+            projected_thread: None,
+            members: vec![MemberView {
+                user_id: Uuid::now_v7(),
+                display_name: Some("Ada".into()),
+                in_roster: true,
+            }],
+            resources: Vec::new(),
+            artifacts: (0..count)
+                .map(|index| AttachedArtifact {
+                    id: Uuid::now_v7(),
+                    name: format!("file-{index}.csv"),
+                    media_type: "text/csv".into(),
+                    size: 3,
+                    sha256: "a".repeat(64),
+                    message_id: Uuid::now_v7(),
+                    blob_ref: Uuid::now_v7(),
+                })
+                .collect(),
+            signing: SigningPermits::default(),
+        }
+    }
+
+    struct Probe(ThreadContext);
+
+    #[async_graphql::Object]
+    impl Probe {
+        async fn context(&self) -> Option<ThreadContext> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// No engine stands behind this schema, so every signing fails: each
+    /// failure nulls its own access and is reported at its own path, and the
+    /// context — its conversation, members and artifacts — stays whole.
+    #[tokio::test]
+    async fn a_failed_signing_nulls_its_own_access_and_leaves_the_context_whole() {
+        let context = with_artifacts(2);
+        let schema = async_graphql::Schema::build(
+            Probe(context.clone()),
+            async_graphql::EmptyMutation,
+            async_graphql::EmptySubscription,
+        )
+        .finish();
+        let response = schema
+            .execute(
+                "{ context { threadId conversation members { userId } \
+                   artifacts { id name downloadUrl } } }",
+            )
+            .await;
+        let data = response.data.into_json().expect("JSON data");
+        let read = &data["context"];
+        assert_eq!(
+            read["threadId"],
+            serde_json::json!(context.thread_id),
+            "{data}"
+        );
+        assert_eq!(read["conversation"], serde_json::json!({ "turns": [] }));
+        assert_eq!(read["members"].as_array().map(Vec::len), Some(1));
+        let artifacts = read["artifacts"].as_array().expect("the artifacts, whole");
+        assert_eq!(artifacts.len(), 2, "{data}");
+        for (read, held) in artifacts.iter().zip(&context.artifacts) {
+            assert_eq!(read["id"], serde_json::json!(held.id));
+            assert_eq!(read["name"], serde_json::json!(held.name));
+            assert!(read["downloadUrl"].is_null(), "{read}");
+        }
+        let paths: Vec<String> = response
+            .errors
+            .iter()
+            .map(|error| serde_json::to_string(&error.path).expect("a path"))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                r#"["context","artifacts",0,"downloadUrl"]"#,
+                r#"["context","artifacts",1,"downloadUrl"]"#,
+            ],
+            "one error per failed access, at its own path"
+        );
+    }
+
+    #[test]
+    fn the_artifacts_of_one_read_sign_under_its_permits_and_each_read_has_its_own() {
+        let held = with_artifacts(3);
+        let read: ThreadContext =
+            serde_json::from_value(serde_json::to_value(&held).expect("encode"))
+                .expect("a context decodes as the engine decodes each read");
+        assert_eq!(read, held, "permits are not part of the view");
+        assert!(!read.signing.shared_with(&held.signing));
+        let artifacts = ContextArtifact::of_read(&read.artifacts, &read.signing);
+        assert_eq!(artifacts.len(), 3);
+        assert!(
+            artifacts
+                .iter()
+                .all(|artifact| artifact.permits().shared_with(&read.signing))
+        );
+    }
 
     #[test]
     fn the_context_is_read_in_one_statement_over_the_active_branch() {
