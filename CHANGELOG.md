@@ -11,6 +11,37 @@ heading exists.
 
 ## Unreleased
 
+## 0.9.1 - 2026-11-10
+
+Threads 0.9.1 (registry patch 0.9.1): a member reads, with an `ARTIFACT`
+annotation, the artifact's name, media type and size, so that a client shows
+the file without another request. No command, event, KV entry, root, table,
+migration or fact changes; `contract-threads` is unchanged (0.8.0).
+
+### Changed
+
+- **The content of an `ARTIFACT` annotation, as members read it** — in
+  `threadsMessages` and in the live view of a thread (`threadsThreadDeltas`,
+  its `Reset` and its `Upsert`s) — is `{"artifact_id": "<uuid>", "name":
+  "<string>", "media_type": "<string>", "size": <bytes>}`: the existing
+  `artifact_id`, and three keys joined at read time from the artifact's row.
+  The `content` field stays the `JSON` scalar; the stored annotation still
+  names the artifact by id alone.
+- The label is given only for an artifact `ATTACHED` to the very message
+  whose annotation names it. An annotation whose artifact row is gone, or
+  that names an artifact not attached to its message (a stream's annotation
+  before its close), reads `{"artifact_id"}` alone; the read never fails on
+  it. Nothing changes for a non-member, who reads no message.
+- The labels of a frame are read in one statement for all the artifacts its
+  messages' annotations name (none when they name none): the message view's
+  read stays O(1) statements in the number of annotations.
+
+### Unchanged
+
+- What a runner receives: annotations are still not part of the conversation
+  of `threadsContext`, and `ThreadContext.artifacts` (0.9.0) is as it was.
+- The artifact download, the upload request and the members' read access.
+
 ## 0.9.0 - 2026-11-10
 
 Threads 0.9 (registry patch 0.9.0): a runner reads back the files of earlier

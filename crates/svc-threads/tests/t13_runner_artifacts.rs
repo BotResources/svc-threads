@@ -27,6 +27,11 @@
 //! completion never seals the message without the annotation, and never
 //! attaches the artifact.
 //!
+//! 0.9.1: a member reads, with an ARTIFACT annotation, the artifact's name,
+//! media type and size — in the paged read, live and in a Reset — while a
+//! non-member reads nothing of it and a runner's conversation still carries
+//! no annotation (third scenario).
+//!
 //! The upload window is configured short for the one scenario that waits it
 //! out (`THREADS_UPLOAD_WINDOW_MS`, see `common::constants`); the main one runs
 //! on the service's default.
@@ -41,11 +46,14 @@ use common::artifacts::{
     File, download_answer, download_url, fetch, object_count, post, request_upload,
     request_upload_answer, upload,
 };
-use common::content::{Streamed, after, ai_turn, annotation_chunk, artifact, closed, reply};
+use common::content::{
+    Streamed, after, ai_turn, annotation_chunk, annotations_of, artifact, closed, reply,
+};
 use common::facts;
+use common::feed::{Live, in_reset, upsert_of};
 use common::flows::{
-    ai, command, completion, create_thread, message_confirmed, message_refused, message_view,
-    open_stream, say, whole_message,
+    ai, branch_answer, command, completion, context, create_thread, message_confirmed,
+    message_refused, message_view, open_stream, say, store, whole_message,
 };
 use common::{
     KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
@@ -53,6 +61,7 @@ use common::{
 };
 use contract_threads::llm::{ResponseEnding, Turn};
 use contract_threads::{MessageStatus, ReasonCode, StoreMessageV2};
+use serde_json::json;
 use uuid::Uuid;
 
 /// An AI answer on `thread` naming `attached` in an ARTIFACT annotation after
@@ -304,6 +313,84 @@ async fn t13_an_upload_never_attached_is_removed_after_the_upload_window() {
     // And X, attached, is untouched by the window.
     assert_eq!(fetch(&url).await, (200, file.bytes));
     assert!(!facts::types(&facts::of(&ctx.pool, "artifact", x).await).contains(&"Removed"));
+
+    ctx.teardown().await;
+}
+
+/// The contents of the ARTIFACT annotations of a message view, in order.
+fn artifact_contents(view: &serde_json::Value) -> Vec<serde_json::Value> {
+    annotations_of(view)
+        .into_iter()
+        .filter(|(_, annotation)| annotation["kind"] == "ARTIFACT")
+        .map(|(_, annotation)| annotation["content"].clone())
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
+async fn t13_a_member_reads_the_name_media_type_and_size_of_an_attached_artifact() {
+    // Given T with member A following it live, U not a member, a runner, and
+    // X — report.csv — uploaded by the runner.
+    let ctx = TestContext::setup().await;
+    let (a, u) = (ctx.enrol("ada").await, ctx.enrol("ugo").await);
+    let t = create_thread(&ctx, Some(&a), &[]).await;
+    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    let runner = ctx.service_account(true);
+    let file = File::csv("quarter,revenue\nQ3,42\n");
+    let x = upload(&ctx, &runner.passport, t, &file).await;
+    let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
+
+    // When a message naming X in an ARTIFACT annotation is stored.
+    let naming_x = naming(t, m1, x);
+    let m2 = naming_x.message_id;
+    store(&ctx, naming_x, MessageStatus::Completed).await;
+
+    // Then (2) A's paged read of M2 shows the annotation's content with X's
+    // name, media type and size beside its id (0.9.1).
+    let expected = json!({
+        "artifact_id": x,
+        "name": "report.csv",
+        "media_type": "text/csv",
+        "size": file.bytes.len(),
+    });
+    let paged = message_view(&ctx, &a.passport, t, m2).await;
+    assert_eq!(artifact_contents(&paged), vec![expected.clone()], "{paged}");
+    // And (3) A's live view carries the same content when M2 reaches it.
+    let delta = a_feed
+        .until("A sees M2", |delta| upsert_of(delta, m2).is_some())
+        .await;
+    let live = upsert_of(&delta, m2).expect("M2's upsert");
+    assert_eq!(artifact_contents(live), vec![expected.clone()], "{live}");
+    // And a live view opened afterwards holds it in its Reset.
+    let reopened = Live::thread(&ctx, &a.passport, t).await;
+    let in_snapshot = in_reset(&reopened.reset, m2).expect("M2 in the Reset");
+    assert_eq!(
+        artifact_contents(&in_snapshot),
+        vec![expected],
+        "{in_snapshot}"
+    );
+
+    // And U, not a member, reads nothing of it.
+    let refused = branch_answer(&ctx, &u.passport, t, 10, None, Some(m2)).await;
+    let raw = refused.to_string();
+    assert!(
+        !raw.contains("report.csv") && !raw.contains(&x.to_string()),
+        "{raw}"
+    );
+
+    // And a runner's conversation still carries no annotation: neither the
+    // whole conversation nor the agent context names X or its label.
+    let analyst = ai("a1", "Analyst");
+    for agent in [None, Some(&analyst)] {
+        let read = context(&ctx, &runner.passport, t, agent).await;
+        let conversation = format!("{}{}", read["conversation"], read["projectedThread"]);
+        assert!(
+            !conversation.contains(&x.to_string())
+                && !conversation.contains("report.csv")
+                && !conversation.contains("ARTIFACT"),
+            "{conversation}"
+        );
+    }
 
     ctx.teardown().await;
 }

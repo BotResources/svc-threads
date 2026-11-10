@@ -318,14 +318,20 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
     let ai_turn = turn.as_ai().expect("an AI turn");
     assert_eq!(ai_turn.agent(), analyst.id);
     assert!(ai_turn.is_closed());
-    // And the ARTIFACT annotation reads after R2.
+    // And the ARTIFACT annotation reads after R2, with the artifact's name,
+    // media type and size (0.9.1).
     assert_eq!(
         entry_view(&sealed, r2.entry)["annotations"],
         json!([{
             "index": 0,
             "id": annotation_view(&attached)["id"],
             "kind": "ARTIFACT",
-            "content": { "artifact_id": x },
+            "content": {
+                "artifact_id": x,
+                "name": file.name,
+                "media_type": file.media_type,
+                "size": file.bytes.len(),
+            },
         }])
     );
     // And the artifact it names is attached: members read its bytes.
@@ -349,6 +355,13 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
                 sealed_live(d) || t_moved(d)
             })
             .await;
+        if sealed_live(&delta) {
+            assert_eq!(
+                entry_view(&delta["view"], r2.entry)["annotations"],
+                entry_view(&sealed, r2.entry)["annotations"],
+                "live, the ARTIFACT annotation reads as paged: name, media type, size"
+            );
+        }
         a_sealed |= sealed_live(&delta);
         a_moved |= t_moved(&delta);
     }
