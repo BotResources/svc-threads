@@ -46,6 +46,23 @@ ignore = [
     # and warns `advisory-not-detected` for this entry; that warning is
     # expected while rsa stays lockfile-only.
     { id = "RUSTSEC-2023-0071" },
+    # RUSTSEC-2026-0459 — libsqlite3-sys (bundled SQLite C library CVE).
+    #
+    # Why: libsqlite3-sys enters Cargo.lock through sqlx-macros-core →
+    # sqlx-sqlite, an optional sqlx dependency, the same path as rsa above. The
+    # workspace pin enables the postgres backend only (no sqlite), so cargo never
+    # resolves sqlx-sqlite or libsqlite3-sys into the build graph:
+    # `cargo tree -i libsqlite3-sys --target all -e all` prints nothing, also
+    # with `--workspace --all-features` (checked 2026-11-10). SQLite is not
+    # compiled and its code never executes.
+    #
+    # Upstream status (checked 2026-11-10): fixed in libsqlite3-sys >= 0.39.0,
+    # which sqlx 0.8.x cannot use; sqlx 0.9 can. Retire this ignore with the
+    # move to sqlx 0.9, or when sqlx-sqlite no longer appears in Cargo.lock.
+    #
+    # Tools: as for rsa, cargo audit needs this ignore and cargo deny warns
+    # `advisory-not-detected` for it. Mirrored in .cargo/audit.toml.
+    { id = "RUSTSEC-2026-0459" },
 ]
 
 [licenses]
