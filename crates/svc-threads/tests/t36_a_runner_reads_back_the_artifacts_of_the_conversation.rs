@@ -149,6 +149,10 @@ async fn t36_a_runner_receives_the_attached_artifacts_of_the_conversation_and_re
 
     // Then each carries one, and X's returns the bytes stored, as Y's does.
     let accessed = artifacts_of(&with_access);
+    assert!(
+        with_access.get("errors").is_none(),
+        "every access signed: {with_access}"
+    );
     assert_eq!(accessed.len(), 2, "{with_access}");
     for ((granted, plain), file) in accessed.iter().zip(&artifacts).zip([&x_file, &y_file]) {
         let mut declared = granted.clone();

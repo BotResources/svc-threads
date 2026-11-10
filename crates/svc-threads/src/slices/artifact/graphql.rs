@@ -46,6 +46,7 @@ impl ArtifactQuery {
         }
         read_access::sign::<ArtifactsView>(
             &query,
+            &read_access::SigningPermits::default(),
             artifact_id,
             BlobRef(artifact.blob_ref),
             disposition,

@@ -53,11 +53,27 @@ changes; `contract-threads` is unchanged (0.8.0).
   for, the refusal without `threads:runner`; and the order of a message's
   artifacts by their annotations.
 
+- **A failed signing nulls that access only.** When the read access of one
+  artifact cannot be signed, its `downloadUrl` is `null` and the failure is
+  reported as one GraphQL error at that field's path
+  (`["threadsContext","artifacts",i,"downloadUrl"]`); the context — its
+  conversation, members, resources and the other accesses — is answered
+  whole. `threadsContext: null` still means only that the thread does not
+  exist.
+
 ### Cost
 
-- Selecting `downloadUrl` signs every artifact of the context: per artifact,
-  the engine's gated load and its blob read (the engine signs one reference
-  at a time). A runner that does not need the bytes leaves it unselected.
+- Selecting `downloadUrl` signs every artifact of the context. The engine
+  signs one reference at a time, so each costs three statements (its gated
+  load, two, then its blob read; more only while the engine has not yet
+  promoted verified bytes). A context read signs **at most 4 artifacts at
+  once** (`SIGNING_CONCURRENCY`), whatever their number, so it never holds
+  more than 4 of the pool's 20 connections for signing; the others wait
+  their turn, none is dropped. A runner that does not need the bytes leaves
+  `downloadUrl` unselected.
+- A read access no longer waits for the engine's promotion of an artifact
+  whose row is gone (deleted since the context was read): it answers `null`
+  at once, for members and runners alike.
 
 ## 0.8.0 - 2026-11-05
 

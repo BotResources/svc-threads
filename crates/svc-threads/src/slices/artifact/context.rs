@@ -7,7 +7,7 @@
 //! access is a field resolved only when selected: a context read that does not
 //! select it signs nothing.
 
-use async_graphql::{ComplexObject, Context, Result, SimpleObject};
+use async_graphql::{Context, Object};
 use contract_threads::AnnotationKind;
 use serde::{Deserialize, Serialize};
 use service_engine::blobs::Disposition;
@@ -16,41 +16,112 @@ use service_engine::{BlobRef, Query};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-use super::read_access;
+use super::read_access::{self, SigningPermits};
 use super::state::ArtifactStatus;
 use super::view::RunnerArtifactsView;
 use crate::principal::ThreadsPrincipal;
 
-/// An `ATTACHED` artifact of a message of the conversation a runner receives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SimpleObject)]
-#[graphql(complex)]
-pub struct ContextArtifact {
+/// An `ATTACHED` artifact of a message of the conversation a runner receives,
+/// as the context holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedArtifact {
     pub id: Uuid,
     pub name: String,
     pub media_type: String,
-    /// In bytes.
     pub size: i64,
-    /// The lowercase hexadecimal SHA-256 of its bytes.
     pub sha256: String,
-    /// The message that attached it.
     pub message_id: Uuid,
     /// The engine's reference of its bytes: what the read access signs, never
     /// shown.
-    #[graphql(skip)]
     pub blob_ref: Uuid,
 }
 
-#[ComplexObject]
+/// An `ATTACHED` artifact of a message of the conversation a runner receives,
+/// as the runner reads it: with the signing permits of its context read.
+pub struct ContextArtifact {
+    artifact: AttachedArtifact,
+    permits: SigningPermits,
+}
+
 impl ContextArtifact {
+    /// The artifacts of one context read, all signing under its `permits`.
+    pub fn of_read(artifacts: &[AttachedArtifact], permits: &SigningPermits) -> Vec<Self> {
+        artifacts
+            .iter()
+            .map(|artifact| Self {
+                artifact: artifact.clone(),
+                permits: permits.clone(),
+            })
+            .collect()
+    }
+
+    /// The permits it signs under.
+    pub fn permits(&self) -> &SigningPermits {
+        &self.permits
+    }
+}
+
+#[Object]
+impl ContextArtifact {
+    async fn id(&self) -> Uuid {
+        self.artifact.id
+    }
+
+    async fn name(&self) -> &str {
+        &self.artifact.name
+    }
+
+    async fn media_type(&self) -> &str {
+        &self.artifact.media_type
+    }
+
+    /// In bytes.
+    async fn size(&self) -> i64 {
+        self.artifact.size
+    }
+
+    /// The lowercase hexadecimal SHA-256 of its bytes.
+    async fn sha256(&self) -> &str {
+        &self.artifact.sha256
+    }
+
+    /// The message that attached it.
+    async fn message_id(&self) -> Uuid {
+        self.artifact.message_id
+    }
+
     /// A time-bounded read access to the artifact's bytes, signed only when
     /// asked for; `null` once the artifact is gone (its message or its thread
-    /// deleted since the context was read).
-    async fn download_url(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+    /// deleted since the context was read), or when signing it failed — the
+    /// failure is then reported as an error of this field.
+    async fn download_url(&self, ctx: &Context<'_>) -> Option<String> {
+        // A failed signing nulls this access only. Raised as the field's
+        // error, it would null the non-null list and the context up to
+        // `threadsContext`, whose `null` says the thread does not exist: the
+        // runner would lose the conversation and every other access.
+        match self.sign(ctx).await {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!(
+                    artifact_id = %self.artifact.id,
+                    error = %error.message,
+                    "a runner's read access to an artifact failed to sign"
+                );
+                ctx.add_error(ctx.set_error_path(error.into_server_error(ctx.item.pos)));
+                None
+            }
+        }
+    }
+}
+
+impl ContextArtifact {
+    async fn sign(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<String>> {
         let query = Query::<ThreadsPrincipal>::new(ctx)?;
         read_access::sign::<RunnerArtifactsView>(
             &query,
-            self.id,
-            BlobRef(self.blob_ref),
+            &self.permits,
+            self.artifact.id,
+            BlobRef(self.artifact.blob_ref),
             Disposition::Attachment,
         )
         .await
@@ -63,7 +134,7 @@ impl ContextArtifact {
 pub async fn of_messages(
     conn: &mut PgConnection,
     messages: &[Uuid],
-) -> Result<Vec<ContextArtifact>, EngineError> {
+) -> Result<Vec<AttachedArtifact>, EngineError> {
     if messages.is_empty() {
         return Ok(Vec::new());
     }
@@ -75,7 +146,7 @@ pub async fn of_messages(
         .await?;
     rows.iter()
         .map(|row| {
-            Ok(ContextArtifact {
+            Ok(AttachedArtifact {
                 id: row.try_get("id")?,
                 name: row.try_get("name")?,
                 media_type: row.try_get("media_type")?,
