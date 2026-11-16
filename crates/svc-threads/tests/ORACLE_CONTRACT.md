@@ -213,7 +213,7 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
-## Unreleased additions (proposed 0.10.0)
+## 0.10.0 additions
 
 - `threadsContext(threadId: UUID!, agentId: String, branchTip: UUID):
   ThreadContext`. With `branchTip`, the conversation — whole or the agent

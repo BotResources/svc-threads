@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
-## Unreleased
+## 0.10.0 - 2026-11-16
 
 A runner reads the context of any branch of a thread, not only the active
 one: it names the message the branch ends at. A runner answering a message
