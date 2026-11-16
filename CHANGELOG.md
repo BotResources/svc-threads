@@ -9,7 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
-## Unreleased
+## 0.10.0 - 2026-11-16
+
+A runner reads the context of any branch of a thread, not only the active
+one: it names the message the branch ends at. A runner answering a message
+that is no longer on the active branch — a reply regenerated on an earlier
+version of an edited message — receives the conversation ending at that
+message. Additive: no command, event, KV entry, table or migration changes;
+`contract-threads` is unchanged (0.8.0).
+
+### Added
+
+- **`threadsContext(threadId: UUID!, agentId: String, branchTip: UUID)`**:
+  with `branchTip`, the conversation — whole, or the agent context of
+  `agentId` — and the `ATTACHED` artifacts beside it are those of the branch
+  ending at that message, it and its ancestors, instead of the branch ending
+  at the thread's most recent message. Without it, the read is the one it
+  was.
+- The tip is looked for among the thread's own messages, as `threadsMessages`
+  looks for its `branchTip`, with the same outcome: a message no thread
+  holds, or a message of another thread, ends no branch — the thread's
+  context is answered with its members and resources, an empty conversation
+  and no artifact; nothing is refused, and `threadsContext: null` still means
+  only that the thread does not exist. A deleted tip still ends its branch
+  and, like any deleted, cancelled or failed-before-its-first-entry message,
+  is not in the conversation. The active tip reads exactly as no tip.
+- The tip is part of the context's key, so that the context of one branch is
+  never rendered for another; an active-branch read is keyed and encoded as
+  before. The context is still read in one statement over its branch.
+- e2e T37 (`t37_a_runner_reads_the_context_of_a_named_branch`): a question
+  rewritten after its answer, the context read at the earlier question, at
+  the earlier answer, at a deleted follow-up, at the active tip and without a
+  tip, whole and for an agent, with the artifacts of each branch; an unknown
+  tip and a tip of another thread, read alike by `threadsContext` and
+  `threadsMessages`.
 
 ## 0.9.1 - 2026-11-10
 

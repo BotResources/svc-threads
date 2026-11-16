@@ -124,6 +124,13 @@ pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $agent: String) { \
     threadsContext(threadId: $thread, agentId: $agent) { \
     threadId conversation projectedThread members { userId displayName } resources { key ids } } }";
 
+/// The context of the branch ending at `tip` — the active branch with no tip —
+/// whole or for an agent, with its attached artifacts (0.10.0).
+pub const Q_CONTEXT_ON: &str = "query($thread: UUID!, $agent: String, $tip: UUID) { \
+    threadsContext(threadId: $thread, agentId: $agent, branchTip: $tip) { \
+    threadId conversation projectedThread members { userId displayName } resources { key ids } \
+    artifacts { id name mediaType size sha256 messageId } } }";
+
 /// The attached artifacts a runner receives with a thread's context, whole or
 /// for an agent, without asking for any read access (0.9.0).
 pub const Q_CONTEXT_ARTIFACTS: &str = "query($thread: UUID!, $agent: String) { \

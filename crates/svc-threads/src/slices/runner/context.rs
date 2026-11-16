@@ -59,16 +59,26 @@ impl ThreadContext {
     }
 }
 
+/// One context: a thread, read whole or for an agent, along the branch ending
+/// at `tip` — the active branch when none is named. The tip is part of the
+/// key, so that the context of one branch is never rendered for another; it is
+/// left out of the key's JSON when absent, so that an active-branch key is
+/// encoded as it was before tips existed.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContextKey {
     pub thread: Uuid,
     pub agent: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextWindow {
     pub thread: Option<Uuid>,
     pub agent: Option<Uuid>,
+    /// The message the branch ends at; none for the active branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -92,6 +102,10 @@ impl Projector for ContextView {
         Self::NAME
     }
 
+    /// Never live: no noun and no inverse, so no impact reaches a context, and
+    /// every read populates and renders afresh under its own key — a tip's
+    /// included. Making it live would need the message noun's impacts routed
+    /// to every key of the thread, whatever its tip.
     fn nouns(&self) -> &'static [NounName] {
         &[]
     }
@@ -124,6 +138,7 @@ impl Projector for ContextView {
                 .then_some(ContextKey {
                     thread,
                     agent: window.agent,
+                    tip: window.tip,
                 })
                 .into_iter()
                 .collect();
@@ -187,6 +202,16 @@ fn plain_kinds() -> Vec<&'static str> {
         .collect()
 }
 
+/// The context of one branch in one statement: `$1` the thread, `$2` the agent
+/// read for (or none), `$3` the plain block kinds a foreign response keeps, `$4`
+/// the message the branch ends at (or none: the thread's most recent message).
+///
+/// The tip is looked for among the thread's own messages only, as
+/// `threadsMessages` looks for it: a tip unknown to the thread, or a message of
+/// another thread, ends no branch, and the conversation is empty. A tip that is
+/// deleted, cancelled, or failed before its first entry still ends its branch:
+/// the `turn` filter leaves it out of the conversation, as it leaves out such a
+/// message anywhere on a branch, and its ancestors stay.
 pub fn context_query() -> String {
     let response = TurnEntryKind::ModelResponse.as_str();
     let closure = TurnEntryKind::TurnClosure.as_str();
@@ -197,6 +222,7 @@ pub fn context_query() -> String {
     format!(
         "WITH RECURSIVE tip AS ( \
              SELECT m.id FROM threads.message m WHERE m.thread_id = $1 \
+               AND ($4::uuid IS NULL OR m.id = $4) \
              ORDER BY m.created_at DESC, m.id DESC LIMIT 1 \
          ), branch AS ( \
              SELECT m.id, m.parent_message_id, 0 AS depth \
@@ -352,6 +378,7 @@ async fn read_branch(
         .bind(key.thread)
         .bind(key.agent)
         .bind(plain_kinds())
+        .bind(key.tip)
         .fetch_all(&mut *conn)
         .await?;
     let mut branch = Branch::default();
@@ -639,9 +666,16 @@ mod tests {
     }
 
     #[test]
-    fn the_context_is_read_in_one_statement_over_the_active_branch() {
+    fn the_context_is_read_in_one_statement_over_its_branch() {
         let query = context_query();
         assert_eq!(query.matches("WITH RECURSIVE").count(), 1);
+        let tip = &query[query.find("tip AS").unwrap()..query.find("branch AS").unwrap()];
+        assert!(
+            tip.contains("m.thread_id = $1")
+                && tip.contains("($4::uuid IS NULL OR m.id = $4)")
+                && tip.contains("ORDER BY m.created_at DESC, m.id DESC LIMIT 1"),
+            "the named tip, among the thread's own messages, or else the most recent: {tip}"
+        );
         assert!(
             query.contains("e.state = 'complete'"),
             "never an interrupted response"
@@ -655,7 +689,60 @@ mod tests {
             !selection.contains("e.*") && selection.contains("CASE WHEN t.foreign_turn"),
             "the entry selection names its columns and blanks a foreign payload itself"
         );
-        assert!(query.contains("ANY($3)") && !query.contains("$4"));
+        assert!(query.contains("ANY($3)") && !query.contains("$5"));
+        assert_eq!(
+            query.matches("$4").count(),
+            2,
+            "the tip is read by the tip CTE only"
+        );
+    }
+
+    /// The window and the key name the tip, so that two branches of one
+    /// thread are two contexts; an active-branch read encodes as it did
+    /// before tips existed.
+    #[test]
+    fn the_tip_is_part_of_the_context_key_and_absent_when_none_is_named() {
+        let (thread, agent, tip) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let active = ContextKey {
+            thread,
+            agent: Some(agent),
+            tip: None,
+        };
+        let tipped = ContextKey {
+            tip: Some(tip),
+            ..active.clone()
+        };
+        assert_ne!(active, tipped);
+        assert_eq!(
+            serde_json::to_value(&active).unwrap(),
+            serde_json::json!({ "thread": thread, "agent": agent })
+        );
+        assert_eq!(
+            serde_json::to_value(&tipped).unwrap(),
+            serde_json::json!({ "thread": thread, "agent": agent, "tip": tip })
+        );
+        let decoded: ContextKey =
+            serde_json::from_value(serde_json::json!({ "thread": thread, "agent": null }))
+                .expect("a key without a tip decodes");
+        assert_eq!(decoded.tip, None);
+
+        let window = ContextWindow {
+            thread: Some(thread),
+            agent: None,
+            tip: None,
+        };
+        assert_eq!(
+            WindowParams::encode(&window).unwrap().as_value(),
+            &serde_json::json!({ "thread": thread, "agent": null })
+        );
+        let tipped: ContextWindow = WindowParams::encode(&ContextWindow {
+            tip: Some(tip),
+            ..window
+        })
+        .unwrap()
+        .decode()
+        .unwrap();
+        assert_eq!(tipped.tip, Some(tip));
     }
 
     #[test]

@@ -39,7 +39,7 @@ member's read mark — and serves them, live, to their members.
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.9.1.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.10.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -75,6 +75,13 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.9 → 0.10
+
+`threadsContext` takes an optional `branchTip`: the context of the branch
+ending at that message instead of the active branch. Nothing is migrated; a
+read without it is unchanged, so runners and Threads roll out in any order (a
+runner naming a tip needs this release).
 
 ## Deploy: 0.8 → 0.9
 

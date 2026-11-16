@@ -21,8 +21,8 @@ use uuid::Uuid;
 use super::commands::{Answer, commanding_service, send, send_as};
 use super::content::{self, Agent};
 use super::{
-    PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_MESSAGES, Q_THREAD, Q_THREADS,
-    QUIET_WINDOW, TestContext, eventually, gql,
+    PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_CONTEXT_ON, Q_MESSAGES, Q_THREAD,
+    Q_THREADS, QUIET_WINDOW, TestContext, eventually, gql,
 };
 
 // ── commands and their one answer ───────────────────────────────────────────
@@ -715,6 +715,26 @@ pub async fn context(
 ) -> Value {
     let agent = agent.map(|agent| agent.uuid().to_string());
     let answer = context_answer(ctx, passport, thread, agent.as_deref()).await;
+    gql::data(&answer, "threadsContext").clone()
+}
+
+/// A runner's read of the context of the branch ending at `tip` — the active
+/// branch with no tip — whole or for `agent`, its artifacts included.
+pub async fn context_on(
+    ctx: &TestContext,
+    passport: &Passport,
+    thread: Uuid,
+    agent: Option<&Agent>,
+    tip: Option<Uuid>,
+) -> Value {
+    let agent = agent.map(|agent| agent.uuid().to_string());
+    let answer = ctx
+        .run(
+            passport,
+            Q_CONTEXT_ON,
+            json!({ "thread": thread, "agent": agent, "tip": tip }),
+        )
+        .await;
     gql::data(&answer, "threadsContext").clone()
 }
 
