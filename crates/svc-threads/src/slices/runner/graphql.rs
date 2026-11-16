@@ -24,17 +24,21 @@ pub struct RunnerQuery;
 impl RunnerQuery {
     /// A thread's context: the agent context of the agent `agentId` names —
     /// the library's projected thread for it, built by Threads — or, naming
-    /// none, the whole active branch as a `br-llm-messages/5` conversation;
-    /// with the thread's members and resources, and the `ATTACHED` artifacts
-    /// of the conversation's messages beside it, each with a read access
-    /// signed only when `downloadUrl` is selected. `null` for a thread that
-    /// does not exist. An agent id that is not a UUIDv7 is refused
-    /// `AI_PERSPECTIVE_INVALID`.
+    /// none, the whole branch as a `br-llm-messages/5` conversation; with the
+    /// thread's members and resources, and the `ATTACHED` artifacts of the
+    /// conversation's messages beside it, each with a read access signed only
+    /// when `downloadUrl` is selected. The branch is the active one (ending at
+    /// the thread's most recent message) unless `branchTip` names the message
+    /// another branch ends at, as for `threadsMessages`: a `branchTip` that is
+    /// not a message of the thread ends no branch, and the conversation is
+    /// empty. `null` for a thread that does not exist. An agent id that is not
+    /// a UUIDv7 is refused `AI_PERSPECTIVE_INVALID`.
     async fn threads_context(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
         agent_id: Option<String>,
+        branch_tip: Option<Uuid>,
     ) -> Result<Option<ThreadContext>> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
         let agent = match agent_id {
@@ -48,6 +52,7 @@ impl RunnerQuery {
         let window = ContextWindow {
             thread: Some(thread_id),
             agent,
+            tip: branch_tip,
         };
         let mut contexts = Query::<ThreadsPrincipal>::new(ctx)?
             .fetch_window::<ContextView>(

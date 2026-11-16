@@ -213,7 +213,22 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
-## 0.9.1 changes
+## Unreleased additions (proposed 0.10.0)
+
+- `threadsContext(threadId: UUID!, agentId: String, branchTip: UUID):
+  ThreadContext`. With `branchTip`, the conversation — whole or the agent
+  context — and the `ATTACHED` artifacts beside it are those of the branch
+  ending at that message (it and its ancestors) instead of the active
+  branch. The tip is looked for among the thread's own messages, as
+  `threadsMessages` looks for it: a message no thread holds, or a message of
+  another thread, ends no branch, and the context of the thread is answered
+  with an empty conversation and no artifact (no refusal; `null` still means
+  only that the thread does not exist). A deleted tip — or a cancelled one,
+  or one failed before its first entry — still ends its branch and is left
+  out of the conversation, as such a message is anywhere on a branch; the
+  active tip reads exactly as no tip. The suite reads it with `Q_CONTEXT_ON`
+  (`common::constants`, `flows::context_on`); T37 (number proposed by the
+  oracle, to be declared in the registry) asserts every case.
 
 - The `content` of an `ARTIFACT` annotation in a member's message view
   (`threadsMessages`, `threadsThreadDeltas`) is `{ artifact_id, name,

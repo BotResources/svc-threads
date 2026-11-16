@@ -95,6 +95,23 @@ mod tests {
         );
     }
 
+    /// A runner reads the context of the active branch, or of the branch ending
+    /// at the message it names, as a member reads a branch's messages.
+    #[test]
+    fn the_runner_context_reads_the_active_branch_or_the_one_a_tip_ends() {
+        let sdl = sdl();
+        assert!(
+            sdl.contains(
+                "threadsContext(threadId: UUID!, agentId: String, branchTip: UUID): ThreadContext\n"
+            ),
+            "threadsContext takes a thread, an optional agent and an optional tip:\n{sdl}"
+        );
+        assert!(
+            sdl.contains("branchTip: UUID): [MessageView!]!"),
+            "the tip is named as threadsMessages names it:\n{sdl}"
+        );
+    }
+
     /// A runner's context carries the attached artifacts of its conversation,
     /// each with a read access resolved on demand, under the names a runner
     /// library binds to.

@@ -76,6 +76,13 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
 
+## Deploy: unreleased (branch tip on the runner context)
+
+`threadsContext` takes an optional `branchTip`: the context of the branch
+ending at that message instead of the active branch. Nothing is migrated; a
+read without it is unchanged, so runners and Threads roll out in any order (a
+runner naming a tip needs this release).
+
 ## Deploy: 0.8 → 0.9
 
 0.9 adds `artifacts` to a runner's `threadsContext`: the attached artifacts of
