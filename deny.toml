@@ -63,6 +63,24 @@ ignore = [
     # Tools: as for rsa, cargo audit needs this ignore and cargo deny warns
     # `advisory-not-detected` for it. Mirrored in .cargo/audit.toml.
     { id = "RUSTSEC-2026-0459" },
+    # RUSTSEC-2026-0543 — chrono is unmaintained (informational, no CVE).
+    #
+    # Why: chrono carries every date of the service and of its published
+    # language (`contract-threads`), and reaches the build graph through
+    # async-graphql (its `chrono` feature), sqlx-core / sqlx-postgres,
+    # br-service-engine and the br-rust-common crates as well
+    # (`cargo tree -i chrono`, checked 2026-11-17). It cannot be dropped from
+    # this repository alone. The advisory reports no vulnerability: it says no
+    # future defect will be fixed upstream.
+    #
+    # Upstream status (checked 2026-11-17): no patched version; the advisory
+    # recommends `jiff` or `time`. Retire this ignore when the service, its
+    # published language and the libraries above have moved to one of them, or
+    # when chrono is maintained again.
+    #
+    # Tools: cargo audit reports an unmaintained crate as a warning and passes;
+    # the entry is mirrored in .cargo/audit.toml to keep the two lists equal.
+    { id = "RUSTSEC-2026-0543" },
 ]
 
 [licenses]
