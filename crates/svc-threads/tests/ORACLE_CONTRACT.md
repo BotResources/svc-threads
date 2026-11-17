@@ -213,6 +213,18 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.10.1 additions
+
+- `threadsThreadDeltas(threadId: UUID!, size: Int!, branchTip: UUID)`. With
+  `branchTip`, the head page followed is that of the branch ending at that
+  message (it and its ancestors) instead of the active branch — the window
+  `threadsMessages` reads with the same `branchTip`, live. The tip is looked
+  for among the thread's own messages: a message no thread holds, or a
+  message of another thread, ends no branch, and the feed opens on the thread
+  and no message (no refusal); a tip named before its message is stored
+  enters the feed once it is. The suite opens it with
+  `feed::thread_feed_on`; T38 (number proposed by the oracle) asserts it.
+
 ## 0.10.0 additions
 
 - `threadsContext(threadId: UUID!, agentId: String, branchTip: UUID):
@@ -229,6 +241,8 @@ in that output.
   active tip reads exactly as no tip. The suite reads it with `Q_CONTEXT_ON`
   (`common::constants`, `flows::context_on`); T37 (number proposed by the
   oracle, to be declared in the registry) asserts every case.
+
+## 0.9.1 changes
 
 - The `content` of an `ARTIFACT` annotation in a member's message view
   (`threadsMessages`, `threadsThreadDeltas`) is `{ artifact_id, name,

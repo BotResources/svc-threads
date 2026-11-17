@@ -75,11 +75,14 @@ impl MessageSubscription {
     /// the head page of its active branch, then `ThreadFeedUpsert` /
     /// `ThreadFeedRemove` deltas on a contiguous revision — a streaming
     /// message's content as it grows, a new message entering the page.
+    /// `branchTip` names the message another branch ends at, as
+    /// `threadsMessages` reads it: the head page followed is that branch's.
     async fn threads_thread_deltas(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
         size: WindowSize,
+        branch_tip: Option<Uuid>,
     ) -> Result<impl Stream<Item = Result<ThreadFeedDelta>>> {
         admit_to_thread(ctx, thread_id).await?;
         let stream = service_engine::attach::<ThreadsPrincipal>(
@@ -89,8 +92,12 @@ impl MessageSubscription {
                     .or_internal("encode the thread window")?,
                 WindowSpec::new(
                     MessagesView::NAME,
-                    WindowParams::encode(&MessagesWindow::of(thread_id, None, Page::head(size)))
-                        .or_internal("encode the messages window")?,
+                    WindowParams::encode(&MessagesWindow::of(
+                        thread_id,
+                        branch_tip,
+                        Page::head(size),
+                    ))
+                    .or_internal("encode the messages window")?,
                     false,
                 ),
             ],

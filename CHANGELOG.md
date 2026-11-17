@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.10.1 - 2026-11-17
+
+A member follows live any branch of a thread, as they already read it: the
+live view of a thread names the message the branch ends at. Several agents
+answering one message write sibling messages, and only the most recent is on
+the active branch; a client now follows each of them while it is written.
+Additive: no command, event, KV entry, table or migration changes;
+`contract-threads` is unchanged (0.8.0).
+
+### Added
+
+- **`threadsThreadDeltas(threadId: UUID!, size: Int!, branchTip: UUID)`**:
+  with `branchTip`, the head page followed is that of the branch ending at
+  that message, it and its ancestors, instead of the active branch — the
+  window `threadsMessages` reads with the same `branchTip`, live: a streaming
+  message's content as it grows, its end. The thread itself is followed as
+  before. Without it, the subscription is the one it was.
+- The tip is looked for among the thread's own messages, as `threadsMessages`
+  looks for it: a message no thread holds, or a message of another thread,
+  ends no branch — the feed opens on the thread and no message; nothing is
+  refused.
+- A tip named before its message is stored is followed too: the feed opens
+  on no message, and the branch enters it once the message is stored.
+- e2e T38 (`t38_following_a_named_branch_live`): two agents answering one
+  question at the same time, the earlier answer followed by its tip while it
+  is written and completed, the later one on the active branch, neither feed
+  told of the other's message; an unknown tip and a tip of another thread; a
+  tip named before its message is stored.
+
 ## 0.10.0 - 2026-11-16
 
 A runner reads the context of any branch of a thread, not only the active
