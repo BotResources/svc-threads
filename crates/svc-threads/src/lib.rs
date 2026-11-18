@@ -2,7 +2,9 @@
 //! between people and AIs and serves them, live, to their members; it never
 //! decides who may write (trusted services command it), it decides who may
 //! read (the members of a thread, and nobody else), and it publishes the members
-//! of each thread so that other services decide locally.
+//! of each thread so that other services decide locally, its summary so that
+//! they list conversations, and its resources so that the service owning a key
+//! knows which threads reference its objects.
 //!
 //! A fatty service on `br-service-engine` (soft EDA, multi-pod). The published
 //! language is the `contract-threads` crate.
@@ -10,7 +12,7 @@
 //! Layout, by capability:
 //!
 //! - [`slices::thread`]: a thread, its members, resources and read marks — the
-//!   thread views, the members KV offer;
+//!   thread views, the members, summary and resources KV offers;
 //! - [`slices::message`]: the messages of a thread — turns of the
 //!   `br-llm-messages` 2.0 model, stored as the library's records with Threads'
 //!   annotations — the accumulated lane their streams fold into, the upgrade of

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.9.0 - 2026-11-18
+
+The published language of Threads 0.11: the resources of each thread, a new
+KV offer beside the members and summary entries.
+
+### Added
+
+- The `resources` module: `PublishedThreadResources { resources }`, the value
+  of `threads.resources.{thread_id}` in the `PUBLISHED_LANGUAGE` bucket — every
+  key of the thread with its ids, keys sorted, an empty object for a thread
+  without resources; `RESOURCES_PREFIX` (`threads.resources.`),
+  `RESOURCES_MANIFEST_KEY` (`threads.resources_manifest`), `RESOURCES_VERSION`
+  (1), `resources_key`, `thread_id_from_resources_key` and
+  `PublishedThreadResources::ids_of(key)`. Re-exported at the crate root:
+  `PublishedThreadResources`, `RESOURCES_MANIFEST_KEY`, `RESOURCES_PREFIX`,
+  `RESOURCES_VERSION`.
+
 ## 0.8.0 - 2026-11-05
 
 The published language of Threads 0.8: the summary of each thread, a new KV

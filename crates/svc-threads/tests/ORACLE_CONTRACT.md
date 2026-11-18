@@ -213,6 +213,50 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.11.0 additions
+
+- `contract-threads` 0.9.0, module `resources`: `PublishedThreadResources {
+  resources: BTreeMap<String, Vec<String>> }` (an empty object for a thread
+  without resources), `RESOURCES_PREFIX` (`threads.resources.`),
+  `RESOURCES_MANIFEST_KEY` (`threads.resources_manifest`),
+  `RESOURCES_VERSION` (1) and `resources_key(thread_id)`.
+- `TestContext::resources_entry(thread)` reads the entry with its KV revision
+  (an unchanged revision proves nothing rewrote it),
+  `TestContext::resources_until(thread, what, wanted)` waits for it,
+  `TestContext::resources_settled(thread)` reads it after the quiet window,
+  and `TestContext::resources_manifest()` reads the raw manifest.
+- Registry T03 is now *Resources: named id lists, published per thread*: the
+  file is `t03_resources_named_id_lists_published_per_thread.rs`, test
+  `t03_resources_are_named_id_lists_shown_to_members_and_runners_and_published_per_thread`
+  (formerly `t03_resources_named_id_lists_never_published.rs`). Each change
+  rewrites the entry (a new revision), each no-op leaves its revision; the
+  command's answer is still the one event, and the members entry is left as
+  it was.
+- Registry T38 (*Thread resources: published, rewritten on change, removed on
+  deletion*) is `t38_the_resources_of_each_thread_are_published.rs`, written
+  step by step on the registry gesture, quoted verbatim in its header. Tests:
+  `t38_each_thread_publishes_its_resources_from_its_creation_to_its_deletion`
+  (T and U, from their creation to their deletion, U through its owner's
+  departure) and
+  `t38_the_threads_of_the_previous_version_get_their_entry_and_keep_it_across_a_restart`
+  (the upgrade, then one restart). "The previous version" is the last
+  release, `svc-threads` 0.10.1, built once from its tag like 0.4.0 for T26
+  (`previous::last_release_binary`, `TestContext::setup_last_release`;
+  `THREADS_LAST_RELEASE_BIN` skips the build). "After any restart the entries
+  match the threads" is read after one restart: a probe thread created with
+  resources after the restart is published (the restarted pod leads the
+  offer, and its boot reconciliation runs before its first drain; awaited
+  for 60 s, past the killed pod's lease, 30 s by default), then the
+  entries of the threads the previous version stored hold the same values at
+  the same revisions. "Leaves the entry as it was" is value and revision; a
+  title change and a stored message are compared once the summary entry shows
+  them (a positive sign the relays drained), a no-op command (which stages
+  nothing) after the quiet window.
+- Numbering: the file `t38_following_a_named_branch_live.rs` carries the
+  number the oracle proposed in 0.10.1, before the registry gave T38 to the
+  resources; the files are told apart by their titles, as the summary's
+  `t34_…` file is the registry's T35.
+
 ## 0.10.1 additions
 
 - `threadsThreadDeltas(threadId: UUID!, size: Int!, branchTip: UUID)`. With

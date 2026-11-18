@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.11.0 - 2026-11-18
+
+Threads 0.11 (registry patch 0.11.0): Threads publishes the resources of each
+thread, so that the service owning a key knows locally which threads reference
+its objects. `contract-threads` 0.9.0 adds its published language (see its
+changelog). Additive: no command, event, root, table, migration or existing
+KV entry changes.
+
+### Added
+
+- **The `thread_resources` KV offer**: one `threads.resources.{thread_id}`
+  entry of the `PUBLISHED_LANGUAGE` bucket per thread — `{ resources }`, every
+  key of the thread with its ids (keys sorted, ids in the order they were
+  added), an empty object for a thread without resources — and its manifest
+  `threads.resources_manifest` = `{"prefix": "threads.resources.",
+  "version": 1}`. Published by the engine's offer machinery like the members
+  and summary entries: staged in the transaction of every save or deletion of
+  a thread (the creation and every resources change among them), drained by
+  the offer's leader, reconciled whole at boot and periodically (so the
+  threads that exist before the upgrade are published by the first pod that
+  leads the offer), retracted when the thread is deleted (on command, or
+  because its owner left the roster).
+- **When the entry moves.** Only when the thread's resources change: the
+  creation, an `add_resource_ids` or `remove_resource_ids` that adds or removes
+  an id. A resources command that changes nothing is not saved and stages
+  nothing. A save that leaves the resources as they were (title, status,
+  members, read marks, activity) stages the key, but writes nothing: the relay
+  finds the value already held. Staged keys coalesce per thread until drained.
+- e2e T38 (`t38_the_resources_of_each_thread_are_published`), on the registry
+  gesture: T created with {kms: [k1, k2]}, U without resources, d1 added (the
+  entry rewritten with both keys), k1 added again (value and revision
+  unchanged), kms emptied, a title change and a stored message leaving the
+  entry as it was, T deleted on command and U through its owner's departure
+  from the roster, both entries removed; and an upgrade from the last
+  release, 0.10.1, publishing the threads it stored, with and without
+  resources, whose entries hold, at the same revisions, across a restart.
+- The e2e harness builds the last release (0.10.1) from its tag for T38's
+  upgrade (`THREADS_LAST_RELEASE_BIN` skips the build), beside 0.4.0 for
+  T25/T26.
+
+### Changed
+
+- e2e T03 is now *Resources: named id lists, published per thread*
+  (`t03_resources_named_id_lists_published_per_thread`, formerly
+  `t03_resources_named_id_lists_never_published`): each change rewrites
+  `threads.resources.{T}` with T's keys and ids, the commands that change
+  nothing leave the entry as it was; the command's answer is still the one
+  event it publishes.
+
+### Unchanged
+
+- `threads.members.{thread_id}` and `threads.thread_summary.{thread_id}`, and
+  their manifests (version 1): same keys, same payloads, same triggers.
+
 ## 0.10.1 - 2026-11-17
 
 A member follows live any branch of a thread, as they already read it: the
