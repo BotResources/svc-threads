@@ -1,49 +1,48 @@
 //! **T38 — Thread resources: published, rewritten on change, removed on
 //! deletion.**
 //!
-//! > The KV offer threads.resources.{thread_id} follows a thread's resource
-//! > keys and ids, from its creation to its deletion, and covers the threads
-//! > created before the upgrade.
+//! > A caller creates thread T with resources {kms: [k1, k2]}: the KV entry
+//! > threads.resources.{T} appears with resources {kms: [k1, k2]}. A thread U
+//! > created without resources gets an entry with an empty resources object.
+//! > Id d1 is added to T under key documents: the entry is rewritten with both
+//! > keys. Adding k1 again leaves the entry as it was. Removing k1 and k2
+//! > empties key kms: the entry keeps documents only. A title change or a
+//! > stored message leaves the entry as it was. T is deleted: its entry is
+//! > removed; U, whose owner leaves the roster, is deleted and its entry
+//! > removed too. Threads created by the previous version, with and without
+//! > resources, get their entry when the new version starts, and after any
+//! > restart the entries match the threads.
 //!
-//! The registry gives this test its short description alone; the gesture below
-//! is the oracle's reading of it, against the specification's published
-//! language ("`{ resources }`, the thread's keys with their ids (an empty
-//! object for a thread without resources), rewritten when its resources change
-//! and removed when the thread is deleted") and the contract
-//! (`contract-threads` 0.9.0, module `resources`):
+//! "Leaves the entry as it was" is read on the entry's value and its KV
+//! revision. Where the gesture changes the thread (a title, a message), the
+//! comparison waits first for a positive sign that the relays drained the
+//! change — the summary entry showing the title, then the new last activity —
+//! and then for the quiet window. A no-op command stages nothing: only the
+//! quiet window precedes its comparison. The scenario also reads the manifest
+//! `threads.resources_manifest` (`contract-threads` 0.9.0).
 //!
-//! > The harness creates thread T, owned by O with member A, with resources
-//! > {kms: [k1], documents: [d1, d2]}: threads.resources.{T} holds them, and
-//! > the manifest threads.resources_manifest declares the prefix and version
-//! > 1. Thread U, created without resources, publishes an empty object. Adding
-//! > k2 under kms rewrites T's entry. Setting T's title, adding a member and
-//! > A's message change T but not its resources: the entry is not rewritten.
-//! > Removing d1 and d2 drops documents from the entry. Deleting T on command
-//! > retracts its entry; U's stays as it was. Thread V, owned by P, with
-//! > resources {kms: [k3]}: P leaves the roster, V is deleted and its entry
-//! > retracted.
-//! >
-//! > Upgrade: the previous release stores thread W with resources {kms: [k1]}
-//! > and thread X without resources, publishing no resources entry. The new
-//! > version starts on the same database: W's entry holds {kms: [k1]}, X's an
-//! > empty object, and the manifest is published. Adding k2 to W afterwards
-//! > rewrites its entry.
-//!
-//! "Not rewritten" is read on the entry's KV revision, unchanged once the
-//! relay had the quiet window to write anything owed. The previous release is
-//! `svc-threads` 0.4.0, as T26 runs it (`common::previous`): it never
-//! published resources, as no release before 0.11 did.
+//! "The previous version" is the last release, `svc-threads` 0.10.1
+//! (`common::previous::last_release_binary`), which publishes no resources.
+//! "After any restart the entries match the threads" is read after one
+//! restart of this version on the same database: a probe thread Y, created
+//! with resources after the restart, is published — the sign that the
+//! restarted pod leads the offer and has run its boot reconciliation, which
+//! comes before its first drain; awaited past the killed pod's lease — and W's
+//! and X's entries then hold the same values at the same revisions.
 //!
 //! Channels: the answers (4); the resources entries, their revisions and the
-//! manifest (4); the thread as its members read it (2); Identity's roster (4,
-//! consumed).
+//! manifest, the summary entry as a drain signal (4); the thread as its
+//! members read it (2); Identity's roster (4, consumed); the readiness of the
+//! upgraded and restarted boots.
 
 mod common;
+
+use std::time::Duration;
 
 use common::flows::{command, create, creation, resources_of, say, thread_confirmed, thread_view};
 use common::{PUSH_TIMEOUT, TestContext, eventually};
 use contract_threads::{
-    AddMembers, AddResourceIds, DeleteThread, PublishedThreadResources, RemoveResourceIds, SetTitle,
+    AddResourceIds, DeleteThread, PublishedThreadResources, RemoveResourceIds, SetTitle,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -70,9 +69,29 @@ fn add(thread: Uuid, key: &str, values: &[&str]) -> AddResourceIds {
     }
 }
 
+/// Long enough for a restarted pod to take over the offer from a killed one:
+/// the engine's default lease (30 s), its beat and a margin.
+const LEASE_EXPIRY: Duration = Duration::from_secs(60);
+
 /// The manifest of the family: its prefix and wire version.
 fn manifest() -> serde_json::Value {
     json!({ "prefix": "threads.resources.", "version": 1 })
+}
+
+/// Waits until T's summary entry satisfies `wanted`: the relays drained the
+/// change that moved it.
+async fn summary_shows(
+    ctx: &TestContext,
+    thread: Uuid,
+    what: &str,
+    wanted: impl Fn(&contract_threads::PublishedThreadSummary) -> bool,
+) {
+    eventually(what, PUSH_TIMEOUT, || async {
+        ctx.summary_entry(thread)
+            .await
+            .is_some_and(|(summary, _)| wanted(&summary))
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -87,14 +106,16 @@ async fn t38_each_thread_publishes_its_resources_from_its_creation_to_its_deleti
 
     // ── creation ─────────────────────────────────────────────────────────
 
-    // When the harness creates T, owned by O with A, with resources.
+    // When a caller creates T, owned by O with A, with resources
+    // {kms: [k1, k2]}.
     let mut born = creation(Some(o.id), &[a.id]);
-    born.resources = entry(&[("kms", &["k1"]), ("documents", &["d1", "d2"])]).resources;
+    born.resources = entry(&[("kms", &["k1", "k2"])]).resources;
     let t = create(&ctx, born).await;
 
-    // Then (4) T's entry holds its keys with their ids, as its members read
-    // them (2); the manifest declares the family and its wire version.
-    let created = entry(&[("documents", &["d1", "d2"]), ("kms", &["k1"])]);
+    // Then (4) threads.resources.{T} appears with {kms: [k1, k2]}, as T's
+    // members read them (2); the manifest declares the family and its wire
+    // version.
+    let created = entry(&[("kms", &["k1", "k2"])]);
     ctx.resources_until(t, "T's resources are published", |held| held == &created)
         .await;
     assert_eq!(
@@ -103,35 +124,71 @@ async fn t38_each_thread_publishes_its_resources_from_its_creation_to_its_deleti
     );
     assert_eq!(ctx.resources_manifest().await, Some(manifest()));
 
-    // When U is created without resources.
-    let u = create(&ctx, creation(Some(o.id), &[])).await;
+    // When U, owned by P, is created without resources.
+    let u = create(&ctx, creation(Some(p.id), &[])).await;
 
-    // Then (4) U's entry is an empty object.
+    // Then (4) U's entry holds an empty resources object.
     ctx.resources_until(u, "U's empty resources are published", |held| {
         held == &entry(&[])
     })
     .await;
-    let u_entry = ctx.resources_settled(u).await;
-    assert_eq!(u_entry.0, entry(&[]));
 
-    // ── a change of the resources ────────────────────────────────────────
+    // ── d1 added under documents ─────────────────────────────────────────
 
-    // When k2 is added under kms.
+    // When d1 is added to T under documents.
     let (_, revision_created) = ctx.resources_settled(t).await;
-    let added = command(&ctx, &add(t, "kms", &["k2"])).await;
+    let added = command(&ctx, &add(t, "documents", &["d1"])).await;
 
-    // Then (4) T's entry is rewritten with it.
-    thread_confirmed(&ctx, added, "adding k2").await;
-    let grown = entry(&[("documents", &["d1", "d2"]), ("kms", &["k1", "k2"])]);
-    let (_, revision_grown) = ctx
-        .resources_until(t, "k2 is published", |held| held == &grown)
+    // Then (4) the entry is rewritten with both keys.
+    thread_confirmed(&ctx, added, "adding d1").await;
+    let both = entry(&[("documents", &["d1"]), ("kms", &["k1", "k2"])]);
+    ctx.resources_until(t, "T's entry holds both keys", |held| held == &both)
         .await;
-    assert_ne!(revision_grown, revision_created);
+    let both_held = ctx.resources_settled(t).await;
+    assert_eq!(both_held.0, both);
+    assert_ne!(both_held.1, revision_created, "the entry is rewritten");
 
-    // ── changes outside the resources ────────────────────────────────────
+    // ── k1 added again ───────────────────────────────────────────────────
 
-    // When T's title is set, B is added and A writes a message.
-    let held = ctx.resources_settled(t).await;
+    // When k1 is added again.
+    let again = command(&ctx, &add(t, "kms", &["k1"])).await;
+
+    // Then confirmed, and (4) the entry is left as it was: same value, same
+    // revision.
+    thread_confirmed(&ctx, again, "adding k1 again").await;
+    assert_eq!(
+        ctx.resources_settled(t).await,
+        both_held,
+        "adding k1 again leaves the entry as it was"
+    );
+
+    // ── kms emptied ──────────────────────────────────────────────────────
+
+    // When k1 and k2 are removed.
+    let removed = command(
+        &ctx,
+        &RemoveResourceIds {
+            thread_id: t,
+            key: "kms".to_string(),
+            ids: ids(&["k1", "k2"]),
+            acting_user_id: None,
+        },
+    )
+    .await;
+
+    // Then (4) the emptied kms leaves the entry, which keeps documents only.
+    thread_confirmed(&ctx, removed, "emptying kms").await;
+    let documents = entry(&[("documents", &["d1"])]);
+    ctx.resources_until(t, "T's entry keeps documents only", |held| {
+        held == &documents
+    })
+    .await;
+    let documents_held = ctx.resources_settled(t).await;
+    assert_eq!(documents_held.0, documents);
+
+    // ── a title change, a stored message ─────────────────────────────────
+
+    // When T's title is changed.
     let titled = command(
         &ctx,
         &SetTitle {
@@ -141,55 +198,39 @@ async fn t38_each_thread_publishes_its_resources_from_its_creation_to_its_deleti
         },
     )
     .await;
-    thread_confirmed(&ctx, titled, "setting T's title").await;
-    let b = ctx.enrol("bob").await;
-    let joined = command(
-        &ctx,
-        &AddMembers {
-            thread_id: t,
-            user_ids: vec![b.id],
-            acting_user_id: Some(o.id),
-        },
-    )
-    .await;
-    thread_confirmed(&ctx, joined, "adding B").await;
-    say(&ctx, t, None, &a, "Here are the Q3 figures").await;
+    thread_confirmed(&ctx, titled, "changing T's title").await;
 
-    // Then T changed — B reads its title — but (4) its resources entry is not
-    // rewritten: same value, same revision.
-    assert_eq!(
-        thread_view(&ctx, &b.passport, t).await["title"],
-        "Q3 review"
-    );
+    // Then, once the change is drained (the summary shows the title), (4)
+    // the resources entry is left as it was.
+    summary_shows(&ctx, t, "the title is drained", |summary| {
+        summary.title.as_deref() == Some("Q3 review")
+    })
+    .await;
     assert_eq!(
         ctx.resources_settled(t).await,
-        held,
-        "a change outside the resources rewrites no resources entry"
+        documents_held,
+        "a title change leaves the entry as it was"
     );
 
-    // ── a key emptied ────────────────────────────────────────────────────
+    // When A's message is stored on T.
+    let (summary_before, _) = ctx.summary_entry(t).await.expect("T's summary");
+    say(&ctx, t, None, &a, "Here are the Q3 figures").await;
 
-    // When d1 and d2 are removed.
-    let removed = command(
-        &ctx,
-        &RemoveResourceIds {
-            thread_id: t,
-            key: "documents".to_string(),
-            ids: ids(&["d1", "d2"]),
-            acting_user_id: None,
-        },
-    )
+    // Then, once the change is drained (the summary's last activity moved),
+    // (4) the resources entry is left as it was.
+    summary_shows(&ctx, t, "the message is drained", |summary| {
+        summary.last_activity_at > summary_before.last_activity_at
+    })
     .await;
+    assert_eq!(
+        ctx.resources_settled(t).await,
+        documents_held,
+        "a stored message leaves the entry as it was"
+    );
 
-    // Then (4) documents leaves T's entry.
-    thread_confirmed(&ctx, removed, "emptying documents").await;
-    let shrunk = entry(&[("kms", &["k1", "k2"])]);
-    ctx.resources_until(t, "documents leaves T's entry", |held| held == &shrunk)
-        .await;
+    // ── deletions ────────────────────────────────────────────────────────
 
-    // ── deletion on command ──────────────────────────────────────────────
-
-    // When O deletes T.
+    // When T is deleted.
     let deleted = command(
         &ctx,
         &DeleteThread {
@@ -199,44 +240,31 @@ async fn t38_each_thread_publishes_its_resources_from_its_creation_to_its_deleti
     )
     .await;
 
-    // Then (4) T's entry is retracted; U's stays as it was.
+    // Then (4) its entry is removed.
     thread_confirmed(&ctx, deleted, "deleting T").await;
-    eventually("T's resources entry is retracted", PUSH_TIMEOUT, || async {
+    eventually("T's resources entry is removed", PUSH_TIMEOUT, || async {
         ctx.resources_entry(t).await.is_none()
     })
     .await;
-    assert_eq!(ctx.resources_settled(u).await, u_entry);
 
-    // ── deletion because the owner left the roster ───────────────────────
-
-    // Given V, owned by P, with resources {kms: [k3]}.
-    let mut born = creation(Some(p.id), &[]);
-    born.resources = entry(&[("kms", &["k3"])]).resources;
-    let v = create(&ctx, born).await;
-    ctx.resources_until(v, "V's resources are published", |held| {
-        held == &entry(&[("kms", &["k3"])])
-    })
-    .await;
-
-    // When Identity retracts P's roster entry.
+    // When P, U's owner, leaves the roster.
     ctx.retract(&p).await;
 
-    // Then V is deleted and (4) its entry retracted; U's stays.
-    eventually("V's resources entry is retracted", PUSH_TIMEOUT, || async {
-        ctx.resources_entry(v).await.is_none()
+    // Then U is deleted and (4) its entry removed too.
+    eventually("U's resources entry is removed", PUSH_TIMEOUT, || async {
+        ctx.resources_entry(u).await.is_none()
     })
     .await;
-    assert_eq!(ctx.resources_settled(u).await, u_entry);
 
     ctx.teardown().await;
 }
 
 #[tokio::test]
-#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH, and builds the previous release"]
-async fn t38_the_threads_created_before_the_upgrade_are_published() {
-    // Given the previous release, which publishes no resources, holding W
-    // with resources {kms: [k1]} and X without resources.
-    let mut ctx = TestContext::setup_previous().await;
+#[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH, and builds the last release"]
+async fn t38_the_threads_of_the_previous_version_get_their_entry_and_keep_it_across_a_restart() {
+    // Given the previous version (0.10.1), which publishes no resources,
+    // holding W with resources {kms: [k1]} and X without resources.
+    let mut ctx = TestContext::setup_last_release().await;
     let o = ctx.enrol("olga").await;
     let mut born = creation(Some(o.id), &[]);
     born.resources = entry(&[("kms", &["k1"])]).resources;
@@ -254,8 +282,8 @@ async fn t38_the_threads_created_before_the_upgrade_are_published() {
         upgrade.output
     );
 
-    // Then (4) W's entry holds {kms: [k1]}, X's an empty object, and the
-    // manifest is published.
+    // Then (4) W's entry holds {kms: [k1]}, X's an empty resources object,
+    // and the manifest is published.
     ctx.resources_until(w, "W's resources are published", |held| {
         held == &entry(&[("kms", &["k1"])])
     })
@@ -265,19 +293,38 @@ async fn t38_the_threads_created_before_the_upgrade_are_published() {
     })
     .await;
     assert_eq!(ctx.resources_manifest().await, Some(manifest()));
+    let (w_held, x_held) = (
+        ctx.resources_settled(w).await,
+        ctx.resources_settled(x).await,
+    );
 
-    // When k2 is added to W.
-    let (_, before) = ctx.resources_settled(w).await;
-    let added = command(&ctx, &add(w, "kms", &["k2"])).await;
+    // When the new version restarts on the same database.
+    let restart = ctx.restart_current().await;
+    assert!(
+        restart.migrated && restart.ready,
+        "the new version restarts:\n{}",
+        restart.output
+    );
 
-    // Then (4) W's entry is rewritten with it.
-    thread_confirmed(&ctx, added, "adding k2 to W").await;
-    let (_, after) = ctx
-        .resources_until(w, "k2 is published", |held| {
-            held == &entry(&[("kms", &["k1", "k2"])])
-        })
-        .await;
-    assert_ne!(after, before);
+    // Then, once the restarted pod leads the offer (a probe thread Y created
+    // with resources is published), (4) W's and X's entries still match their
+    // threads, at the same revisions.
+    // The killed pod's offer leases expire first: the restarted pod leads
+    // once the engine's lease (30 s by default) has run out, so the probe is
+    // awaited past it rather than within `PUSH_TIMEOUT`.
+    let mut probe = creation(Some(o.id), &[]);
+    probe.resources = entry(&[("kms", &["y1"])]).resources;
+    let y = probe.thread_id;
+    let probed = command(&ctx, &probe).await;
+    thread_confirmed(&ctx, probed, "creating the probe Y").await;
+    eventually("the restarted pod publishes Y", LEASE_EXPIRY, || async {
+        ctx.resources_entry(y)
+            .await
+            .is_some_and(|(held, _)| held == entry(&[("kms", &["y1"])]))
+    })
+    .await;
+    assert_eq!(ctx.resources_settled(w).await, w_held);
+    assert_eq!(ctx.resources_settled(x).await, x_held);
 
     ctx.teardown().await;
 }

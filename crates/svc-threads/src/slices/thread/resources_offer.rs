@@ -13,11 +13,12 @@
 //! leads it), and publishes the manifest `threads.resources_manifest`.
 //!
 //! What moves the entry: the creation, and `add_resource_ids` /
-//! `remove_resource_ids` when they change a key. Every other save of the
-//! thread (title, status, members, read marks, activity) is staged too, as is
-//! a no-op resources command's, but the relay finds the entry already holding
-//! that value and writes nothing; staged keys coalesce per thread until
-//! drained.
+//! `remove_resource_ids` when they change a key. A resources command that
+//! changes nothing (ids already present, or absent) is `Applied::Unchanged`:
+//! the thread is not saved and nothing is staged. Every other save of the
+//! thread (title, status, members, read marks, activity) stages the key too,
+//! but the relay finds the entry already holding that value and writes
+//! nothing; staged keys coalesce per thread until drained.
 
 use contract_threads::PublishedThreadResources;
 use contract_threads::resources::{RESOURCES_PREFIX, RESOURCES_VERSION, resources_key};

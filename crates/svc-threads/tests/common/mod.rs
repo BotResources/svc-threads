@@ -210,6 +210,17 @@ impl TestContext {
         Self::boot_on(previous::binary(), Handshake::Accept, Windows::default()).await
     }
 
+    /// The nominal boot of the last release (`svc-threads` 0.10.1): what a
+    /// deployment ran right before upgrading to this version.
+    pub async fn setup_last_release() -> Self {
+        Self::boot_on(
+            previous::last_release_binary(),
+            Handshake::Accept,
+            Windows::default(),
+        )
+        .await
+    }
+
     async fn boot_on(binary: PathBuf, handshake: Handshake, windows: Windows) -> Self {
         let _ = dotenvy::dotenv();
 

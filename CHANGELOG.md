@@ -33,15 +33,21 @@ KV entry changes.
   because its owner left the roster).
 - **When the entry moves.** Only when the thread's resources change: the
   creation, an `add_resource_ids` or `remove_resource_ids` that adds or removes
-  an id. A save that leaves the resources as they were (title, status,
-  members, read marks, activity, and a resources command that changes
-  nothing) writes nothing: the relay finds the value already held. Staged keys
-  coalesce per thread until drained.
-- e2e T38 (`t38_the_resources_of_each_thread_are_published`): creation with
-  and without resources, the manifest, a change rewriting the entry, a title,
-  a member and a message leaving its revision, a key emptied, deletion on
-  command and on the owner's departure retracting it; and an upgrade from the
-  previous release publishing the threads it stored.
+  an id. A resources command that changes nothing is not saved and stages
+  nothing. A save that leaves the resources as they were (title, status,
+  members, read marks, activity) stages the key, but writes nothing: the relay
+  finds the value already held. Staged keys coalesce per thread until drained.
+- e2e T38 (`t38_the_resources_of_each_thread_are_published`), on the registry
+  gesture: T created with {kms: [k1, k2]}, U without resources, d1 added (the
+  entry rewritten with both keys), k1 added again (value and revision
+  unchanged), kms emptied, a title change and a stored message leaving the
+  entry as it was, T deleted on command and U through its owner's departure
+  from the roster, both entries removed; and an upgrade from the last
+  release, 0.10.1, publishing the threads it stored, with and without
+  resources, whose entries hold, at the same revisions, across a restart.
+- The e2e harness builds the last release (0.10.1) from its tag for T38's
+  upgrade (`THREADS_LAST_RELEASE_BIN` skips the build), beside 0.4.0 for
+  T25/T26.
 
 ### Changed
 

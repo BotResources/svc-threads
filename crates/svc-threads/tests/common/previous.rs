@@ -6,6 +6,10 @@
 //!
 //! The release's binary is built once from its tag (`cargo install --git`,
 //! the repository of this crate), or taken from `THREADS_PREVIOUS_BIN`.
+//!
+//! The last release before this version, `svc-threads` 0.10.1, is built the
+//! same way (or taken from `THREADS_LAST_RELEASE_BIN`): the upgrade T38 starts
+//! from. Its commands are this version's (the thread commands are unchanged).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -31,46 +35,70 @@ use super::{PUSH_TIMEOUT, TestContext, gql};
 /// The tag of the release the upgrade starts from.
 pub const PREVIOUS_RELEASE_TAG: &str = "svc-threads/v0.4.0";
 
+/// The tag of the last release before this version: the one a deployment runs
+/// when it upgrades to this one (T38, the threads it stored before the
+/// resources were published).
+pub const LAST_RELEASE_TAG: &str = "svc-threads/v0.10.1";
+
 /// The binary of the previous release.
 pub fn binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
         .get_or_init(|| {
-            if let Ok(path) = std::env::var("THREADS_PREVIOUS_BIN") {
-                let path = PathBuf::from(path);
-                assert!(
-                    path.is_file(),
-                    "THREADS_PREVIOUS_BIN names no file: {path:?}"
-                );
-                return path;
-            }
-            let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("svc-threads-0.4.0");
-            let bin = root.join("bin").join("svc-threads");
-            if !bin.is_file() {
-                let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-                let built = Command::new(cargo)
-                    .args([
-                        "install",
-                        "--locked",
-                        "--git",
-                        env!("CARGO_PKG_REPOSITORY"),
-                        "--tag",
-                        PREVIOUS_RELEASE_TAG,
-                        "--root",
-                    ])
-                    .arg(&root)
-                    .arg("svc-threads")
-                    .env("CARGO_TARGET_DIR", root.join("target"))
-                    .status()
-                    .expect("run cargo install for the previous release");
-                assert!(
-                    built.success(),
-                    "the previous release {PREVIOUS_RELEASE_TAG} builds from its tag"
-                );
-            }
-            bin
+            release_binary(
+                PREVIOUS_RELEASE_TAG,
+                "svc-threads-0.4.0",
+                "THREADS_PREVIOUS_BIN",
+            )
         })
         .clone()
+}
+
+/// The binary of the last release, built once from its tag, or taken from
+/// `THREADS_LAST_RELEASE_BIN`.
+pub fn last_release_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            release_binary(
+                LAST_RELEASE_TAG,
+                "svc-threads-0.10.1",
+                "THREADS_LAST_RELEASE_BIN",
+            )
+        })
+        .clone()
+}
+
+/// A release's binary: the file `env_var` names, or the release built once
+/// from `tag` under the target's temporary directory `dir`.
+fn release_binary(tag: &str, dir: &str, env_var: &str) -> PathBuf {
+    if let Ok(path) = std::env::var(env_var) {
+        let path = PathBuf::from(path);
+        assert!(path.is_file(), "{env_var} names no file: {path:?}");
+        return path;
+    }
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
+    let bin = root.join("bin").join("svc-threads");
+    if !bin.is_file() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let built = Command::new(cargo)
+            .args([
+                "install",
+                "--locked",
+                "--git",
+                env!("CARGO_PKG_REPOSITORY"),
+                "--tag",
+                tag,
+                "--root",
+            ])
+            .arg(&root)
+            .arg("svc-threads")
+            .env("CARGO_TARGET_DIR", root.join("target"))
+            .status()
+            .expect("run cargo install for a release");
+        assert!(built.success(), "the release {tag} builds from its tag");
+    }
+    bin
 }
 
 // ── its commands ────────────────────────────────────────────────────────────

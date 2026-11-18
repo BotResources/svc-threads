@@ -233,13 +233,25 @@ in that output.
   command's answer is still the one event, and the members entry is left as
   it was.
 - Registry T38 (*Thread resources: published, rewritten on change, removed on
-  deletion*) is `t38_the_resources_of_each_thread_are_published.rs`. The
-  registry gives it a short description only; the file states the gesture the
-  oracle reads from it: creation with and without resources, the manifest, a
-  change rewriting the entry, changes outside the resources (title, member,
-  message) leaving its revision, a key emptied, deletion on command and on
-  the owner's departure retracting it, and an upgrade from the previous
-  release (0.4.0, as T26 runs it) publishing the threads it stored.
+  deletion*) is `t38_the_resources_of_each_thread_are_published.rs`, written
+  step by step on the registry gesture, quoted verbatim in its header. Tests:
+  `t38_each_thread_publishes_its_resources_from_its_creation_to_its_deletion`
+  (T and U, from their creation to their deletion, U through its owner's
+  departure) and
+  `t38_the_threads_of_the_previous_version_get_their_entry_and_keep_it_across_a_restart`
+  (the upgrade, then one restart). "The previous version" is the last
+  release, `svc-threads` 0.10.1, built once from its tag like 0.4.0 for T26
+  (`previous::last_release_binary`, `TestContext::setup_last_release`;
+  `THREADS_LAST_RELEASE_BIN` skips the build). "After any restart the entries
+  match the threads" is read after one restart: a probe thread created with
+  resources after the restart is published (the restarted pod leads the
+  offer, and its boot reconciliation runs before its first drain; awaited
+  for 60 s, past the killed pod's lease, 30 s by default), then the
+  entries of the threads the previous version stored hold the same values at
+  the same revisions. "Leaves the entry as it was" is value and revision; a
+  title change and a stored message are compared once the summary entry shows
+  them (a positive sign the relays drained), a no-op command (which stages
+  nothing) after the quiet window.
 - Numbering: the file `t38_following_a_named_branch_live.rs` carries the
   number the oracle proposed in 0.10.1, before the registry gave T38 to the
   resources; the files are told apart by their titles, as the summary's
