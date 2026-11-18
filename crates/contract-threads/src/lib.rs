@@ -7,6 +7,7 @@ pub mod library;
 pub mod members;
 pub mod message;
 pub mod reason;
+pub mod resources;
 pub mod status;
 pub mod summary;
 pub mod thread;
@@ -36,6 +37,9 @@ pub use message::{
     EditMessage, FailMessage, FailMessageV2, MessageTurn, StoreMessageV2, StreamSeal, UserTurn,
 };
 pub use reason::ReasonCode;
+pub use resources::{
+    PublishedThreadResources, RESOURCES_MANIFEST_KEY, RESOURCES_PREFIX, RESOURCES_VERSION,
+};
 pub use status::{ClosingStatus, MessageStatus, ThreadStatus};
 pub use summary::{PublishedThreadSummary, SUMMARY_MANIFEST_KEY, SUMMARY_PREFIX, SUMMARY_VERSION};
 pub use thread::{

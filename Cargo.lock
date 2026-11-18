@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "br-core-integration",
  "br-llm-messages 2.1.0",
@@ -3683,7 +3683,7 @@ dependencies = [
  "conformance-directory",
  "conformance-scope",
  "contract-threads 0.4.0",
- "contract-threads 0.8.0",
+ "contract-threads 0.9.0",
  "dotenvy",
  "futures-util",
  "reqwest",
