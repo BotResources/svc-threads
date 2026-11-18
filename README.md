@@ -31,21 +31,23 @@ member's read mark — and serves them, live, to their members.
   conversation coherent.
 - Threads decides who may read: the members of a thread, and nobody else.
 - Threads publishes the members of each thread (`threads.members.{thread_id}`),
-  so that other services decide locally, and the summary of each thread
+  so that other services decide locally, the summary of each thread
   (`threads.thread_summary.{thread_id}`: title, parent and origin, status,
   resolution, creation, last activity), so that they list conversations
-  without asking it.
+  without asking it, and the resources of each thread
+  (`threads.resources.{thread_id}`: every key with its ids), so that the
+  service owning a key knows which threads reference its objects.
 - Threads runs no AI logic. A conversation's title is set by command
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.10.1.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.11.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
 | Crate | What it is |
 |---|---|
-| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members and summary KV values, the content model and the chunk format of its message stream. What a commanding service imports. |
+| [`crates/contract-threads`](crates/contract-threads) | The published language: the commands Threads accepts, the one answer it publishes per command, the members, summary and resources KV values, the content model and the chunk format of its message stream. What a commanding service imports. |
 | [`crates/svc-threads`](crates/svc-threads) | The service, on [`br-service-engine`](https://github.com/BotResources/br-service-engine) (fatty manner, soft EDA, multi-pod), organized by capability under `src/slices/` (`thread`, `message`, `artifact`, `runner`). |
 
 ## Running
@@ -75,6 +77,15 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.10 → 0.11
+
+0.11 publishes one more KV family, `threads.resources.*`, and its manifest
+`threads.resources_manifest`; nothing is migrated and no existing key,
+command or event changes. The first 0.11 pod that leads the offer reconciles
+the whole keyspace, so every existing thread gets its resources entry shortly
+after the rollout. A consumer of the entries is rolled out after Threads 0.11:
+before it, the family is empty.
 
 ## Deploy: 0.9 → 0.10
 

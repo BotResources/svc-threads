@@ -92,8 +92,9 @@ pub struct RemoveMembers {
 thread_command!(RemoveMembers, "remove_members");
 
 /// `thread.add_resource_ids` — ids added to one named list. Refused
-/// `THREAD_NOT_FOUND`. Resources are never published; runners receive them
-/// with the thread's context.
+/// `THREAD_NOT_FOUND`. Runners receive the resources with the thread's
+/// context; every thread's are published on `threads.resources.{thread_id}`
+/// ([`crate::resources`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddResourceIds {
     pub thread_id: Uuid,

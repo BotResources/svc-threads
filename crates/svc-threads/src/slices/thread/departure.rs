@@ -4,8 +4,8 @@
 //!
 //! ENGINE GAP (br-service-engine v0.4.1): a mirror projection can write rows
 //! and stage impacts, but cannot run pipeline work. Deleting a thread needs
-//! one: `cx.delete`, which retracts the members entry and releases artifact
-//! bytes. The directory mirror therefore only marks the user out of the
+//! one: `cx.delete`, which retracts the thread's published entries (members,
+//! summary, resources) and releases artifact bytes. The directory mirror therefore only marks the user out of the
 //! roster, and this module carries the consequence through the write pipeline:
 //! a cron job on the engine beat finds the threads whose owner the roster copy
 //! holds out of the roster — the canonical predicate itself, so nothing is lost

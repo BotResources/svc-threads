@@ -213,6 +213,38 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.11.0 additions
+
+- `contract-threads` 0.9.0, module `resources`: `PublishedThreadResources {
+  resources: BTreeMap<String, Vec<String>> }` (an empty object for a thread
+  without resources), `RESOURCES_PREFIX` (`threads.resources.`),
+  `RESOURCES_MANIFEST_KEY` (`threads.resources_manifest`),
+  `RESOURCES_VERSION` (1) and `resources_key(thread_id)`.
+- `TestContext::resources_entry(thread)` reads the entry with its KV revision
+  (an unchanged revision proves nothing rewrote it),
+  `TestContext::resources_until(thread, what, wanted)` waits for it,
+  `TestContext::resources_settled(thread)` reads it after the quiet window,
+  and `TestContext::resources_manifest()` reads the raw manifest.
+- Registry T03 is now *Resources: named id lists, published per thread*: the
+  file is `t03_resources_named_id_lists_published_per_thread.rs`, test
+  `t03_resources_are_named_id_lists_shown_to_members_and_runners_and_published_per_thread`
+  (formerly `t03_resources_named_id_lists_never_published.rs`). Each change
+  rewrites the entry (a new revision), each no-op leaves its revision; the
+  command's answer is still the one event, and the members entry is left as
+  it was.
+- Registry T38 (*Thread resources: published, rewritten on change, removed on
+  deletion*) is `t38_the_resources_of_each_thread_are_published.rs`. The
+  registry gives it a short description only; the file states the gesture the
+  oracle reads from it: creation with and without resources, the manifest, a
+  change rewriting the entry, changes outside the resources (title, member,
+  message) leaving its revision, a key emptied, deletion on command and on
+  the owner's departure retracting it, and an upgrade from the previous
+  release (0.4.0, as T26 runs it) publishing the threads it stored.
+- Numbering: the file `t38_following_a_named_branch_live.rs` carries the
+  number the oracle proposed in 0.10.1, before the registry gave T38 to the
+  resources; the files are told apart by their titles, as the summary's
+  `t34_…` file is the registry's T35.
+
 ## 0.10.1 additions
 
 - `threadsThreadDeltas(threadId: UUID!, size: Int!, branchTip: UUID)`. With

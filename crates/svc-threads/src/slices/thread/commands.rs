@@ -261,8 +261,9 @@ pub fn delete<'r>(
 
 /// Deletes a loaded and locked thread with everything it holds: its artifacts
 /// deleted through their store (their bytes released), the streams of its
-/// streaming messages sealed, its `Deleted` fact recorded, its members entry
-/// retracted (the offer's dirty key, staged by the delete), its rows deleted.
+/// streaming messages sealed, its `Deleted` fact recorded, its members,
+/// summary and resources entries retracted (the offers' dirty keys, staged by
+/// the delete), its rows deleted.
 /// Its members' windows over it are repopulated.
 pub async fn delete_thread(
     ops: &mut Ops<'_>,

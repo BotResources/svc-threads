@@ -19,8 +19,10 @@
 //! 4. **the integration side** — the commands a commanding service sends and
 //!    their one answer each ([`commands`]), the message stream a writer pushes
 //!    ([`stream`]), Identity's roster and scope handshake ([`identity`]), the
-//!    `threads.members.{thread_id}` entries Threads publishes
-//!    ([`TestContext::published_members`]), the commands Threads itself puts
+//!    `threads.members.{thread_id}`, `threads.thread_summary.{thread_id}` and
+//!    `threads.resources.{thread_id}` entries Threads publishes
+//!    ([`TestContext::published_members`], [`TestContext::summary_entry`],
+//!    [`TestContext::resources_entry`]), the commands Threads itself puts
 //!    on the bus ([`TestContext::commands_not_sent_by_the_scenario`]), the
 //!    object store ([`artifacts`]) and the fact log
 //!    `threads.fact` ([`facts`], read with `SELECT` on the app role).
@@ -73,7 +75,7 @@ use br_test_harness::{
     E2eDatabase, FabricTestNats, GraphqlClient, SpawnedProcess, run_once, wait_until,
 };
 use br_util_nats_fabric::KvKey;
-use contract_threads::{PublishedThreadMembers, PublishedThreadSummary};
+use contract_threads::{PublishedThreadMembers, PublishedThreadResources, PublishedThreadSummary};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -820,6 +822,61 @@ impl TestContext {
     /// The raw manifest of the summary offer, if published.
     pub async fn summary_manifest(&self) -> Option<Value> {
         let key = KvKey::new(contract_threads::SUMMARY_MANIFEST_KEY)
+            .expect("the manifest key is a valid KV key");
+        self.nats
+            .pl_get_raw(&key)
+            .await
+            .map(|bytes| serde_json::from_slice(&bytes).expect("a JSON manifest"))
+    }
+
+    /// The `threads.resources.{thread_id}` entry and its revision, if
+    /// published: an unchanged revision proves nothing rewrote it.
+    pub async fn resources_entry(
+        &self,
+        thread: Uuid,
+    ) -> Option<(PublishedThreadResources, br_util_nats_fabric::Revision)> {
+        let key = KvKey::new(contract_threads::resources::resources_key(thread))
+            .expect("a resources key is a valid KV key");
+        self.nats
+            .pl_reader::<PublishedThreadResources>()
+            .await
+            .get_with_revision(&key)
+            .await
+            .expect("read the published language")
+    }
+
+    /// Waits until `thread`'s resources entry satisfies `wanted`, and answers
+    /// it with its revision.
+    pub async fn resources_until(
+        &self,
+        thread: Uuid,
+        what: &str,
+        wanted: impl Fn(&PublishedThreadResources) -> bool,
+    ) -> (PublishedThreadResources, br_util_nats_fabric::Revision) {
+        eventually(what, PUSH_TIMEOUT, || async {
+            self.resources_entry(thread)
+                .await
+                .is_some_and(|(entry, _)| wanted(&entry))
+        })
+        .await;
+        self.resources_entry(thread).await.expect("waited above")
+    }
+
+    /// `thread`'s resources entry once the offer's relay had the quiet window
+    /// to write anything still owed.
+    pub async fn resources_settled(
+        &self,
+        thread: Uuid,
+    ) -> (PublishedThreadResources, br_util_nats_fabric::Revision) {
+        tokio::time::sleep(QUIET_WINDOW).await;
+        self.resources_entry(thread)
+            .await
+            .unwrap_or_else(|| panic!("threads.resources.{thread} is published"))
+    }
+
+    /// The raw manifest of the resources offer, if published.
+    pub async fn resources_manifest(&self) -> Option<Value> {
+        let key = KvKey::new(contract_threads::RESOURCES_MANIFEST_KEY)
             .expect("the manifest key is a valid KV key");
         self.nats
             .pl_get_raw(&key)

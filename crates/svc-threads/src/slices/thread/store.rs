@@ -327,7 +327,8 @@ pub async fn children_page_of_member(
     .await?)
 }
 
-/// Every thread: the members offer's reconcile. Five statements.
+/// Every thread: the reconcile of the members, summary and resources offers.
+/// Five statements.
 pub async fn all_threads(conn: &mut PgConnection) -> Result<Vec<ThreadState>, EngineError> {
     let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM threads.thread ORDER BY id")
         .fetch_all(&mut *conn)

@@ -1,22 +1,29 @@
-//! **T03 — Resources: named id lists, never published.**
+//! **T03 — Resources: named id lists, published per thread.**
 //!
 //! > On thread T, the harness adds ids d1 and d2 under key documents:
-//! > confirmed, a member reading T sees documents [d1, d2]. Adding d2 again is
-//! > confirmed and changes nothing. Removing d3, never added, is confirmed and
-//! > changes nothing. Removing d1 and d2 empties the key: it disappears from
-//! > the thread. Ids under key kms are added; a runner reading T's context
-//! > receives resources {kms: [...]}. No KV entry and no event other than the
-//! > command's confirmation is ever published for resources. Adding resource
-//! > ids to an unknown thread is refused THREAD_NOT_FOUND.
+//! > confirmed, a member reading T sees documents [d1, d2] and their live view
+//! > of T carries them. Adding d2 again is confirmed and changes nothing;
+//! > removing d3, never added, is confirmed and changes nothing. Removing d1
+//! > and d2 empties the key: it disappears from the thread. Ids k1 and k2 are
+//! > added under key kms; a runner reading T's context receives resources
+//! > {kms: [k1, k2]}. Each change rewrites threads.resources.{T} with T's keys
+//! > and ids; the commands that change nothing leave the entry as it was.
+//! > Adding resource ids to an unknown thread is refused THREAD_NOT_FOUND.
 //!
-//! Channels: the answers (4) — and, proven, nothing else on the event stream
-//! nor in the published language (4); the thread as a member reads it (2); a
-//! runner's context; the fact log.
+//! "Leave the entry as it was" is read on the entry's KV revision: unchanged
+//! once the relay had the quiet window to write anything owed. A resources
+//! command publishes its one answer and no other event, and leaves the members
+//! entry as it was.
+//!
+//! Channels: the answers (4); the resources entry and its revision, the
+//! members entry's revision and the event stream (4); the thread as a member
+//! reads it (2) and live (3); a runner's context; the fact log.
 
 mod common;
 
 use std::collections::BTreeMap;
 
+use br_util_nats_fabric::Revision;
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
@@ -24,7 +31,7 @@ use common::flows::{
     version,
 };
 use common::{QUIET_WINDOW, TestContext};
-use contract_threads::{AddResourceIds, ReasonCode, RemoveResourceIds};
+use contract_threads::{AddResourceIds, PublishedThreadResources, ReasonCode, RemoveResourceIds};
 use uuid::Uuid;
 
 fn ids(values: &[&str]) -> Vec<String> {
@@ -49,48 +56,76 @@ fn remove(thread: Uuid, key: &str, values: &[&str]) -> RemoveResourceIds {
     }
 }
 
-/// What a resources command publishes: exactly its one answer on the event
-/// stream, and no write to the published language.
+fn entry(resources: &[(&str, &[&str])]) -> PublishedThreadResources {
+    PublishedThreadResources {
+        resources: resources
+            .iter()
+            .map(|(key, values)| (key.to_string(), ids(values)))
+            .collect(),
+    }
+}
+
+/// What Threads has published about T once the quiet window passed: the
+/// events on the stream, T's resources entry with its revision, and the
+/// revision of T's members entry.
 struct Published {
     events: u64,
-    members_revision: br_util_nats_fabric::Revision,
-    buckets: std::collections::BTreeSet<String>,
+    resources: (PublishedThreadResources, Revision),
+    members_revision: Revision,
 }
 
 async fn published(ctx: &TestContext, thread: Uuid) -> Published {
     tokio::time::sleep(QUIET_WINDOW).await;
     Published {
         events: ctx.nats.event_stream_len().await,
+        resources: ctx
+            .resources_entry(thread)
+            .await
+            .expect("T's resources entry"),
         members_revision: ctx.members_entry(thread).await.expect("T's entry").1,
-        buckets: ctx.nats.kv_bucket_names().await,
     }
 }
 
-fn assert_only_the_answer(before: &Published, after: &Published, what: &str) {
+/// A change: the command's answer is the one event, the resources entry is
+/// rewritten to `expected`, the members entry is left as it was.
+fn assert_rewritten(
+    before: &Published,
+    after: &Published,
+    expected: &PublishedThreadResources,
+    what: &str,
+) {
     assert_eq!(
         after.events,
         before.events + 1,
         "{what}: the command's answer is the one event published"
     );
+    assert_eq!(&after.resources.0, expected, "{what}: the entry");
+    assert_ne!(
+        after.resources.1, before.resources.1,
+        "{what}: the entry is rewritten"
+    );
     assert_eq!(
         after.members_revision, before.members_revision,
-        "{what}: resources are never published"
+        "{what}: the members entry is left as it was"
     );
-    assert_eq!(after.buckets, before.buckets, "{what}: no new bucket");
 }
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_published() {
-    // Given thread T with member A, and a runner.
+async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_and_published_per_thread() {
+    // Given thread T with member A, and a runner; T's resources entry is
+    // published empty.
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, None, &[&a]).await;
+    ctx.resources_until(t, "T's resources entry is published", |_| true)
+        .await;
     let runner = ctx.service_account(true);
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
     // When the harness adds d1 and d2 under `documents`.
     let before = published(&ctx, t).await;
+    assert_eq!(before.resources.0, entry(&[]), "an empty object at first");
     let added = command(&ctx, &add(t, "documents", &["d1", "d2"])).await;
 
     // Then confirmed, and (2) A sees documents [d1, d2] on T.
@@ -118,12 +153,17 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
             })
         })
         .await;
-    // And (4) the confirmation is all that was published.
-    assert_only_the_answer(&before, &published(&ctx, t).await, "adding d1 and d2");
+    // And (4) threads.resources.{T} is rewritten with documents [d1, d2].
+    let documents = entry(&[("documents", &["d1", "d2"])]);
+    ctx.resources_until(t, "d1 and d2 are published", |held| held == &documents)
+        .await;
+    let after = published(&ctx, t).await;
+    assert_rewritten(&before, &after, &documents, "adding d1 and d2");
 
     // When the harness adds d2 again, then removes d3, never added.
     let facts_before = facts::count(&ctx.pool).await;
     let version_before = version(&ctx, &a.passport, t).await;
+    let entry_before = after.resources.clone();
     for (what, command_id) in [
         (
             "adding d2 again",
@@ -151,6 +191,12 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
             BTreeMap::from([("documents".to_string(), ids(&["d1", "d2"]))]),
             "{what}"
         );
+        // And (4) the entry is left as it was: same value, same revision.
+        assert_eq!(
+            ctx.resources_settled(t).await,
+            entry_before,
+            "{what}: the entry is left as it was"
+        );
     }
 
     // When the harness removes d1 and d2.
@@ -165,9 +211,20 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
         })
         .await;
     assert!(resources_of(&thread_view(&ctx, &a.passport, t).await).is_empty());
-    assert_only_the_answer(&before, &published(&ctx, t).await, "emptying documents");
+    // And (4) from the entry: T's resources are an empty object again.
+    ctx.resources_until(t, "the emptied key leaves the entry", |held| {
+        held == &entry(&[])
+    })
+    .await;
+    assert_rewritten(
+        &before,
+        &published(&ctx, t).await,
+        &entry(&[]),
+        "emptying documents",
+    );
 
-    // When ids are added under `kms`.
+    // When k1 and k2 are added under `kms`.
+    let before = published(&ctx, t).await;
     let kms = command(&ctx, &add(t, "kms", &["k1", "k2"])).await;
     thread_confirmed(&ctx, kms, "adding kms ids").await;
 
@@ -177,11 +234,22 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
         resources_of(&context),
         BTreeMap::from([("kms".to_string(), ids(&["k1", "k2"]))])
     );
+    // And (4) the entry is rewritten with kms [k1, k2].
+    let kms_entry = entry(&[("kms", &["k1", "k2"])]);
+    ctx.resources_until(t, "k1 and k2 are published", |held| held == &kms_entry)
+        .await;
+    assert_rewritten(
+        &before,
+        &published(&ctx, t).await,
+        &kms_entry,
+        "adding kms ids",
+    );
 
     // When resource ids are added to a thread nobody created.
-    let nowhere = command(&ctx, &add(Uuid::now_v7(), "kms", &["k9"])).await;
+    let unknown = Uuid::now_v7();
+    let nowhere = command(&ctx, &add(unknown, "kms", &["k9"])).await;
 
-    // Then refused THREAD_NOT_FOUND.
+    // Then refused THREAD_NOT_FOUND, and nothing is published for it.
     thread_refused(
         &ctx,
         nowhere,
@@ -189,6 +257,8 @@ async fn t03_resources_are_named_id_lists_shown_to_members_and_runners_never_pub
         "an unknown thread",
     )
     .await;
+    tokio::time::sleep(QUIET_WINDOW).await;
+    assert!(ctx.resources_entry(unknown).await.is_none());
 
     ctx.teardown().await;
 }
