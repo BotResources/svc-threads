@@ -55,7 +55,9 @@
 //!
 //! "No message is converted half-way" is read on the store, table by table:
 //! every row the previous version stored keeps, column for column, what it
-//! held, and no table the new version adds holds a row of these messages.
+//! held — on the columns the new version keeps: 0.12.0 drops
+//! `parent_message_id`, a schema change, not a row converted — and no table
+//! the new version adds holds a row of these messages.
 //!
 //! Channels: the answers (4); the messages, threads, read marks and artifacts
 //! as members read them, before and after (2); the fact log and the store; a
@@ -740,14 +742,13 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
     );
 
     // And no message is converted half-way: every row the previous version
-    // stored keeps what it held, and no table the new version adds holds a row
-    // of these messages.
+    // stored keeps what it held, on every column the new version keeps — the
+    // schema drops `parent_message_id`, which a message no longer has
+    // (0.12.0), and that is no conversion of a row — and no table the new
+    // version adds holds a row of these messages.
     let now = store::snapshot_json(&ctx.pool).await;
-    assert_eq!(
-        store::restricted_to(&before, &now),
-        store::restricted_to(&before, &before),
-        "the rows of the previous version are untouched"
-    );
+    let (then, kept) = store::on_kept_columns(&before, &now);
+    assert_eq!(kept, then, "the rows of the previous version are untouched");
     for (table, rows) in now.iter().filter(|(table, _)| !before.contains_key(*table)) {
         for row in rows {
             let text = row.to_string();
