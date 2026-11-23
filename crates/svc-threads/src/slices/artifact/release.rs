@@ -11,6 +11,13 @@
 //! holds is never purged ([`super::lifecycle::purge_unheld`]). The engine's
 //! cron fires the job on one pod at a time. The engine binds the blob store
 //! before the beat runs, so the reader is bound when the job fires.
+//!
+//! ENGINE GAP (br-service-engine v0.4.2): a service migration is SQL only.
+//! It cannot release a blob reference the way `cx.delete` does, nor stage
+//! pipeline work, and the boot kit offers no asynchronous step after the blob
+//! store is bound. Threads therefore keeps its own queue and drains it on the
+//! cron. The engine would need a migration-time release of blob references, or
+//! a post-bind boot step.
 
 use futures_util::future::BoxFuture;
 use service_engine::cron::{CronJob, Schedule};
