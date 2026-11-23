@@ -3,7 +3,9 @@
 //! id), and the named one too when `including`, goes whoever wrote it and
 //! whatever its status: its entries, blocks, annotations, artifacts (bytes
 //! included), stream and the read marks set on it. Nothing of it can be read
-//! again. Child threads started from an erased message survive; their origin
+//! again. Its ids (its own, its entries', blocks' and annotations') stay
+//! reserved for the life of the thread: a later message reusing one is
+//! refused `KEY_REUSED`. Child threads started from an erased message survive; their origin
 //! then leads nowhere.
 //!
 //! One transaction under the thread's row lock, the lock every message writer
@@ -38,6 +40,7 @@ use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
 use crate::facts::{Fact, FactMeta};
 use crate::fault::Fault;
 use crate::slices::artifact;
+use crate::slices::artifact::state::RemovalReason;
 use crate::slices::thread::ThreadCause;
 use crate::slices::thread::state::{Thread, ThreadChange, ThreadState};
 use crate::slices::thread::transitions::Applied;
@@ -147,13 +150,25 @@ async fn erase_messages(
         .filter(|(_, status)| *status == MessageStatus::Streaming)
         .map(|(id, _)| *id)
         .collect();
-    artifact::delete_all_of_erased(cx, thread.id, &gone, &call.meta).await?;
+    let artifacts = artifact::store::ids_of_messages(cx.connection(), thread.id, &gone).await?;
+    artifact::remove_artifacts(
+        cx,
+        &artifacts,
+        Some((RemovalReason::MessageErased, &call.meta)),
+    )
+    .await?;
     closing::seal_streams(cx, &streaming).await?;
-    store::erase(cx.connection(), &gone).await?;
+    store::erase(cx.connection(), thread.id, &gone).await?;
     cx.save(&thread).await?;
-    for message in &gone {
-        cx.impact_caused::<Message, _>(message, message_cause(MessageCause::Erased, thread.id))?;
-    }
+    // Two impacts, whatever the length of the tail (the engine caps the
+    // impacts of one commit). One `message` impact repopulates every live head
+    // page, whose interest names the noun: the erased keys leave the pages
+    // they were in and their sessions receive a Remove for each (a Reset past
+    // the churn threshold). No other live window holds a message key.
+    cx.impact_caused::<Message, _>(
+        &command.message_id,
+        message_cause(MessageCause::Erased, thread.id),
+    )?;
     cx.impact_caused::<Thread, _>(&thread.id, ThreadCause::MessagesErased)?;
     Ok(Ok(outcome))
 }

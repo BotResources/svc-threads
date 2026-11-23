@@ -45,7 +45,7 @@ use service_engine::{BlobPolicy, Blobs, Engine};
 
 use crate::principal::ThreadsPrincipal;
 
-pub use lifecycle::{delete_all_of_erased, delete_all_of_message, delete_all_of_thread};
+pub use lifecycle::remove_artifacts;
 
 /// The largest artifact Threads stores. The specification names no bound; this
 /// one is to ratify.

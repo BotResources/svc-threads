@@ -194,18 +194,15 @@ async fn read_many(
         .collect())
 }
 
-/// The artifacts of a thread, or of one of its messages.
-pub async fn ids_of(
+/// The artifacts of a thread, attached or not.
+pub async fn ids_of_thread(
     conn: &mut PgConnection,
     thread: Uuid,
-    message: Option<Uuid>,
 ) -> Result<Vec<Uuid>, EngineError> {
     Ok(sqlx::query_scalar(&format!(
-        "SELECT id FROM {TABLE} WHERE thread_id = $1 AND ($2::uuid IS NULL OR message_id = $2) \
-         ORDER BY id"
+        "SELECT id FROM {TABLE} WHERE thread_id = $1 ORDER BY id"
     ))
     .bind(thread)
-    .bind(message)
     .fetch_all(conn)
     .await?)
 }

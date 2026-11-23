@@ -1,3 +1,17 @@
+//! The messages of a thread: one list, in the order they were stored.
+//!
+//! Reactivity ledger of the messages view (`threadsMessages`, and the message
+//! member of `threadsThreadDeltas`, a live head page of the list):
+//!
+//! | input | change cause | impact | delta |
+//! |---|---|---|---|
+//! | message row and content | store, close (writer or stream watch), edit, delete | resource, `message` noun, by key; the head page repopulates on the noun | Upsert; a new message enters the head page, the oldest leaves it |
+//! | streamed content | a chunk folded | resource, `message_stream` noun, by key (no repopulation) | Upsert of the streaming message |
+//! | the end of the list | `message.erase` | one resource impact, `message` noun, whatever the number of messages erased | the head page repopulates: Remove for each erased key it held (Reset past the churn threshold), Upsert for the older messages entering it |
+//! | an author's name, standing | directory mirror | foreign `threads.known_user`, inverted to the user's messages | Upsert |
+//! | the caller's membership, standing | membership changes, directory mirror | principal facts (`MEMBERSHIP_DEPS`, `ROSTER_DEPS`) | the head page repopulates |
+//! | an artifact's label | its message attaches it | with the message's own impact | Upsert |
+
 pub mod close;
 pub mod closers;
 pub mod closing;
