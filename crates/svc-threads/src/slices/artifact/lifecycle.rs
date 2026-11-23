@@ -316,18 +316,18 @@ pub async fn delete_all_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(),
     purge_after_commit(ops, &artifacts)
 }
 
-/// Removes the artifacts of erased messages. The thread is loaded and locked
-/// by the caller, and its `MessagesErased` fact covers them, as a thread's
-/// `Deleted` fact covers its artifacts.
-pub async fn delete_all_of_messages(
+/// Removes the artifacts of erased messages, each with its `Removed` fact. The
+/// thread is loaded and locked by the caller.
+pub async fn delete_all_of_erased(
     ops: &mut Ops<'_>,
     thread: Uuid,
     messages: &[Uuid],
+    meta: &FactMeta,
 ) -> Result<(), Fault> {
     let ids = store::ids_of_messages(ops.connection(), thread, messages).await?;
     let artifacts = ops.load_many::<ArtifactState>(&ids).await?;
     for artifact in &artifacts {
-        remove(ops, artifact, None).await?;
+        remove(ops, artifact, Some((RemovalReason::MessageErased, meta))).await?;
     }
     purge_after_commit(ops, &artifacts)
 }

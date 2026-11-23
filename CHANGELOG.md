@@ -33,8 +33,9 @@ Breaking: senders, clients and runners move with Threads (README, *Deploy:
   - Otherwise it records one thread fact, `MessagesErased`
     (`{ message_id, including, count }`, never content), and raises the
     thread's version. It does not move `last_activity_at`.
-  - Erased messages record no message fact, and their artifacts no `Removed`
-    fact: the thread's fact covers them.
+  - Erased messages record no message fact: the thread's fact covers them.
+    Their artifacts each record `Removed` with the new reason
+    `MESSAGE_ERASED`, as with a deleted message.
   - The confirmation names the named message, its status and its `deleted`
     flag.
   - The stream of an erased `STREAMING` message is sealed in the same

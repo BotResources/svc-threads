@@ -20,8 +20,8 @@
 //! Otherwise it records one thread fact, `MessagesErased` (the named message,
 //! whether it went too, how many messages went, never content), and raises the
 //! thread's version. It does not move `last_activity_at`. Erased messages
-//! record no message fact and their artifacts no `Removed` fact: the thread's
-//! fact covers them, as its `Deleted` fact covers what a deletion removes.
+//! record no message fact: the thread's fact covers them. Their artifacts each
+//! record `Removed` (reason `MESSAGE_ERASED`), as with a deleted message.
 
 use contract_threads::{EraseMessages, MessageStatus, ReasonCode};
 use futures_util::future::BoxFuture;
@@ -147,7 +147,7 @@ async fn erase_messages(
         .filter(|(_, status)| *status == MessageStatus::Streaming)
         .map(|(id, _)| *id)
         .collect();
-    artifact::delete_all_of_messages(cx, thread.id, &gone).await?;
+    artifact::delete_all_of_erased(cx, thread.id, &gone, &call.meta).await?;
     closing::seal_streams(cx, &streaming).await?;
     store::erase(cx.connection(), &gone).await?;
     cx.save(&thread).await?;
