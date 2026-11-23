@@ -24,21 +24,21 @@ pub struct RunnerQuery;
 impl RunnerQuery {
     /// A thread's context: the agent context of the agent `agentId` names —
     /// the library's projected thread for it, built by Threads — or, naming
-    /// none, the whole branch as a `br-llm-messages/5` conversation; with the
+    /// none, the conversation as a `br-llm-messages/5` conversation; with the
     /// thread's members and resources, and the `ATTACHED` artifacts of the
     /// conversation's messages beside it, each with a read access signed only
-    /// when `downloadUrl` is selected. The branch is the active one (ending at
-    /// the thread's most recent message) unless `branchTip` names the message
-    /// another branch ends at, as for `threadsMessages`: a `branchTip` that is
-    /// not a message of the thread ends no branch, and the conversation is
-    /// empty. `null` for a thread that does not exist. An agent id that is not
-    /// a UUIDv7 is refused `AI_PERSPECTIVE_INVALID`.
+    /// when `downloadUrl` is selected. The conversation is the thread's
+    /// messages in the order they were stored, or, when `upTo` names one of
+    /// them, the messages up to that one included: an `upTo` that is not a
+    /// message of the thread bounds nothing, and the conversation is empty.
+    /// `null` for a thread that does not exist. An agent id that is not a
+    /// UUIDv7 is refused `AI_PERSPECTIVE_INVALID`.
     async fn threads_context(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
         agent_id: Option<String>,
-        branch_tip: Option<Uuid>,
+        up_to: Option<Uuid>,
     ) -> Result<Option<ThreadContext>> {
         access::runner_surface(ctx.data::<ThreadsPrincipal>()?).require()?;
         let agent = match agent_id {
@@ -52,7 +52,7 @@ impl RunnerQuery {
         let window = ContextWindow {
             thread: Some(thread_id),
             agent,
-            tip: branch_tip,
+            up_to,
         };
         let mut contexts = Query::<ThreadsPrincipal>::new(ctx)?
             .fetch_window::<ContextView>(

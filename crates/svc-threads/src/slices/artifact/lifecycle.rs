@@ -316,6 +316,22 @@ pub async fn delete_all_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(),
     purge_after_commit(ops, &artifacts)
 }
 
+/// Removes the artifacts of erased messages. The thread is loaded and locked
+/// by the caller, and its `MessagesErased` fact covers them, as a thread's
+/// `Deleted` fact covers its artifacts.
+pub async fn delete_all_of_messages(
+    ops: &mut Ops<'_>,
+    thread: Uuid,
+    messages: &[Uuid],
+) -> Result<(), Fault> {
+    let ids = store::ids_of_messages(ops.connection(), thread, messages).await?;
+    let artifacts = ops.load_many::<ArtifactState>(&ids).await?;
+    for artifact in &artifacts {
+        remove(ops, artifact, None).await?;
+    }
+    purge_after_commit(ops, &artifacts)
+}
+
 /// Removes the artifacts of a message its author deleted.
 pub async fn delete_all_of_message(
     ops: &mut Ops<'_>,
@@ -381,21 +397,25 @@ pub fn bytes_released<'r>(
     cx: &'r mut Reaction<'r>,
     message: BytesReleased,
 ) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let held: Vec<Uuid> =
-            sqlx::query_scalar("SELECT blob_ref FROM threads.artifact WHERE blob_ref = ANY($1)")
-                .bind(&message.blob_refs)
-                .fetch_all(cx.connection())
-                .await?;
-        let released: Vec<BlobRef> = message
-            .blob_refs
-            .iter()
-            .filter(|reference| !held.contains(reference))
-            .map(|reference| BlobRef(*reference))
-            .collect();
-        reader()?.purge_references(&released).await?;
-        Ok(())
-    })
+    Box::pin(async move { purge_unheld(cx.connection(), &message.blob_refs).await })
+}
+
+/// Purges the bytes behind `blob_refs` that no artifact holds, through the
+/// engine's blob reader (object and blob row). Purging a reference already
+/// purged changes nothing.
+pub async fn purge_unheld(conn: &mut sqlx::PgConnection, blob_refs: &[Uuid]) -> Result<(), Fault> {
+    let held: Vec<Uuid> =
+        sqlx::query_scalar("SELECT blob_ref FROM threads.artifact WHERE blob_ref = ANY($1)")
+            .bind(blob_refs)
+            .fetch_all(conn)
+            .await?;
+    let released: Vec<BlobRef> = blob_refs
+        .iter()
+        .filter(|reference| !held.contains(reference))
+        .map(|reference| BlobRef(*reference))
+        .collect();
+    reader()?.purge_references(&released).await?;
+    Ok(())
 }
 
 /// The artifact itself, unlocked: its thread, for a reaction that must lock the

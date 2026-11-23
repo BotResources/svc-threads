@@ -1,7 +1,8 @@
 //! The 0.4 form of a message, converted to the library's 2.0 model with the
-//! library's own constructors: what `message.store` v1 still sends, the legacy
-//! `blocks` of a `message.edit`, and what the upgrade finds in the `_v3`
-//! tables ([`crate::upgrade`]).
+//! library's own constructors: the legacy `blocks` of a `message.edit`, and
+//! what the upgrade finds in the rows an earlier Threads stored
+//! ([`super::upgrade`]). `message.store` v1, which sent a whole message in this
+//! form, is retired ([`super::retired`]).
 //!
 //! The mapping keeps every id the 0.4 form had — the message's (its turn's) and
 //! every block's — and derives the ones it had not ([`super::derived`]):
@@ -24,7 +25,7 @@
 //!
 //! The turn is returned open: closing it is the caller's.
 //!
-//! A command in the 0.4 form ([`precheck`]) first meets the judgement of its
+//! An edit in the 0.4 form ([`precheck`]) first meets the judgement of its
 //! block ids Threads 0.4 made — each a UUIDv7, each named once — so that a
 //! sender still on 0.4 gets the answers it always got.
 
@@ -115,14 +116,6 @@ pub fn precheck<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Result<(), R
         }
     }
     Ok(())
-}
-
-/// The blocks of a 0.4 AI message's items, in order.
-pub fn item_blocks(items: &[Item]) -> impl Iterator<Item = &Block> {
-    items.iter().flat_map(|item| match item {
-        Item::Step(step) => step.blocks.iter(),
-        Item::ToolResults(results) => results.blocks.iter(),
-    })
 }
 
 // ── the JSON the 0.4 library wrote ──────────────────────────────────────────
@@ -614,22 +607,6 @@ mod tests {
         let refused = precheck([&first, &text(), &first, &v4]).unwrap_err();
         assert_eq!(refused.code, ReasonCode::KeyReused);
         assert_eq!(refused.params["block_id"], json!(first.id));
-        let items = vec![
-            Item::Step(StepItem {
-                stop_reason: json!({ "type": "end_turn" }),
-                usage: None,
-                model: None,
-                blocks: vec![first.clone()],
-            }),
-            Item::ToolResults(ToolResultsItem {
-                blocks: vec![first.clone()],
-            }),
-        ];
-        assert_eq!(
-            precheck(item_blocks(&items)).unwrap_err().code,
-            ReasonCode::KeyReused,
-            "an id is named once across the items"
-        );
     }
 
     #[test]

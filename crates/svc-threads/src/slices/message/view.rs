@@ -1,12 +1,11 @@
-//! The messages of a thread, page by page along a branch, for the queries, the
+//! The messages of a thread, page by page along its list, for the queries, the
 //! snapshot and the live deltas: one projection, [`MessagesView`], whatever the
 //! entry point.
 //!
-//! A window is one page of one branch of one thread, the newest first: the
-//! active branch (ending at the thread's most recent message) unless the window
-//! names another tip, the head page unless it names a `before` cursor. A
-//! deleted message stays in its branch, without content, so that its forks
-//! remain readable.
+//! A window is one page of one thread's list, the newest first: the head page
+//! unless it names a `before` cursor. A deleted message stays in the list,
+//! without content. An erased message is gone: it leaves the head page, and a
+//! member following it receives its removal.
 //!
 //! A `STREAMING` message shows the content its stream folded so far, read from
 //! the engine's accumulated lane: the view is the engine's low-level projector,
@@ -196,7 +195,6 @@ pub struct EntryView {
 pub struct MessageView {
     pub id: Uuid,
     pub thread_id: Uuid,
-    pub parent_message_id: Option<Uuid>,
     pub author: AuthorView,
     pub job_id: Option<Uuid>,
     pub status: MessageStatusView,
@@ -324,20 +322,18 @@ fn stored_fault(message: Uuid, error: &contract_threads::llm::Error) -> EngineEr
     EngineError::Service(format!("message {message} does not load: {error}").into())
 }
 
-/// What a window of [`MessagesView`] is: one page of one branch of one thread.
+/// What a window of [`MessagesView`] is: one page of one thread's list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessagesWindow {
     thread: Option<Uuid>,
-    tip: Option<Uuid>,
     page: Option<Page<Uuid>>,
 }
 
 impl MessagesWindow {
-    /// A page of the branch ending at `tip`, or of the active branch.
-    pub fn of(thread: Uuid, tip: Option<Uuid>, page: Page<Uuid>) -> Self {
+    /// A page of the list of `thread`.
+    pub fn of(thread: Uuid, page: Page<Uuid>) -> Self {
         Self {
             thread: Some(thread),
-            tip,
             page: Some(page),
         }
     }
@@ -421,7 +417,6 @@ impl MessagesView {
         Ok(MessageView {
             id: message.id,
             thread_id: message.thread_id,
-            parent_message_id: message.parent_message_id,
             author: author_view(&message.author),
             job_id: message.job_id,
             status: message.status.into(),
@@ -466,15 +461,8 @@ impl Projector for MessagesView {
             match (query.thread, &query.page, principal.active_user()) {
                 (Some(thread), Some(page), Some(member)) => {
                     let limit = i64::from(page.size().get()).min(ceiling.limit());
-                    let keys = store::branch_page(
-                        pg,
-                        member,
-                        thread,
-                        query.tip,
-                        page.cursor().copied(),
-                        limit,
-                    )
-                    .await?;
+                    let keys =
+                        store::list_page(pg, member, thread, page.cursor().copied(), limit).await?;
                     Ok(match page.cursor() {
                         None => live_head(keys),
                         Some(_) => page.population(keys),
@@ -539,15 +527,16 @@ impl Projector for MessagesView {
     }
 }
 
-/// The head page of a branch, live: repopulated when a message changes (a new
-/// message enters, a fork moves the branch) or the caller's membership or
-/// standing does — never when a stream folds, which re-renders the streaming
-/// message only (`message_stream` noun, a member of the window by key).
+/// The head page of the list, live: repopulated when a message changes (a new
+/// message enters, an erasure removes the end of the list) or the caller's
+/// membership or standing does — never when a stream folds, which re-renders
+/// the streaming message only (`message_stream` noun, a member of the window by
+/// key).
 ///
 /// An open head (`Population::Ordered`) would be repopulated by every impact on
 /// any noun the projector renders, folds included; a query window is
 /// repopulated only by the impacts its interest names. Its keys are a set: the
-/// client orders the branch by its messages' dates.
+/// client orders the list by its messages' dates.
 fn live_head(keys: Vec<Uuid>) -> Population<Uuid> {
     let interest = Interest::new()
         .on_noun(<Message as Noun>::NAME, Dims::EMPTY)

@@ -9,6 +9,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.12.0 - 2026-11-23
+
+Threads 0.12 (registry patch 0.12.0): a thread's messages form one list, in the
+order they were stored (`created_at`, then id). A message names no other
+message, so a thread has no branch. A new command erases the end of a thread.
+`contract-threads` 0.12.0 carries the new commands (see its changelog).
+Breaking: senders, clients and runners move with Threads (README, *Deploy:
+0.11 → 0.12*).
+
+### Added
+
+- **`message.erase` v1** (`integration.cmd.threads.message.erase.v1`,
+  `EraseMessages { thread_id, message_id, including, acting_user_id? }`). It
+  removes every message stored after the named one, and the named one too
+  when `including`, whoever wrote them and whatever their status, with their
+  entries, blocks, annotations, artifacts (bytes included), stream and the
+  read marks set on them. It runs in one transaction under the thread's row
+  lock.
+  - Refusals, in order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+    `THREAD_RESOLVED`, `MESSAGE_NOT_FOUND`.
+  - An erase that finds nothing to remove is confirmed and changes nothing.
+  - Otherwise it records one thread fact, `MessagesErased`
+    (`{ message_id, including, count }`, never content), and raises the
+    thread's version. It does not move `last_activity_at`.
+  - Erased messages record no message fact, and their artifacts no `Removed`
+    fact: the thread's fact covers them.
+  - The confirmation names the named message, its status and its `deleted`
+    flag.
+  - The stream of an erased `STREAMING` message is sealed in the same
+    transaction. A late chunk is refused on every pod, and a later complete,
+    fail or cancel is refused `MESSAGE_NOT_FOUND`.
+  - Child threads started from an erased message stay.
+  - Members following the thread receive a `ThreadFeedRemove` per erased
+    message on the head page, and the thread's new version.
+- **`message.store` v3** (`StoreMessageV3`): the v2 form without
+  `parent_message_id`. A message is stored at the end of its thread's list.
+- **`COMMAND_VERSION_RETIRED`**: `message.store` v1 and v2 are answered
+  `message.refused` with this code (params `version`, `current_version`), and
+  store nothing.
+- **`threadsContext(threadId, agentId, upTo)`**. Without `upTo`, a runner
+  receives the whole list. With it, it receives the messages up to that one
+  included, with the same exclusions as before: deleted, cancelled, and failed
+  before their first entry. A named message that is itself excluded still
+  bounds the conversation. One that is not a message of the thread gives an
+  empty conversation and no artifact. The context is one plain ordered read.
+- **Migration `9800000008`** (the upgrade to the list).
+  - A thread that held branches keeps its active branch, the chain of parents
+    ending at its most recent message. For each message of that branch, it
+    also keeps the latest answer to it of each agent whose answer is not on
+    the branch.
+  - Every other message is removed, with its entries, blocks, annotations,
+    identities, stream watch, the read marks set on it, and its artifacts.
+  - Kept messages keep their ids and dates.
+  - Then `parent_message_id`, its same-thread foreign key and its index are
+    dropped.
+  - It runs in one transaction under the migrator's advisory lock: all or
+    nothing, applied once when pods start together.
+  - Facts stay as recorded.
+  - The blob references of the removed artifacts are queued in
+    `threads.released_blob`. A new cron job, `released_bytes`, purges their
+    bytes through the engine's blob reader once Threads serves, then forgets
+    them.
+
+### Changed
+
+- `threadsMessages(threadId, size, before)` pages through the list, the
+  newest first. `before` names the oldest message of the previous page.
+- `threadsThreadDeltas(threadId, size)` follows the head page of the list.
+  An erased message leaves it (`ThreadFeedRemove`).
+
+### Removed
+
+- The message tree:
+  - `parent_message_id` (column, foreign key, index, `Created` fact field);
+  - `MessageView.parentMessageId`;
+  - `branchTip` on `threadsMessages`, `threadsThreadDeltas` and
+    `threadsContext`;
+  - the two recursive branch reads;
+  - every parent check of `message.store`.
+- The conversion of `message.store` v1 and its `MESSAGE_INVALID` /
+  `streaming_v1` refusal. The conversion of what Threads 0.4 stored, at the
+  upgrade, stays, and so does the 0.4 form of an edit's `blocks`.
+- e2e T10 (*Forks and the active branch*) and T25 (*A message stored with
+  store.v1 is converted*), deleted with the gestures they specified.
+
 ## 0.11.0 - 2026-11-18
 
 Threads 0.11 (registry patch 0.11.0): Threads publishes the resources of each

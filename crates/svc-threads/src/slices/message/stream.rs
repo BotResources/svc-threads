@@ -32,7 +32,7 @@ pub struct RawChunk(pub serde_json::Value);
 /// The streamed content of a message, keyed by the message: the noun its
 /// folded chunks are impacts on. Apart from the `message` noun so that a fold
 /// re-renders the message where it is shown, and never repopulates a window
-/// (only a message's own change can move a branch).
+/// (only a message's own change can move the list).
 pub struct MessageStream;
 
 impl Noun for MessageStream {

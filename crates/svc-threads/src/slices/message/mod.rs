@@ -8,7 +8,9 @@ pub mod decision;
 pub mod derived;
 pub mod draft;
 pub mod edit;
+pub mod erase;
 pub mod graphql;
+pub mod retired;
 pub mod state;
 pub mod store;
 pub mod stream;
@@ -36,6 +38,7 @@ literal_enum! {
         Closed => "CLOSED",
         Edited => "EDITED",
         Deleted => "DELETED",
+        Erased => "ERASED",
     }
 }
 
@@ -53,8 +56,9 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_projector(MessagesView)?;
     engine.register_accumulator(stream::TurnContent)?;
     engine.register_accumulator(stream::LegacyContent)?;
-    engine.register_reaction("threads-message-store-v2", commands::store_v2)?;
-    engine.register_reaction("threads-message-store", commands::store_v1)?;
+    engine.register_reaction("threads-message-store-v3", commands::store_v3)?;
+    engine.register_reaction("threads-message-store-v2", retired::store::<2>)?;
+    engine.register_reaction("threads-message-store", retired::store::<1>)?;
     engine.register_reaction("threads-message-complete", closers::complete)?;
     engine.register_reaction("threads-message-complete-v2", closers::complete_v2)?;
     engine.register_reaction("threads-message-fail-v2", closers::fail_v2)?;
@@ -62,6 +66,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
     engine.register_reaction("threads-message-cancel", closers::cancel)?;
     engine.register_reaction("threads-message-edit", edit::edit)?;
     engine.register_reaction("threads-message-delete", commands::delete)?;
+    engine.register_reaction("threads-message-erase", erase::erase)?;
     engine.register_reaction("threads-message-stream-watch", watch::due)?;
     engine.register_schema_slice(SliceFragment::derive::<
         graphql::MessageQuery,

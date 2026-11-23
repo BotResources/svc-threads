@@ -209,3 +209,21 @@ pub async fn ids_of(
     .fetch_all(conn)
     .await?)
 }
+
+/// The artifacts attached to any of `messages` of a thread.
+pub async fn ids_of_messages(
+    conn: &mut PgConnection,
+    thread: Uuid,
+    messages: &[Uuid],
+) -> Result<Vec<Uuid>, EngineError> {
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT id FROM {TABLE} WHERE thread_id = $1 AND message_id = ANY($2) ORDER BY id"
+    ))
+    .bind(thread)
+    .bind(messages)
+    .fetch_all(conn)
+    .await?)
+}

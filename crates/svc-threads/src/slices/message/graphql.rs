@@ -1,6 +1,6 @@
 //! The message roots of the human surface: a thread's messages page by page,
 //! and the thread's live feed (the thread itself and the head page of its
-//! active branch). A thread the caller is not a member of is refused
+//! list). A thread the caller is not a member of is refused
 //! `THREAD_NOT_FOUND`, exactly as one that does not exist.
 
 use async_graphql::{Context, Object, Result, Subscription};
@@ -40,27 +40,25 @@ pub struct MessageQuery;
 
 #[Object]
 impl MessageQuery {
-    /// One page of a branch of a thread, the newest message first: the active
-    /// branch (ending at the thread's most recent message) unless `branchTip`
-    /// names the message another branch ends at; `before` names the oldest
-    /// message of the previous page.
+    /// One page of a thread's messages, the newest first, in the order they
+    /// were stored (`createdAt`, then `id`); `before` names the oldest message
+    /// of the previous page.
     async fn threads_messages(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
         size: WindowSize,
         before: Option<Uuid>,
-        branch_tip: Option<Uuid>,
     ) -> Result<Vec<MessageView>> {
         admit_to_thread(ctx, thread_id).await?;
-        let window = MessagesWindow::of(thread_id, branch_tip, Page::new(before, size));
+        let window = MessagesWindow::of(thread_id, Page::new(before, size));
         let mut messages = Query::<ThreadsPrincipal>::new(ctx)?
             .fetch_window::<MessagesView>(
                 WindowParams::encode(&window).or_internal("encode the messages window")?,
             )
             .await?;
-        // A head page is a set of keys (see `view::live_head`); a branch is
-        // ordered by its messages' dates, a child always after its parent.
+        // A head page is a set of keys (see `view::live_head`); the list is
+        // ordered by its messages' dates, then ids.
         messages.sort_by_key(|message| std::cmp::Reverse((message.created_at, message.id)));
         Ok(messages)
     }
@@ -72,17 +70,14 @@ pub struct MessageSubscription;
 #[Subscription]
 impl MessageSubscription {
     /// Follows a thread live: a `ThreadFeedReset` snapshot of the thread and of
-    /// the head page of its active branch, then `ThreadFeedUpsert` /
-    /// `ThreadFeedRemove` deltas on a contiguous revision — a streaming
-    /// message's content as it grows, a new message entering the page.
-    /// `branchTip` names the message another branch ends at, as
-    /// `threadsMessages` reads it: the head page followed is that branch's.
+    /// the head page of its list, then `ThreadFeedUpsert` / `ThreadFeedRemove`
+    /// deltas on a contiguous revision — a streaming message's content as it
+    /// grows, a new message entering the page, an erased message removed.
     async fn threads_thread_deltas(
         &self,
         ctx: &Context<'_>,
         thread_id: Uuid,
         size: WindowSize,
-        branch_tip: Option<Uuid>,
     ) -> Result<impl Stream<Item = Result<ThreadFeedDelta>>> {
         admit_to_thread(ctx, thread_id).await?;
         let stream = service_engine::attach::<ThreadsPrincipal>(
@@ -92,12 +87,8 @@ impl MessageSubscription {
                     .or_internal("encode the thread window")?,
                 WindowSpec::new(
                     MessagesView::NAME,
-                    WindowParams::encode(&MessagesWindow::of(
-                        thread_id,
-                        branch_tip,
-                        Page::head(size),
-                    ))
-                    .or_internal("encode the messages window")?,
+                    WindowParams::encode(&MessagesWindow::of(thread_id, Page::head(size)))
+                        .or_internal("encode the messages window")?,
                     false,
                 ),
             ],
