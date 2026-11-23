@@ -11,12 +11,13 @@ use common::flows::{
     message_refused, open_stream, raw_whole_message, store, streaming_message, user_entry_message,
     user_message, whole_message,
 };
-use common::wire::StoreMessageV3;
 use common::{TestContext, stream};
 use contract_threads::llm::{
     AgentId, ModelResponse, ResponseEnding, ResponseMetadata, Turn, TurnEntry,
 };
-use contract_threads::{Chunk, LibraryJson, MessageStatus, MessageTurn, ReasonCode};
+use contract_threads::{
+    Chunk, LibraryJson, MessageStatus, MessageTurn, ReasonCode, StoreMessageV3,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 

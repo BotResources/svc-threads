@@ -181,11 +181,33 @@ pub fn ai_message_v2(
     agent: &super::content::Agent,
     text: &str,
 ) -> contract_threads_v0_9::StoreMessageV2 {
+    ai_message_v2_attaching(thread, parent, agent, text, None)
+}
+
+/// The same, attaching `artifact`, when named, in an ARTIFACT annotation
+/// after its answer.
+pub fn ai_message_v2_attaching(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    agent: &super::content::Agent,
+    text: &str,
+    artifact: Option<Uuid>,
+) -> contract_threads_v0_9::StoreMessageV2 {
     let message = Uuid::now_v7();
+    let replied = super::content::reply(text);
+    let annotations = artifact
+        .map(|artifact| {
+            let placed = super::content::after(&replied[0], super::content::artifact(artifact));
+            vec![
+                serde_json::from_value(super::content::to_json(&placed))
+                    .expect("0.11.0 reads the same placed annotation"),
+            ]
+        })
+        .unwrap_or_default();
     let turn = contract_threads::llm::Turn::from(super::content::ai_turn(
         message,
         agent,
-        super::content::closed(super::content::reply(text)),
+        super::content::closed(replied),
     ));
     contract_threads_v0_9::StoreMessageV2 {
         message_id: message,
@@ -199,7 +221,7 @@ pub fn ai_message_v2(
             author_name: agent.name.clone(),
             delivery: contract_threads_v0_9::AiDelivery::Completed {
                 turn: contract_threads_v0_9::LibraryJson::from_json(super::content::to_json(&turn)),
-                annotations: Vec::new(),
+                annotations,
             },
         }),
     }

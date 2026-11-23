@@ -232,15 +232,9 @@ Threads drops the message tree: a thread's messages are one list, ordered by
   no message (`MESSAGE_NOT_FOUND`). Answered by `message.confirmed` naming the
   command, the thread and the message named; the suite does not assert the
   answer's `status`, which the registry leaves open (T39).
-- **Where the suite builds them.** `contract-threads` 0.9.0 carries neither, so
-  the suite builds both on the offers' wire in `common::wire`
-  (`StoreMessageV3`, `EraseMessages`, each a `contract_threads::ThreadsCommand`:
-  aggregate `message`, verbs `store` v3 and `erase` v1). The contract crate is
-  expected to expose its own types for them (and `ReasonCode::
-  CommandVersionRetired`); the suite then switches to those and `common::wire`
-  goes. Until the closed `ReasonCode` knows `COMMAND_VERSION_RETIRED`, an
-  answer the contract cannot decode is kept raw (`commands::Answer::Undecoded`)
-  and `flows::message_refused_code` reads its code from the JSON.
+- **The contract's types.** The suite sends them with `contract-threads`
+  0.12.0's `StoreMessageV3` and `EraseMessages`, and reads
+  `ReasonCode::CommandVersionRetired` from the closed enum.
 - **The retired versions on the bus.** `store.v1` travels through
   `contract-threads` 0.4.0 (dev-dependency `contract-threads-v0-4`), `store.v2`
   through `contract-threads` 0.9.0 by its git tag (dev-dependency
@@ -250,6 +244,11 @@ Threads drops the message tree: a thread's messages are one list, ordered by
   `message_id`, `including` and `count` (an assumption of the oracle: the
   registry names the three values, not their keys); it never carries content.
   An erased message's artifact ends on its `Removed` fact.
+- **Erased ids stay used.** After an erase, the id of an erased message, and
+  every entry, block and annotation id it held, are refused `KEY_REUSED` (T28).
+  The store may keep them in a row holding nothing but ids and dates:
+  `store::assert_only_reserved` reads "found nowhere" that way, while any row
+  with content naming them fails.
 - **GraphQL.** `MessageView.parentMessageId` is gone, and so is `branchTip`
   from `threadsMessages`, `threadsThreadDeltas` and `threadsContext` (T40
   checks the SDL holds neither). `threadsMessages(threadId, size, before)`
@@ -266,7 +265,11 @@ Threads drops the message tree: a thread's messages are one list, ordered by
 - **The suite's reads.** `flows::page` / `page_answer` read one page;
   `flows::messages` / `message_ids` read the whole list, oldest first;
   `flows::message_view` finds one message in it; `flows::context_up_to` reads
-  the cut. `branch`, `branch_answer`, `active_branch`, `context_on`,
+  the cut; `commands::Answers::order_of` gives the order Threads answered
+  commands in (T40's concurrent stores). `feed::Live::until_revoked` now waits
+  for the removal of every object the view held, the thread and each message,
+  and fails on any `Upsert`, or any removal of an object never held, once the
+  revocation began (the cause of an intermittent T02 failure). `branch`, `branch_answer`, `active_branch`, `context_on`,
   `feed::thread_feed_on` and `Q_CONTEXT_ON` are gone, and every message
   builder of `common::flows` lost its parent.
 - **The upgrade from branches (T40).** `svc-threads` 0.11.0, the last release

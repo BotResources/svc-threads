@@ -80,9 +80,6 @@ pub const RUNNER_SCOPE_REQUIRED: &str = "RUNNER_SCOPE_REQUIRED";
 /// Named by the registry: an agent context named by an agent id that is not a
 /// UUIDv7.
 pub const AI_PERSPECTIVE_INVALID: &str = "AI_PERSPECTIVE_INVALID";
-/// Named by the registry (0.12.0): a `message.store` v1 or v2, which named a
-/// parent, refused in a `message.refused` answer.
-pub const COMMAND_VERSION_RETIRED: &str = "COMMAND_VERSION_RETIRED";
 
 /// The stream window a scenario that waits it out configures
 /// ([`ENV_STREAM_IDLE_MS`]); every other scenario runs on the service's own

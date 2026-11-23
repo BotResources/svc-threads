@@ -53,6 +53,12 @@
 //! conversion wrote alike — and the engine's tables a content passes through;
 //! the texts, and the 0.4 block ids that carried them.
 //!
+//! In the second scenario T also holds a fork F off the active branch. The
+//! list migration of 0.12.0 runs at `migrate`, before the conversion at
+//! `serve`: F is removed even though the conversion then fails and the new
+//! version never becomes ready. The scenario states that fact as it is; it is
+//! put to the operator, the gesture being silent on it.
+//!
 //! "No message is converted half-way" is read on the store, table by table:
 //! every row the previous version stored keeps, column for column, what it
 //! held — on the columns the new version keeps: 0.12.0 drops
@@ -695,7 +701,9 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH, and builds the previous release"]
 async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becoming_ready() {
     // Given the previous version running, and through its commands: T holding
-    // A's message M1 and an AI message M2 whose author id is not a UUIDv7.
+    // A's message M1, F — A's second message answering M1, a fork — and an AI
+    // message M2 answering M1 whose author id is not a UUIDv7, the most
+    // recent.
     let mut ctx = TestContext::setup_previous().await;
     let a = ctx.enrol("ada").await;
     let mut born = creation(Some(a.id), &[]);
@@ -706,6 +714,14 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
         &user_message(t, None, a.id, vec![user_text("convertible")]),
         MessageStatus::Completed,
         "M1",
+    )
+    .await;
+    const FORK: &str = "a fork off the active branch";
+    let fork = stored_v1(
+        &ctx,
+        &user_message(t, Some(m1), a.id, vec![user_text(FORK)]),
+        MessageStatus::Completed,
+        "F",
     )
     .await;
     let m2 = stored_v1(
@@ -741,14 +757,55 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
         upgrade.output
     );
 
-    // And no message is converted half-way: every row the previous version
-    // stored keeps what it held, on every column the new version keeps — the
-    // schema drops `parent_message_id`, which a message no longer has
-    // (0.12.0), and that is no conversion of a row — and no table the new
-    // version adds holds a row of these messages.
+    // And the fork F is gone, though no message was converted and the new
+    // version never became ready. This is a fact of 0.12.0 stated as is, not
+    // a rule of the registry: the list migration (keep the active branch, M1
+    // then M2, with the latest answer of each other agent) runs at `migrate`,
+    // in its own transaction, before `serve` converts the messages; when the
+    // conversion then fails, the fork stays removed. Whether the upgrade
+    // should be all or nothing across both steps is a question for the
+    // operator.
     let now = store::snapshot_json(&ctx.pool).await;
+    store::assert_nowhere(
+        &ctx.pool,
+        FORK,
+        &[],
+        "the fork's text, after the list migration",
+    )
+    .await;
+    for (table, rows) in now.iter().filter(|(table, _)| table.as_str() != "fact") {
+        for row in rows {
+            assert!(
+                !row.to_string().contains(&fork.to_string()),
+                "the fork is gone: {table} {row}"
+            );
+        }
+    }
+    // And no message is converted half-way: every other row the previous
+    // version stored keeps what it held, on every column the new version
+    // keeps — the schema drops `parent_message_id`, which a message no longer
+    // has, and that is no conversion of a row — and no table the new version
+    // adds holds a row of these messages.
     let (then, kept) = store::on_kept_columns(&before, &now);
-    assert_eq!(kept, then, "the rows of the previous version are untouched");
+    let without_the_fork = |rows: std::collections::BTreeMap<String, Vec<String>>| {
+        rows.into_iter()
+            .map(|(table, rows)| {
+                let rows = if table == "fact" {
+                    rows
+                } else {
+                    rows.into_iter()
+                        .filter(|row| !row.contains(&fork.to_string()))
+                        .collect()
+                };
+                (table, rows)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(
+        without_the_fork(kept),
+        without_the_fork(then),
+        "the rows of the previous version, the fork's but, are untouched"
+    );
     for (table, rows) in now.iter().filter(|(table, _)| !before.contains_key(*table)) {
         for row in rows {
             let text = row.to_string();

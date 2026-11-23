@@ -14,7 +14,6 @@ use contract_threads::{
     ThreadsCommand, ThreadsEvent,
 };
 use serde::Serialize;
-use serde_json::Value;
 use uuid::Uuid;
 
 use super::constants::PUSH_TIMEOUT;
@@ -33,14 +32,6 @@ pub enum Answer {
     ThreadRefused(ThreadCommandRefused),
     MessageConfirmed(MessageCommandConfirmed),
     MessageRefused(MessageCommandRefused),
-    /// An answer on one of the four subjects that this suite's
-    /// `contract-threads` cannot decode — a reason code it does not know yet,
-    /// such as 0.12.0's `COMMAND_VERSION_RETIRED` — kept as its subject and
-    /// its payload, the JSON the consumer receives.
-    Undecoded {
-        subject: String,
-        payload: Value,
-    },
 }
 
 /// A capture of every answer Threads publishes, bound before the first command
@@ -83,28 +74,36 @@ impl Answers {
         self.for_command(command_id).remove(0)
     }
 
+    /// `commands`, in the order their first answers were published on the
+    /// bus: the order Threads answered them in.
+    pub fn order_of(&self, commands: &[Uuid]) -> Vec<Uuid> {
+        let mut order: Vec<Uuid> = Vec::new();
+        for correlation in self.capture.correlation_ids() {
+            if commands.contains(&correlation) && !order.contains(&correlation) {
+                order.push(correlation);
+            }
+        }
+        order
+    }
+
     pub async fn stop(self) {
         self.capture.stop().await;
     }
 }
 
 fn decode(subject: &str, payload: &[u8]) -> Answer {
-    fn inner<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<T> {
+    fn inner<T: serde::de::DeserializeOwned>(payload: &[u8]) -> T {
         serde_json::from_slice::<IntegrationEvent<T>>(payload)
-            .ok()
-            .map(|event| event.payload)
+            .expect("an answer in the integration envelope")
+            .payload
     }
-    let decoded = match subject {
-        s if s.ends_with(".thread.confirmed.v1") => inner(payload).map(Answer::ThreadConfirmed),
-        s if s.ends_with(".thread.refused.v1") => inner(payload).map(Answer::ThreadRefused),
-        s if s.ends_with(".message.confirmed.v1") => inner(payload).map(Answer::MessageConfirmed),
-        s if s.ends_with(".message.refused.v1") => inner(payload).map(Answer::MessageRefused),
+    match subject {
+        s if s.ends_with(".thread.confirmed.v1") => Answer::ThreadConfirmed(inner(payload)),
+        s if s.ends_with(".thread.refused.v1") => Answer::ThreadRefused(inner(payload)),
+        s if s.ends_with(".message.confirmed.v1") => Answer::MessageConfirmed(inner(payload)),
+        s if s.ends_with(".message.refused.v1") => Answer::MessageRefused(inner(payload)),
         other => panic!("not an answer subject: {other}"),
-    };
-    decoded.unwrap_or_else(|| Answer::Undecoded {
-        subject: subject.to_string(),
-        payload: inner::<Value>(payload).expect("an answer in the integration envelope"),
-    })
+    }
 }
 
 /// Sends `command` as `actor`, under a fresh UUIDv7 that is both the envelope's

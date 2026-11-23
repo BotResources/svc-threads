@@ -118,6 +118,39 @@ pub async fn assert_nowhere(pool: &PgPool, needle: &str, except: &[&str], what: 
     );
 }
 
+/// Whether a row, as its JSON text, holds nothing but identities, dates,
+/// numbers and flags: an id kept reserved, no content.
+fn bare(row: &str) -> bool {
+    let Ok(serde_json::Value::Object(columns)) = serde_json::from_str(row) else {
+        return false;
+    };
+    columns.values().all(|value| match value {
+        serde_json::Value::String(text) => {
+            uuid::Uuid::parse_str(text).is_ok()
+                || chrono::DateTime::parse_from_rfc3339(text).is_ok()
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => false,
+        _ => true,
+    })
+}
+
+/// No row of the store, but those of the `except` tables, names `id` — but a
+/// row holding nothing but identities and dates, where an id stays reserved
+/// once what it named is gone: an entry, a block, a message, an annotation
+/// or an artifact is found nowhere, while its id may still be refused
+/// `KEY_REUSED`.
+pub async fn assert_only_reserved(pool: &PgPool, id: &str, except: &[&str], what: &str) {
+    let found: Vec<(String, String)> = rows_holding(pool, id, except)
+        .await
+        .into_iter()
+        .filter(|(_, row)| !bare(row))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "{what}: {id} is still stored in {found:?}"
+    );
+}
+
 /// Every row of every table, as JSON objects, by table.
 pub async fn snapshot_json(pool: &PgPool) -> BTreeMap<String, Vec<serde_json::Value>> {
     let mut snapshot = BTreeMap::new();

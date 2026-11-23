@@ -9,10 +9,10 @@ use std::collections::BTreeMap;
 use br_core_auth::Passport;
 use contract_threads::llm::{Conversation, PlainBlock, ProjectedThread, Turn, TurnEntry};
 use contract_threads::{
-    AiDelivery, AiTurn, CompleteMessage, CreateThread, DeleteMessage, EditMessage, LibraryJson,
-    MessageCommandConfirmed, MessageCommandRefused, MessageStatus, MessageTurn, PlacedAnnotation,
-    ReasonCode, ReopenThread, ResolveThread, StreamSeal, ThreadCommandConfirmed,
-    ThreadCommandRefused, ThreadsCommand, UserTurn,
+    AiDelivery, AiTurn, CompleteMessage, CreateThread, DeleteMessage, EditMessage, EraseMessages,
+    LibraryJson, MessageCommandConfirmed, MessageCommandRefused, MessageStatus, MessageTurn,
+    PlacedAnnotation, ReasonCode, ReopenThread, ResolveThread, StoreMessageV3, StreamSeal,
+    ThreadCommandConfirmed, ThreadCommandRefused, ThreadsCommand, UserTurn,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -20,7 +20,6 @@ use uuid::Uuid;
 
 use super::commands::{Answer, commanding_service, send, send_as};
 use super::content::{self, Agent};
-use super::wire::{EraseMessages, StoreMessageV3};
 use super::{
     PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_CONTEXT_UP_TO, Q_MESSAGES, Q_THREAD,
     Q_THREADS, QUIET_WINDOW, TestContext, eventually, gql,
@@ -131,36 +130,6 @@ pub async fn message_refused(
             ctx.logs()
         ),
     }
-}
-
-/// The message command was refused with `code`, whether or not this suite's
-/// `contract-threads` knows the code (0.12.0's `COMMAND_VERSION_RETIRED` is
-/// not in 0.9.0's closed enum); answers the refusal as its JSON payload.
-pub async fn message_refused_code(
-    ctx: &TestContext,
-    command_id: Uuid,
-    code: &str,
-    what: &str,
-) -> Value {
-    let refusal = match ctx.answers.await_answer(command_id, what).await {
-        Answer::MessageRefused(refused) => {
-            serde_json::to_value(&refused).expect("a refusal serializes")
-        }
-        Answer::Undecoded { subject, payload } if subject.ends_with(".message.refused.v1") => {
-            payload
-        }
-        other => panic!(
-            "{what}: message.refused {code} expected, got {other:?}\n{}",
-            ctx.logs()
-        ),
-    };
-    assert_eq!(
-        refusal["command_id"],
-        json!(command_id),
-        "{what}: {refusal}"
-    );
-    assert_eq!(refusal["reason_code"], json!(code), "{what}: {refusal}");
-    refusal
 }
 
 /// An erase's answer: `message.confirmed`, naming the command, its thread

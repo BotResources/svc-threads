@@ -17,6 +17,11 @@
 //! > and R3 are found nowhere in the store; no fact carries content. Starting
 //! > the new version again changes nothing.
 //!
+//! The order is the order stored (`created_at`, then id), never the order of
+//! the ids: the twelve ids are minted first and the messages stored in the
+//! reverse order of their ids, so that the pages, the cut and the list can
+//! only follow the storage.
+//!
 //! A page is read the newest first, `before` naming the oldest message of the
 //! previous page (the paging of `threadsMessages`, kept from the SDL of
 //! 0.11.0 without its `branchTip`): twelve messages read five at a time are
@@ -26,14 +31,17 @@
 //! (`common::constants::context_cut_arg!`, an assumption of the oracle on the
 //! name). The cut is read whole and as an agent's context; "an empty
 //! conversation" is a context of T — its members, no turn, no artifact — never
-//! a refusal nor `null`.
+//! a refusal nor `null`. Beyond the gesture, from the specification: a named
+//! message that is deleted, or cancelled, still bounds the conversation
+//! without being in it (read on a thread S of its own).
 //!
 //! The two retired versions travel exactly as a consumer still on them sends
 //! them: `store.v1` through `contract-threads` 0.4.0, `store.v2` through
 //! `contract-threads` 0.9.0, each on its own subject. Their refusal is a
 //! `message.refused` naming the command, T and the message it would have
 //! stored. "Store nothing" is read on the fact log, T's list, a member's live
-//! feed and the `threads` schema of the store.
+//! feed, the `threads` schema of the store row for row, and every table of
+//! the store, the engine's included, for their texts.
 //!
 //! "The previous version" is the last release with branches, `svc-threads`
 //! 0.11.0, built from its tag (`common::previous`) and commanded with its own
@@ -49,6 +57,16 @@
 //! (`common::store`), the engine's included: no row holds the texts of R1, U2
 //! and R3, and no row names their ids but the fact log, whose append-only
 //! history keeps the facts of their creation (which never carry content).
+//! R1 attaches artifact V: "removed with its artifacts" is V's row gone, the
+//! read access obtained before the upgrade fetching nothing and the bucket
+//! holding one object less (awaited: the bytes are purged after the commit).
+//!
+//! Concurrent stores (an addition the review asked for): ten stores sent at
+//! once on one thread are listed in the order Threads answered them — the
+//! order of their confirmations on the bus — on every read: the list, its
+//! pages and the runner's context. Equal `created_at` cannot be reached
+//! through the public surface; this is what the order rule means for a
+//! caller.
 //!
 //! Beyond the gesture, from the specification the gesture states: a message
 //! names no other message, so the SDL offers neither `parentMessageId` nor
@@ -62,28 +80,23 @@
 
 mod common;
 
-use common::content::reply;
+use common::artifacts::{File, download_url, fetch, object_count, upload};
+use common::content::{ai_turn, closed, reply, text};
 use common::feed::Live;
 use common::flows::{
-    ai, answer, context, context_up_to, conversation_of, create, create_thread, creation,
-    message_confirmed, message_ids, message_refused_code, messages, page, projected_of, say,
-    turn_ids, uuid_of,
+    ai, command, context, context_up_to, conversation_of, create, create_thread, creation,
+    deletion_of, message_confirmed, message_ids, message_refused, messages, open_stream, page,
+    projected_of, say, store, turn_ids, user_message, uuid_of, whole_message,
 };
 use common::previous::{
-    self, ai_message_v2, command_v1, command_v2, message_view_0_11, user_message_v2,
+    self, ai_message_v2, ai_message_v2_attaching, command_v1, command_v2, message_view_0_11,
+    user_message_v2,
 };
-use common::{COMMAND_VERSION_RETIRED, CONTEXT_CUT_ARG, TestContext, facts, store};
-use contract_threads::MessageStatus;
+use common::{CONTEXT_CUT_ARG, PUSH_TIMEOUT, TestContext, eventually, facts, store as rows};
+use contract_threads::llm::Turn;
+use contract_threads::{CancelMessage, MessageStatus, ReasonCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-/// The engine's tables, which keep their own record of a command received.
-const ENGINE_TABLES: [&str; 4] = [
-    "service_engine.event_log",
-    "service_engine.event_snapshot",
-    "service_engine.accumulator_chunk",
-    "service_engine.dead_letter",
-];
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
@@ -95,17 +108,32 @@ async fn t40_the_messages_of_a_thread_are_one_list_read_by_pages_and_cut_for_a_r
     let runner = ctx.service_account(true);
     let analyst = ai("a1", "Analyst");
 
-    // When the harness stores on T, with store.v3, twelve messages: A's
-    // questions and a1's answers, in turn.
+    // When the harness stores on T, with store.v3, twelve messages — A's
+    // questions and a1's answers, in turn — under twelve ids minted first,
+    // stored in the reverse order of their ids.
+    let mut ids: Vec<Uuid> = (0..12).map(|_| Uuid::now_v7()).collect();
+    ids.reverse();
     let mut stored = Vec::new();
-    for n in 1..=12 {
-        let message = if n % 2 == 1 {
-            say(&ctx, t, &a, &format!("question {n}")).await
+    for (n, id) in ids.into_iter().enumerate() {
+        if n % 2 == 0 {
+            let mut asked = user_message(t, a.id, vec![text(&format!("question {n}"))]);
+            asked.message_id = id;
+            store(&ctx, asked, MessageStatus::Completed).await;
         } else {
-            answer(&ctx, t, analyst.clone(), reply(&format!("answer {n}"))).await
-        };
-        stored.push(message);
+            let turn = Turn::from(ai_turn(id, &analyst, closed(reply(&format!("answer {n}")))));
+            store(
+                &ctx,
+                whole_message(t, id, &analyst, &turn, Vec::new()),
+                MessageStatus::Completed,
+            )
+            .await;
+        }
+        stored.push(id);
     }
+    assert!(
+        stored.windows(2).all(|pair| pair[0] > pair[1]),
+        "each message stored under an id smaller than the one before"
+    );
 
     // Then a member reads them in the order stored, five at a time, each page
     // starting before the oldest message of the previous one: the newest five,
@@ -178,10 +206,109 @@ async fn t40_the_messages_of_a_thread_are_one_list_read_by_pages_and_cut_for_a_r
         "T's members: {other}"
     );
 
+    // When ten stores are sent at once on thread W.
+    let w = create_thread(&ctx, Some(&a), &[]).await;
+    let concurrent: Vec<_> = (0..10)
+        .map(|n| user_message(w, a.id, vec![text(&format!("sent at once, {n}"))]))
+        .collect();
+    let sent: Vec<Uuid> =
+        futures_util::future::join_all(concurrent.iter().map(|store| command(&ctx, store))).await;
+    for command_id in &sent {
+        message_confirmed(
+            &ctx,
+            *command_id,
+            MessageStatus::Completed,
+            "a store sent at once",
+        )
+        .await;
+    }
+    // Then they are listed in the order their confirmations show they were
+    // stored, on every read: the list, its pages, the runner's context.
+    let confirmed: Vec<Uuid> = ctx
+        .answers
+        .order_of(&sent)
+        .iter()
+        .map(|command_id| {
+            let at = sent
+                .iter()
+                .position(|sent| sent == command_id)
+                .expect("sent");
+            concurrent[at].message_id
+        })
+        .collect();
+    assert_eq!(confirmed.len(), 10);
+    assert_eq!(message_ids(&ctx, &a.passport, w).await, confirmed);
+    let mut paged = Vec::new();
+    let mut before = None;
+    loop {
+        let read: Vec<Uuid> = page(&ctx, &a.passport, w, 3, before)
+            .await
+            .iter()
+            .map(|view| uuid_of(&view["id"]))
+            .collect();
+        if read.is_empty() {
+            break;
+        }
+        before = read.last().copied();
+        paged.extend(read);
+    }
+    paged.reverse();
+    assert_eq!(paged, confirmed, "pages of three, in the order confirmed");
+    assert_eq!(
+        turn_ids(&conversation_of(
+            &context(&ctx, &runner.passport, w, None).await
+        )),
+        confirmed,
+        "the runner's context, in the order confirmed"
+    );
+
+    // When, on thread S, a runner names a deleted message, then a cancelled
+    // one: S holds A's question, A's message deleted, a1's answer, a1's turn
+    // cancelled, and A's last word.
+    let s = create_thread(&ctx, Some(&a), &[]).await;
+    let question = say(&ctx, s, &a, "a question").await;
+    let deleted = say(&ctx, s, &a, "scratch that").await;
+    let gone = command(&ctx, &deletion_of(s, deleted, a.id)).await;
+    message_confirmed(&ctx, gone, MessageStatus::Completed, "deleting it").await;
+    let answered = Uuid::now_v7();
+    let answer_turn = Turn::from(ai_turn(answered, &analyst, closed(reply("an answer"))));
+    store(
+        &ctx,
+        whole_message(s, answered, &analyst, &answer_turn, Vec::new()),
+        MessageStatus::Completed,
+    )
+    .await;
+    let cancelled = open_stream(&ctx, s, analyst.clone()).await;
+    let stop = command(
+        &ctx,
+        &CancelMessage {
+            message_id: cancelled,
+            thread_id: s,
+            seal: None,
+            acting_user_id: Some(a.id),
+        },
+    )
+    .await;
+    message_confirmed(&ctx, stop, MessageStatus::Cancelled, "cancelling it").await;
+    say(&ctx, s, &a, "a last word").await;
+    // Then each still bounds the conversation, without being in it.
+    let to_deleted = context_up_to(&ctx, &runner.passport, s, None, Some(deleted)).await;
+    assert_eq!(
+        turn_ids(&conversation_of(&to_deleted)),
+        vec![question],
+        "up to a deleted message"
+    );
+    let to_cancelled = context_up_to(&ctx, &runner.passport, s, None, Some(cancelled)).await;
+    assert_eq!(
+        turn_ids(&conversation_of(&to_cancelled)),
+        vec![question, answered],
+        "up to a cancelled message"
+    );
+
     // When a store.v1, then a store.v2, are sent for T, A following T.
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
     let facts_before = facts::count(&ctx.pool).await;
-    let snapshot = store::snapshot(&ctx.pool).await;
+    let snapshot = rows::snapshot(&ctx.pool).await;
     const BY_V1: &str = "stored by a consumer still on v1";
     const BY_V2: &str = "stored by a consumer still on v2";
     let v1 = previous::user_message(t, None, a.id, vec![previous::user_text(BY_V1)]);
@@ -194,21 +321,24 @@ async fn t40_the_messages_of_a_thread_are_one_list_read_by_pages_and_cut_for_a_r
         (sent_v1, v1.message_id, "a store.v1"),
         (sent_v2, v2.message_id, "a store.v2"),
     ] {
-        let refusal = message_refused_code(&ctx, sent, COMMAND_VERSION_RETIRED, what).await;
-        assert_eq!(refusal["thread_id"], json!(t), "{what}: {refusal}");
-        assert_eq!(refusal["message_id"], json!(message), "{what}: {refusal}");
+        let refusal = message_refused(&ctx, sent, ReasonCode::CommandVersionRetired, what).await;
+        assert_eq!(
+            (refusal.thread_id, refusal.message_id),
+            (t, message),
+            "{what}: {refusal:?}"
+        );
         assert!(
             facts::of(&ctx.pool, "message", message).await.is_empty(),
             "{what}: no fact"
         );
     }
     // And they store nothing: no fact, T's list as it was, no row of the
-    // store, nothing pushed.
+    // store, their texts nowhere, nothing pushed.
     assert_eq!(facts::count(&ctx.pool).await, facts_before);
     assert_eq!(message_ids(&ctx, &a.passport, t).await, stored);
-    assert_eq!(store::snapshot(&ctx.pool).await, snapshot);
+    assert_eq!(rows::snapshot(&ctx.pool).await, snapshot);
     for text in [BY_V1, BY_V2] {
-        store::assert_nowhere(&ctx.pool, text, &ENGINE_TABLES, "a retired store").await;
+        rows::assert_nowhere(&ctx.pool, text, &[], "a retired store").await;
     }
     a_feed.silence("a retired store pushes nothing").await;
 
@@ -243,6 +373,10 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
     let a = ctx.enrol("ada").await;
     let t = create(&ctx, creation(Some(a.id), &[])).await;
     let (a1, a2) = (ai("a1", "Analyst"), ai("a2", "Critic"));
+    // And V, a runner's file for T, which R1 attaches.
+    let runner = ctx.service_account(true);
+    let v_file = File::csv("attached to R1\n");
+    let v = upload(&ctx, &runner.passport, t, &v_file).await;
     let texts = [
         "U1, the question",
         "R1, a1's first answer",
@@ -257,7 +391,12 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
     // U2 answering R2; R3 of a1 answering U2; U2b answering R2; R4 of a1
     // answering U2b, the most recent.
     let u1 = stored_v2(&ctx, &user_message_v2(t, None, a.id, texts[0]), "U1").await;
-    let r1 = stored_v2(&ctx, &ai_message_v2(t, Some(u1), &a1, texts[1]), "R1").await;
+    let r1 = stored_v2(
+        &ctx,
+        &ai_message_v2_attaching(t, Some(u1), &a1, texts[1], Some(v)),
+        "R1",
+    )
+    .await;
     let r2 = stored_v2(&ctx, &ai_message_v2(t, Some(u1), &a2, texts[2]), "R2").await;
     let r1b = stored_v2(&ctx, &ai_message_v2(t, Some(u1), &a1, texts[3]), "R1b").await;
     let u2 = stored_v2(&ctx, &user_message_v2(t, Some(r2), a.id, texts[4]), "U2").await;
@@ -270,6 +409,11 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
         let view = message_view_0_11(&ctx, &a.passport, t, message).await;
         dates.push(view["createdAt"].clone());
     }
+    let v_url = download_url(&ctx, &a.passport, t, v)
+        .await
+        .expect("A reads V, attached to R1, on 0.11.0");
+    assert_eq!(fetch(&v_url).await, (200, v_file.bytes.clone()));
+    let objects = object_count(&ctx).await;
 
     // When the new version starts on the same database.
     let upgrade = ctx.upgrade().await;
@@ -292,22 +436,31 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
         assert_eq!(&view["createdAt"], date, "{message} keeps its date: {view}");
     }
     // And the conversation a runner receives is the thread in that order.
-    let runner = ctx.service_account(true);
     let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
     assert_eq!(turn_ids(&conversation), kept);
     // And R1, U2 and R3 are found nowhere in the store: not their texts, not
     // their ids but in the fact log's history.
     for (gone, text) in [(r1, texts[1]), (u2, texts[4]), (r3, texts[5])] {
-        store::assert_nowhere(&ctx.pool, text, &[], "a removed message's text").await;
-        store::assert_nowhere(&ctx.pool, &gone.to_string(), &["fact"], "a removed message").await;
+        rows::assert_nowhere(&ctx.pool, text, &[], "a removed message's text").await;
+        rows::assert_only_reserved(&ctx.pool, &gone.to_string(), &["fact"], "a removed message")
+            .await;
     }
+    // And R1's artifact V went with it: no read access, its row gone, the
+    // read access obtained before fetching nothing, the bucket holding one
+    // object less.
+    assert_eq!(download_url(&ctx, &a.passport, t, v).await, None);
+    rows::assert_only_reserved(&ctx.pool, &v.to_string(), &["fact"], "R1's artifact").await;
+    eventually("V's bytes are gone", PUSH_TIMEOUT, || async {
+        fetch(&v_url).await.0 != 200 && object_count(&ctx).await == objects - 1
+    })
+    .await;
     // And no fact carries content.
     for text in texts {
         facts::assert_no_fact_carries(&ctx.pool, text, "a message's text").await;
     }
 
     // When the new version starts again.
-    let snapshot = store::snapshot(&ctx.pool).await;
+    let snapshot = rows::snapshot(&ctx.pool).await;
     let again = ctx.restart_current().await;
 
     // Then it is ready, and nothing changes.
@@ -317,7 +470,7 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
         again.output
     );
     assert_eq!(
-        store::snapshot(&ctx.pool).await,
+        rows::snapshot(&ctx.pool).await,
         snapshot,
         "the second start removes nothing"
     );

@@ -48,8 +48,8 @@ fn delete(thread: Uuid, message: Uuid, acting: Uuid) -> DeleteMessage {
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_message_is_never_deleted()
-{
+async fn t09_only_its_author_deletes_a_message_which_stays_in_the_list_and_an_ai_message_is_never_deleted()
+ {
     // Given T with members O, A and B; M1 by A, followed by M2 (carrying an
     // artifact X) and M2b; B following T; a runner.
     let ctx = TestContext::setup().await;
@@ -90,6 +90,10 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     .await;
     let m2b = answer(&ctx, t, analyst.clone(), reply("noted, again")).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
+    let later_before = [
+        message_view(&ctx, &b.passport, t, m2).await,
+        message_view(&ctx, &b.passport, t, m2b).await,
+    ];
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "before the deletion").await;
 
     // When the harness deletes M1 with acting user B.
@@ -126,10 +130,11 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
         vec![m1, m2, m2b],
         "M1 keeps its place; M2 and M2b stay after it"
     );
-    for answer in [m2, m2b] {
+    for (answer, before) in [m2, m2b].into_iter().zip(&later_before) {
         assert_eq!(
-            message_view(&ctx, &b.passport, t, answer).await["deleted"],
-            false
+            &message_view(&ctx, &b.passport, t, answer).await,
+            before,
+            "a later message reads exactly as before the deletion"
         );
     }
     // And (3) B is told once.

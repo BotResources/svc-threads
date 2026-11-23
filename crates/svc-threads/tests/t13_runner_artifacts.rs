@@ -55,13 +55,12 @@ use common::flows::{
     ai, command, completion, context, create_thread, message_confirmed, message_refused,
     message_view, open_stream, page_answer, say, store, whole_message,
 };
-use common::wire::StoreMessageV3;
 use common::{
     KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
     eventually, gql, stream,
 };
 use contract_threads::llm::{ResponseEnding, Turn};
-use contract_threads::{MessageStatus, ReasonCode};
+use contract_threads::{MessageStatus, ReasonCode, StoreMessageV3};
 use serde_json::json;
 use uuid::Uuid;
 

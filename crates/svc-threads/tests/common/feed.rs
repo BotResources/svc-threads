@@ -7,6 +7,8 @@
 //! The harness handles take a bare document, so the ids a subscription names
 //! are written into it.
 
+use std::collections::BTreeSet;
+
 use br_core_auth::Passport;
 use br_test_harness::{SseOutcome, SseSubscription, WsError, WsSubscription};
 use futures_util::FutureExt as _;
@@ -73,6 +75,9 @@ pub struct Live {
     revision: Option<i64>,
     /// The snapshot the stream opened on.
     pub reset: Value,
+    /// Every object the member holds on this view: those of the `Reset` and
+    /// of each `Upsert` read since, less those a `Remove` took away.
+    held: BTreeSet<Uuid>,
 }
 
 impl Live {
@@ -142,6 +147,7 @@ impl Live {
             ended: false,
             revision: None,
             reset: Value::Null,
+            held: BTreeSet::new(),
         };
         let reset = live
             .next(PUSH_TIMEOUT)
@@ -187,10 +193,28 @@ impl Live {
                 Err(other) => Frame::Ended(other.to_string()),
             },
         };
-        if matches!(frame, Frame::Ended(_)) {
-            self.ended = true;
+        match &frame {
+            Frame::Ended(_) => self.ended = true,
+            Frame::Delta(data) => self.note(&data[self.root]),
+            Frame::Timeout => {}
         }
         frame
+    }
+
+    /// Keeps [`Live::held`] in step with a delta.
+    fn note(&mut self, delta: &Value) {
+        let kind = delta["__typename"].as_str().unwrap_or_default();
+        if kind.ends_with("Reset") {
+            for view in delta["views"].as_array().into_iter().flatten() {
+                self.held.extend(ids_in(&view["id"]));
+            }
+        } else if kind.ends_with("Upsert") {
+            self.held.extend(ids_in(&delta["view"]["id"]));
+        } else if kind.ends_with("Remove") {
+            for id in ids_in(&delta["key"]) {
+                self.held.remove(&id);
+            }
+        }
     }
 
     /// The next delta, if one arrives within `timeout`. A delta's revision
@@ -240,20 +264,51 @@ impl Live {
         }
     }
 
-    /// Reads until the member loses `id`: a `Remove` naming it, or the end of
-    /// the stream. Deltas about anything else are passed over.
+    /// Reads until the member has lost `id` and everything else this view
+    /// held — a `Remove` naming each, or the end of the stream. Deltas that
+    /// arrive before the first removal are passed over (still in flight, an
+    /// object they bring in is owed a removal too); once the revocation has
+    /// begun, an `Upsert`, or a `Remove` of an object the member never held,
+    /// fails the scenario.
     pub async fn until_revoked(&mut self, what: &str, id: Uuid) -> Revoked {
+        assert!(
+            self.held.contains(&id),
+            "{what}: {} never held {id}",
+            self.root
+        );
+        let mut owed = self.held.clone();
+        let mut removed: BTreeSet<Uuid> = BTreeSet::new();
         let deadline = tokio::time::Instant::now() + PUSH_TIMEOUT;
         loop {
+            if !removed.is_empty() && owed.is_empty() {
+                return Revoked::Removed;
+            }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             match self.read(remaining).await {
                 Frame::Ended(why) => return Revoked::Ended(why),
-                Frame::Delta(frame) if removes(&frame[self.root], id) => return Revoked::Removed,
-                Frame::Delta(_) => {}
                 Frame::Timeout => panic!(
-                    "{what}: {} was neither removed nor ended within {PUSH_TIMEOUT:?}",
+                    "{what}: {} still owes the removal of {owed:?} after {PUSH_TIMEOUT:?}",
                     self.root
                 ),
+                Frame::Delta(frame) => {
+                    let delta = &frame[self.root];
+                    let kind = delta["__typename"].as_str().unwrap_or_default();
+                    if kind.ends_with("Remove") {
+                        for key in ids_in(&delta["key"]) {
+                            assert!(
+                                owed.remove(&key) || removed.contains(&key),
+                                "{what}: a removal of {key}, never held: {delta}"
+                            );
+                            removed.insert(key);
+                        }
+                    } else if removed.is_empty() {
+                        if kind.ends_with("Upsert") {
+                            owed.extend(ids_in(&delta["view"]["id"]));
+                        }
+                    } else {
+                        panic!("{what}: nothing but removals once revoked, got {delta}");
+                    }
+                }
             }
         }
     }
@@ -313,6 +368,29 @@ impl Live {
         }
         deltas
     }
+}
+
+/// Every UUID a value names, wherever it sits in it.
+fn ids_in(value: &Value) -> Vec<Uuid> {
+    let text = value.to_string();
+    let mut ids = Vec::new();
+    let mut rest = text.as_str();
+    while rest.len() >= 36 {
+        match rest
+            .get(..36)
+            .and_then(|candidate| Uuid::parse_str(candidate).ok())
+        {
+            Some(id) if rest.as_bytes()[8] == b'-' => {
+                ids.push(id);
+                rest = &rest[36..];
+            }
+            _ => {
+                let next = rest.chars().next().expect("not empty");
+                rest = &rest[next.len_utf8()..];
+            }
+        }
+    }
+    ids
 }
 
 /// The views of a `Reset`.

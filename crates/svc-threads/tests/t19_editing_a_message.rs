@@ -85,8 +85,8 @@ async fn refused_changing_nothing(
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_place_and_descendants_stay()
- {
+async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_every_later_message_stays()
+{
     // Given T with members O, A and B; M1 by A; M2, an AI answer written on
     // M1's text, and a second answer M2b; a runner.
     let ctx = TestContext::setup().await;
@@ -115,6 +115,10 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     .await;
     let m2b = answer(&ctx, t, ai("a1", "Analyst"), reply("another answer")).await;
     let runner = ctx.service_account(true);
+    let later_before = [
+        message_view(&ctx, &b.passport, t, m2).await,
+        message_view(&ctx, &b.passport, t, m2b).await,
+    ];
     let v = message_version(&ctx, &a.passport, t, m1).await;
     let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
     let added = image();
@@ -165,10 +169,11 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         vec![m1, m2, m2b],
         "the edited M1 keeps its place, and every later message stays"
     );
-    for reply in [m2, m2b] {
+    for (reply, before) in [m2, m2b].into_iter().zip(&later_before) {
         assert_eq!(
-            message_view(&ctx, &b.passport, t, reply).await["status"],
-            "COMPLETED"
+            &message_view(&ctx, &b.passport, t, reply).await,
+            before,
+            "a later message reads exactly as before the edit"
         );
     }
     // And a runner's context carries the new content, not the old.

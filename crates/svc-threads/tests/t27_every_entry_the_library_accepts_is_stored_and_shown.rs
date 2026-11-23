@@ -253,7 +253,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     assert_eq!(
         conversation,
         Conversation::from_parts(conversation_id(t), expected)
-            .expect("the branch is a conversation the library accepts"),
+            .expect("the thread is a conversation the library accepts"),
     );
 
     // And no Job, no thread and no command comes of them.

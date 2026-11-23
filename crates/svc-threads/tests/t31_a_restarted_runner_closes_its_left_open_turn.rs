@@ -53,7 +53,7 @@ use common::flows::{
     ai, await_message, command, completion, context, create_thread, message_confirmed, message_ids,
     message_refused, message_view, open_stream, projected_of, say, store, whole_message,
 };
-use common::{TestContext, Windows, store as stored, stream};
+use common::{PUSH_TIMEOUT, TestContext, Windows, eventually, store as stored, stream};
 use contract_threads::llm::{
     AITurn, BlockId, ClosureReason, ContentBlock, ModelResponse, Perspective, ResponseEnding,
     ResponseMetadata, TextBlock, Turn, TurnEntry,
@@ -369,13 +369,13 @@ async fn t31_a_restarted_runner_closes_its_left_open_turn_finds_its_stored_mail_
     stream::push(&nats, g4, 0, &left.chunks()).await;
 
     // When nothing arrives for longer than the window.
-    tokio::time::sleep(WINDOW * 2).await;
-
-    // Then Threads fails G4 and closes its turn interrupted.
-    let g4_view = await_message(&ctx, &a.passport, v, g4, "G4 failed by silence", |view| {
-        view["status"] == "FAILED"
+    // Then Threads fails G4 — within the window and the time its watch takes
+    // to see it — and closes its turn interrupted.
+    eventually("G4 failed by silence", WINDOW + PUSH_TIMEOUT, || async {
+        message_view(&ctx, &a.passport, v, g4).await["status"] == "FAILED"
     })
     .await;
+    let g4_view = message_view(&ctx, &a.passport, v, g4).await;
     assert_eq!(
         closure_kind(&g4_view).as_deref(),
         Some("interrupted"),
