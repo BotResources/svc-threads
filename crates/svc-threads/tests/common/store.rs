@@ -132,21 +132,48 @@ pub async fn snapshot_json(pool: &PgPool) -> BTreeMap<String, Vec<serde_json::Va
     snapshot
 }
 
-/// The rows of `after` restricted to the columns `before` had, for every table
-/// `before` had: what a schema migration that only adds tables or columns
-/// leaves equal to `before`.
-pub fn restricted_to(
+/// The columns of a table's rows, as its first row holds them.
+fn columns_of(rows: &[serde_json::Value]) -> Vec<String> {
+    rows.first()
+        .and_then(|row| row.as_object())
+        .map(|row| row.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// `before` and `after`, each restricted to the tables `before` had and, in
+/// each, to the columns both still have: what a schema migration that adds
+/// tables or columns, or drops a column the specification removed (0.12.0:
+/// `parent_message_id`), leaves equal when it changes no row.
+pub fn on_kept_columns(
     before: &BTreeMap<String, Vec<serde_json::Value>>,
     after: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> (BTreeMap<String, Vec<String>>, BTreeMap<String, Vec<String>>) {
+    let kept: BTreeMap<String, Vec<String>> = before
+        .iter()
+        .map(|(table, rows)| {
+            let now = after.get(table).map(|rows| columns_of(rows));
+            let columns = columns_of(rows)
+                .into_iter()
+                .filter(|column| {
+                    now.as_ref()
+                        .is_none_or(|now| now.is_empty() || now.contains(column))
+                })
+                .collect();
+            (table.clone(), columns)
+        })
+        .collect();
+    (project(before, &kept), project(after, &kept))
+}
+
+/// The rows of `rows`, for every table `columns` names, restricted to its
+/// columns, as sorted JSON texts.
+fn project(
+    rows: &BTreeMap<String, Vec<serde_json::Value>>,
+    columns: &BTreeMap<String, Vec<String>>,
 ) -> BTreeMap<String, Vec<String>> {
     let mut restricted = BTreeMap::new();
-    for (table, rows) in before {
-        let columns: Vec<String> = rows
-            .first()
-            .and_then(|row| row.as_object())
-            .map(|row| row.keys().cloned().collect())
-            .unwrap_or_default();
-        let mut kept: Vec<String> = after
+    for (table, columns) in columns {
+        let mut kept: Vec<String> = rows
             .get(table)
             .cloned()
             .unwrap_or_default()
