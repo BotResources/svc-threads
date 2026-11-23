@@ -24,7 +24,7 @@ use br_core_auth::Passport;
 use common::artifacts::{File, download_answer, download_url, fetch, upload};
 use common::feed::{Live, in_reset, thread_feed, ws_opening};
 use common::flows::{
-    ai, answer_attaching, branch_answer, command, create_thread, listed, member_ids, say, sorted,
+    ai, answer_attaching, command, create_thread, listed, member_ids, page_answer, say, sorted,
     thread_confirmed, thread_view,
 };
 use common::{
@@ -50,7 +50,7 @@ async fn reads(
     };
     vec![
         blank(ctx.run(passport, Q_THREAD, json!({ "id": thread })).await),
-        blank(branch_answer(ctx, passport, thread, 10, None, None).await),
+        blank(page_answer(ctx, passport, thread, 10, None).await),
         blank(download_answer(ctx, passport, thread, artifact).await),
     ]
 }
@@ -68,16 +68,16 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
     );
     let s = ctx.enrol_super_user("sam").await;
     let t = create_thread(&ctx, Some(&o), &[&a]).await;
-    let m1 = say(&ctx, t, None, &o, "members only").await;
+    let m1 = say(&ctx, t, &o, "members only").await;
     let runner = ctx.service_account(true);
     let file = File::csv("q,n\n1,2\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
-    answer_attaching(&ctx, t, Some(m1), ai("a1", "Analyst"), "here", x).await;
+    answer_attaching(&ctx, t, ai("a1", "Analyst"), "here", x).await;
 
     // When A reads T, its messages, and follows it.
     let view = thread_view(&ctx, &a.passport, t).await;
     let messages = gql::data(
-        &branch_answer(&ctx, &a.passport, t, 10, None, None).await,
+        &page_answer(&ctx, &a.passport, t, 10, None).await,
         "threadsMessages",
     )
     .clone();
@@ -96,7 +96,7 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
     // When A, a member of T and of T2, reaches T's message and T's artifact
     // through T2.
     let t2 = create_thread(&ctx, Some(&a), &[]).await;
-    let unknown_tip = Uuid::now_v7();
+    let unknown_message = Uuid::now_v7();
     let unknown_artifact = Uuid::now_v7();
     let through_t2 = |answer: Value, id: Uuid| {
         format!("{:?} {}", gql::code(&answer), answer["data"]).replace(&id.to_string(), "<id>")
@@ -104,13 +104,10 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
     // Then each is answered exactly as an id nobody created: no message of T
     // and no artifact of T is reachable from another thread.
     assert_eq!(
+        through_t2(page_answer(&ctx, &a.passport, t2, 10, Some(m1)).await, m1),
         through_t2(
-            branch_answer(&ctx, &a.passport, t2, 10, None, Some(m1)).await,
-            m1
-        ),
-        through_t2(
-            branch_answer(&ctx, &a.passport, t2, 10, None, Some(unknown_tip)).await,
-            unknown_tip
+            page_answer(&ctx, &a.passport, t2, 10, Some(unknown_message)).await,
+            unknown_message
         ),
         "T's message through T2"
     );
@@ -210,7 +207,7 @@ async fn t04_a_thread_is_read_by_its_members_only_and_a_stranger_gets_not_found(
         for answer in [
             ctx.run(passport, Q_THREADS, json!({ "size": 10 })).await,
             ctx.run(passport, Q_THREAD, json!({ "id": t })).await,
-            branch_answer(&ctx, passport, t, 10, None, None).await,
+            page_answer(&ctx, passport, t, 10, None).await,
             download_answer(&ctx, passport, t, x).await,
             ctx.run(
                 passport,
@@ -260,7 +257,7 @@ async fn t04_a_users_list_holds_their_threads_only_the_most_recently_active_firs
     assert!(!listed(&ctx, &u.passport).await.contains(&tz));
 
     // When a message is stored on Ta.
-    let m = say(&ctx, ta, None, &u, "bumping Ta").await;
+    let m = say(&ctx, ta, &u, "bumping Ta").await;
 
     // Then Ta is the most recently active: its activity is its latest
     // message's date.

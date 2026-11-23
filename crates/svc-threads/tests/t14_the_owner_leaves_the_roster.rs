@@ -50,11 +50,11 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     let t1 = create_thread(&ctx, Some(&o), &[&a]).await;
     let t2 = create_thread(&ctx, None, &[&o, &a]).await;
     let t3 = create_thread(&ctx, Some(&p), &[&o]).await;
-    let o_on_t1 = say(&ctx, t1, None, &o, "my thread").await;
+    let o_on_t1 = say(&ctx, t1, &o, "my thread").await;
     let runner = ctx.service_account(true);
     let file = File::csv("owner\nO\n");
     let x = upload(&ctx, &runner.passport, t1, &file).await;
-    answer_attaching(&ctx, t1, Some(o_on_t1), ai("a1", "Analyst"), "attached", x).await;
+    answer_attaching(&ctx, t1, ai("a1", "Analyst"), "attached", x).await;
     let x_url = download_url(&ctx, &a.passport, t1, x)
         .await
         .expect("A reads T1's artifact");
@@ -69,7 +69,7 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
         gql::data(&marked, "threadsSetReadMark"),
         &json!({ "success": true })
     );
-    let o_on_t2 = say(&ctx, t2, None, &o, "on the shared thread").await;
+    let o_on_t2 = say(&ctx, t2, &o, "on the shared thread").await;
     let mut a_list = Live::list(&ctx, &a.passport).await;
     let mut o_feed_sse = Live::thread(&ctx, &o.passport, t2).await;
     let mut o_feed_ws = Live::thread_ws(&ctx, &o.passport, t2).await;
@@ -83,7 +83,7 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
         feed.until_revoked(&format!("O loses T2 over {transport}"), t2)
             .await;
     }
-    say(&ctx, t2, Some(o_on_t2), &a, "while O is away").await;
+    say(&ctx, t2, &a, "while O is away").await;
     for (feed, transport) in [(&mut o_feed_sse, "SSE"), (&mut o_feed_ws, "WS")] {
         feed.silent_or_ended(&format!("a deactivated member's {transport} view"))
             .await;
@@ -96,7 +96,7 @@ async fn t14_an_owner_leaving_the_roster_takes_their_threads_and_only_theirs() {
     );
     // …and T1 stays: A reads it and writes on it.
     assert!(thread_view(&ctx, &a.passport, t1).await.is_object());
-    say(&ctx, t1, Some(o_on_t1), &a, "still here").await;
+    say(&ctx, t1, &a, "still here").await;
     assert!(ctx.published_members(t1).await.is_some());
 
     // When Identity retracts O's roster entry.

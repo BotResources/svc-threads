@@ -60,7 +60,7 @@ async fn t33_a_member_lists_the_children_they_see_oldest_first_by_pages() {
     let [k1, k2, k3] = [0, 1, 2].map(|at| blocks[at].id().as_uuid());
     store(
         &ctx,
-        user_message(p, None, a.id, blocks.to_vec()),
+        user_message(p, a.id, blocks.to_vec()),
         MessageStatus::Completed,
     )
     .await;

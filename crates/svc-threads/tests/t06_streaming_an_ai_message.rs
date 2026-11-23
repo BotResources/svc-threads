@@ -2,8 +2,8 @@
 //! and hash.**
 //!
 //! > Playing the agents service, the harness stores AI message M2 (agent a1,
-//! > name "Analyst", job_id J) STREAMING, parent M1: confirmed with status
-//! > STREAMING, no content. Playing the runner, it publishes on
+//! > name "Analyst", job_id J) STREAMING: confirmed with status STREAMING, no
+//! > content. Playing the runner, it publishes on
 //! > stream.threads.{M2} chunks seq 0..n: the response deltas of a first model
 //! > response R1 by model m-1, opening a text block and a runtime tool call,
 //! > growing them and ending R1 on tool use; a whole entry of runtime tool
@@ -87,7 +87,7 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         ctx.enrol("bob").await,
     );
     let t = create_thread(&ctx, Some(&o), &[&a, &b]).await;
-    let m1 = say(&ctx, t, None, &a, "Please analyse Q3").await;
+    say(&ctx, t, &a, "Please analyse Q3").await;
     let runner = ctx.service_account(true);
     let file = File::csv("quarter,revenue\nQ3,42\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
@@ -104,7 +104,7 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
 
     // When the agents service opens M2 STREAMING, by a1 "Analyst", for Job J.
     let job = Uuid::now_v7();
-    let mut open = streaming_message(t, Some(m1), &analyst);
+    let mut open = streaming_message(t, &analyst);
     open.job_id = Some(job);
     let m2 = store(&ctx, open, MessageStatus::Streaming).await;
 
@@ -117,7 +117,6 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         json!({ "kind": "AI", "userId": null, "aiId": analyst.uuid(), "name": "Analyst" })
     );
     assert_eq!(view["jobId"], Value::String(job.to_string()));
-    assert_eq!(view["parentMessageId"], Value::String(m1.to_string()));
     assert_eq!(view["entries"], json!([]));
     // And (3) A's feed receives it, and so does O's on the second pod.
     let entered = |delta: &Value| upsert_of(delta, m2).is_some();
@@ -421,10 +420,14 @@ async fn t06_a_streaming_ai_message_is_folded_live_and_sealed_by_its_last_chunk_
         .run(
             &a.passport,
             Q_MESSAGES,
-            json!({ "thread": t, "size": 1, "before": null, "tip": m2 }),
+            json!({ "thread": t, "size": 2, "before": null }),
         )
         .await;
-    assert_eq!(gql::data(&on_pod2, "threadsMessages")[0], sealed);
+    assert_eq!(
+        gql::data(&on_pod2, "threadsMessages")[0],
+        sealed,
+        "M2, the newest of T's two messages, reads as sealed on pod 2"
+    );
 
     // When M2 is completed again.
     let again = command(&ctx, &completion(t, m2, n, &hash)).await;

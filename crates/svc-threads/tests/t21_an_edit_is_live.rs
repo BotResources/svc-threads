@@ -57,7 +57,7 @@ async fn t21_an_edit_reaches_the_followers_as_the_updated_message() {
         ctx.enrol("ursula").await,
     );
     let t = create_thread(&ctx, Some(&a), &[&b]).await;
-    let m1 = say(&ctx, t, None, &a, "a first wording").await;
+    let m1 = say(&ctx, t, &a, "a first wording").await;
     let v = message_version(&ctx, &a.passport, t, m1).await;
     let mut a_feed = Live::thread_ws(&ctx, &a.passport, t).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;

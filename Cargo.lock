@@ -818,6 +818,21 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
+version = "0.9.0"
+source = "git+https://github.com/BotResources/svc-threads?tag=contract-threads%2Fv0.9.0#fa14625d91fd1ee2d63805a8880e71c42d87c355"
+dependencies = [
+ "br-core-integration",
+ "br-llm-messages 2.1.0",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "contract-threads"
 version = "0.12.0"
 dependencies = [
  "br-core-integration",
@@ -3684,6 +3699,7 @@ dependencies = [
  "conformance-scope",
  "contract-threads 0.12.0",
  "contract-threads 0.4.0",
+ "contract-threads 0.9.0",
  "dotenvy",
  "futures-util",
  "reqwest",

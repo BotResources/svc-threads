@@ -129,7 +129,7 @@ async fn t34_each_thread_publishes_its_summary_which_follows_title_activity_and_
     // ── a complete message ───────────────────────────────────────────────
 
     // When A's complete message M1 is stored.
-    let m1 = say(&ctx, t, None, &a, "Please analyse Q3").await;
+    say(&ctx, t, &a, "Please analyse Q3").await;
 
     // Then (4) the activity moves to M1's storage, as T's members read it.
     let (entry, _) = summary_until(&ctx, t, "M1 moves T's activity", |entry| {
@@ -143,7 +143,7 @@ async fn t34_each_thread_publishes_its_summary_which_follows_title_activity_and_
     // ── a streamed message ───────────────────────────────────────────────
 
     // When the agents service opens M2 STREAMING.
-    let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let m2 = open_stream(&ctx, t, ai("a1", "Analyst")).await;
 
     // Then (4) the activity moves once, at the opening.
     let (opened, _) = summary_until(&ctx, t, "M2's opening moves T's activity", |entry| {

@@ -1,3 +1,47 @@
+//! **T11 — The agent context: another agent's turn reduced to its answers,
+//! without what it received.**
+//!
+//! > Thread T, with members A and B and resources {kms: [k1]}, holds, in
+//! > order: A's question; an input turn holding an agent's request from a1 to
+//! > a2; a1 "Analyst"'s turn with a thinking and its replay material, a
+//! > redacted thinking, a runtime tool call, its result, a runtime notice
+//! > received in that turn and an answer by model m-1; B's question; a2
+//! > "Critic"'s turn with a thinking, a runtime tool call, the tool's result,
+//! > an answer whose text block carries a citation and an image block,
+//! > followed by ARTIFACT and WARNING annotations, and, received in that turn,
+//! > an agent's mail, a task notice and a human message; a deleted message by
+//! > A; a1's turn CANCELLED after a whole response; a2's turn FAILED before
+//! > its first entry; a2's turn still STREAMING with a text half produced; B's
+//! > last word. A service account holding threads:runner reads T's context
+//! > naming a1. It gets T's id, T's members with their current display names,
+//! > T's resources, and a projected thread for a1 that the library loads. In
+//! > it: A's and B's questions whole, with their user ids and no name; the
+//! > input turn with the agent's request whole; a1's turns whole, with the
+//! > thinking, replay material, redacted thinking, tool call, result and
+//! > received notice byte for byte, and the response's model; a2's finished
+//! > turn as an input turn holding only a2's answer, text and image, with no
+//! > thinking, tool call, result or closure, and with none of the mail, task
+//! > notice and human message that a2 received; a2's streaming turn holding
+//! > the text produced so far. No deleted, cancelled or failed-before-first-
+//! > entry message is in it, and no annotation. Members still read the
+//! > annotations after their entries and every entry a2 received. Naming a2
+//! > instead gives a2's turns whole, with the mail, notice and human message
+//! > it received; the agent's request whole; and a1's turns reduced to their
+//! > answers, without the notice a1 received. Read naming no agent, the
+//! > context is the whole thread as a conversation the library loads, with
+//! > every received entry and the same messages left out. Naming an agent id
+//! > that is not a UUIDv7 is refused AI_PERSPECTIVE_INVALID. A user, a super
+//! > user and a service account without threads:runner are refused
+//! > RUNNER_SCOPE_REQUIRED. Reading a thread nobody created answers not found.
+//!
+//! The oracle is the library: every turn stored, in the order stored, plus the
+//! draft of the response a2 still produces, projected by `Perspective::of`;
+//! the service's answer must equal it, value for value. The whole
+//! conversation (no agent) is the library's load of the thread in order.
+//!
+//! Channels: the runner's context (2), the members' read of the annotations,
+//! the refusals (1).
+
 mod common;
 
 use std::collections::BTreeMap;
@@ -42,7 +86,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let mut kept: Vec<Turn> = Vec::new();
 
     let m1_entry = human(a.id, vec![text("Hello team")]);
-    let store_m1 = user_entry_message(t, None, a.id, &m1_entry);
+    let store_m1 = user_entry_message(t, a.id, &m1_entry);
     let m1 = store(&ctx, store_m1, MessageStatus::Completed).await;
     kept.push(Turn::from(input_turn(m1, vec![m1_entry])));
 
@@ -76,7 +120,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     ));
     let m1r = store(
         &ctx,
-        whole_message(t, Some(m1), m1r_id, &analyst, &m1r_turn, Vec::new()),
+        whole_message(t, m1r_id, &analyst, &m1r_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -86,7 +130,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let m2_turn = Turn::from(ai_turn(m2_id, &analyst, a1_entries));
     let m2 = store(
         &ctx,
-        whole_message(t, Some(m1r), m2_id, &analyst, &m2_turn, Vec::new()),
+        whole_message(t, m2_id, &analyst, &m2_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -95,7 +139,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let m3_entry = human(b.id, vec![text("And you, Critic?")]);
     let m3 = store(
         &ctx,
-        user_entry_message(t, Some(m2), b.id, &m3_entry),
+        user_entry_message(t, b.id, &m3_entry),
         MessageStatus::Completed,
     )
     .await;
@@ -132,7 +176,6 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
         &ctx,
         whole_message(
             t,
-            Some(m3),
             m4_id,
             &critic,
             &m4_turn,
@@ -146,7 +189,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     .await;
     kept.push(m4_turn.clone());
 
-    let m5 = say(&ctx, t, Some(m4), &a, "scratch that").await;
+    let m5 = say(&ctx, t, &a, "scratch that").await;
     let deleted = command(
         &ctx,
         &DeleteMessage {
@@ -158,7 +201,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     .await;
     message_confirmed(&ctx, deleted, MessageStatus::Completed, "deleting M5").await;
 
-    let m6 = open_stream(&ctx, t, Some(m5), analyst.clone()).await;
+    let m6 = open_stream(&ctx, t, analyst.clone()).await;
     let mut r6 = Streamed::start(m6, None);
     r6.text(&["cancelled words"], true);
     r6.complete(ResponseEnding::finished());
@@ -175,7 +218,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     .await;
     message_confirmed(&ctx, cancelled, MessageStatus::Cancelled, "cancelling M6").await;
 
-    let m7 = open_stream(&ctx, t, Some(m6), critic.clone()).await;
+    let m7 = open_stream(&ctx, t, critic.clone()).await;
     let failed = command(
         &ctx,
         &FailMessage {
@@ -188,7 +231,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     .await;
     message_confirmed(&ctx, failed, MessageStatus::Failed, "failing M7").await;
 
-    let m8 = open_stream(&ctx, t, Some(m7), critic.clone()).await;
+    let m8 = open_stream(&ctx, t, critic.clone()).await;
     let mut r8 = Streamed::start(m8, None);
     r8.text(&["Half of a "], false);
     stream::push(&ctx.nats.url(), m8, 0, &r8.chunks()).await;
@@ -209,13 +252,13 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let m9_entry = human(b.id, vec![text("Final word")]);
     let m9 = store(
         &ctx,
-        user_entry_message(t, Some(m8), b.id, &m9_entry),
+        user_entry_message(t, b.id, &m9_entry),
         MessageStatus::Completed,
     )
     .await;
     kept.push(Turn::from(input_turn(m9, vec![m9_entry])));
     let stored = Conversation::from_parts(conversation_id(t), kept.clone())
-        .expect("the branch the context keeps is a conversation the library accepts");
+        .expect("the messages the context keeps are a conversation the library accepts");
     let pending = [PendingResponse::from(r8.draft())];
 
     let for_a1 = context(&ctx, &runner.passport, t, Some(&analyst)).await;
@@ -249,7 +292,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let expected = Perspective::of(analyst.id)
         .keeping(|_| false)
         .project_pending(conversation_id(t), stored.turns(), &pending)
-        .expect("the library projects the branch for a1");
+        .expect("the library projects the conversation for a1");
     assert_eq!(
         projected, expected,
         "the agent context is the library's, for a1"
@@ -355,7 +398,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     let expected = Perspective::of(critic.id)
         .keeping(|_| false)
         .project_pending(conversation_id(t), stored.turns(), &[])
-        .expect("the library projects the branch for a2");
+        .expect("the library projects the conversation for a2");
     assert_eq!(
         for_a2, expected,
         "the agent context is the library's, for a2"
@@ -375,7 +418,7 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     assert_eq!(whole_context["conversation"]["schema"], "br-llm-messages/5");
     let whole = conversation_of(&whole_context);
     assert_eq!(turn_ids(&whole), vec![m1, m1r, m2, m3, m4, m8, m9]);
-    assert_eq!(whole, stored, "the whole branch, as stored");
+    assert_eq!(whole, stored, "the whole thread, in order, as stored");
     assert!(
         !whole_context["conversation"]
             .to_string()

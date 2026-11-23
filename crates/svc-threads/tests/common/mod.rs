@@ -28,7 +28,8 @@
 //!    `threads.fact` ([`facts`], read with `SELECT` on the app role).
 //!
 //! [`content`] builds the conversation a scenario stores, through the
-//! contract's and the library's own types; [`flows`] are the gestures every
+//! contract's and the library's own types, and [`wire`] the two commands of
+//! 0.12.0 the contract does not carry yet; [`flows`] are the gestures every
 //! scenario repeats (a thread created and confirmed, a message stored and
 //! confirmed), each asserting its one answer.
 //!
@@ -65,6 +66,7 @@ pub mod port;
 pub mod previous;
 pub mod store;
 pub mod stream;
+pub mod wire;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -215,6 +217,18 @@ impl TestContext {
     pub async fn setup_last_release() -> Self {
         Self::boot_on(
             previous::last_release_binary(),
+            Handshake::Accept,
+            Windows::default(),
+        )
+        .await
+    }
+
+    /// The nominal boot of the last release with branches (`svc-threads`
+    /// 0.11.0): what a deployment ran, and stored its branches with, before
+    /// upgrading to the list.
+    pub async fn setup_branches_release() -> Self {
+        Self::boot_on(
+            previous::branches_release_binary(),
             Handshake::Accept,
             Windows::default(),
         )

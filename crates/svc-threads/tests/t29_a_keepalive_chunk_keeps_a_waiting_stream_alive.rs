@@ -25,10 +25,10 @@ async fn t29_keepalives_alone_keep_a_message_streaming_past_the_window_and_enter
     let ctx = short_window().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Wait for the other runner").await;
+    say(&ctx, t, &a, "Wait for the other runner").await;
     let nats = ctx.nats.url();
 
-    let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let m2 = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let opened = message_view(&ctx, &a.passport, t, m2).await;
     let facts_opened = facts::of(&ctx.pool, "message", m2).await.len();
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
@@ -126,10 +126,10 @@ async fn t29_a_keepalive_comes_inside_a_producing_response_and_on_a_resolved_thr
     let ctx = short_window().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
     let nats = ctx.nats.url();
 
-    let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let m2 = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let mut response = Streamed::start(m2, None);
     response.text(&["half ", "said"], true);
     response.complete(ResponseEnding::finished());
@@ -183,10 +183,10 @@ async fn t29_silence_still_fails_the_message_interrupted_and_a_later_keepalive_c
     let ctx = short_window().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
     let nats = ctx.nats.url();
 
-    let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let m2 = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let mut response = Streamed::start(m2, None);
     response.text(&["half"], false);
     let mut sent = response.chunks();

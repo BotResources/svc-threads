@@ -39,7 +39,7 @@ async fn t20_an_edit_from_a_stale_version_is_refused_and_overwrites_nothing() {
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "the first wording").await;
+    let m1 = say(&ctx, t, &a, "the first wording").await;
     let v = message_version(&ctx, &a.passport, t, m1).await;
     const C1: &str = "the wording C1";
     const C2: &str = "the wording C2";

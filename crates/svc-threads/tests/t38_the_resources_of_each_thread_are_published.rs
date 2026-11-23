@@ -214,7 +214,7 @@ async fn t38_each_thread_publishes_its_resources_from_its_creation_to_its_deleti
 
     // When A's message is stored on T.
     let (summary_before, _) = ctx.summary_entry(t).await.expect("T's summary");
-    say(&ctx, t, None, &a, "Here are the Q3 figures").await;
+    say(&ctx, t, &a, "Here are the Q3 figures").await;
 
     // Then, once the change is drained (the summary's last activity moved),
     // (4) the resources entry is left as it was.

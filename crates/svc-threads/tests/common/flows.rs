@@ -11,7 +11,7 @@ use contract_threads::llm::{Conversation, PlainBlock, ProjectedThread, Turn, Tur
 use contract_threads::{
     AiDelivery, AiTurn, CompleteMessage, CreateThread, DeleteMessage, EditMessage, LibraryJson,
     MessageCommandConfirmed, MessageCommandRefused, MessageStatus, MessageTurn, PlacedAnnotation,
-    ReasonCode, ReopenThread, ResolveThread, StoreMessageV2, StreamSeal, ThreadCommandConfirmed,
+    ReasonCode, ReopenThread, ResolveThread, StreamSeal, ThreadCommandConfirmed,
     ThreadCommandRefused, ThreadsCommand, UserTurn,
 };
 use serde::Serialize;
@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use super::commands::{Answer, commanding_service, send, send_as};
 use super::content::{self, Agent};
+use super::wire::{EraseMessages, StoreMessageV3};
 use super::{
-    PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_CONTEXT_ON, Q_MESSAGES, Q_THREAD,
+    PUSH_TIMEOUT, Person, Q_CHILD_THREADS, Q_CONTEXT_FOR, Q_CONTEXT_UP_TO, Q_MESSAGES, Q_THREAD,
     Q_THREADS, QUIET_WINDOW, TestContext, eventually, gql,
 };
 
@@ -127,6 +128,64 @@ pub async fn message_refused(
         }
         other => panic!(
             "{what}: message.refused {code} expected, got {other:?}\n{}",
+            ctx.logs()
+        ),
+    }
+}
+
+/// The message command was refused with `code`, whether or not this suite's
+/// `contract-threads` knows the code (0.12.0's `COMMAND_VERSION_RETIRED` is
+/// not in 0.9.0's closed enum); answers the refusal as its JSON payload.
+pub async fn message_refused_code(
+    ctx: &TestContext,
+    command_id: Uuid,
+    code: &str,
+    what: &str,
+) -> Value {
+    let refusal = match ctx.answers.await_answer(command_id, what).await {
+        Answer::MessageRefused(refused) => {
+            serde_json::to_value(&refused).expect("a refusal serializes")
+        }
+        Answer::Undecoded { subject, payload } if subject.ends_with(".message.refused.v1") => {
+            payload
+        }
+        other => panic!(
+            "{what}: message.refused {code} expected, got {other:?}\n{}",
+            ctx.logs()
+        ),
+    };
+    assert_eq!(
+        refusal["command_id"],
+        json!(command_id),
+        "{what}: {refusal}"
+    );
+    assert_eq!(refusal["reason_code"], json!(code), "{what}: {refusal}");
+    refusal
+}
+
+/// An erase's answer: `message.confirmed`, naming the command, its thread
+/// and the message it named. The status a confirmed erase carries is not
+/// asserted: the registry does not say which it is (the named message may be
+/// gone).
+pub async fn erase_confirmed(
+    ctx: &TestContext,
+    command_id: Uuid,
+    erase: &EraseMessages,
+    what: &str,
+) -> MessageCommandConfirmed {
+    match ctx.answers.await_answer(command_id, what).await {
+        Answer::MessageConfirmed(confirmed) => {
+            assert_eq!(confirmed.command_id, command_id, "{what}: {confirmed:?}");
+            assert_eq!(confirmed.command_type, "message.erase", "{what}");
+            assert_eq!(
+                (confirmed.thread_id, confirmed.message_id),
+                (erase.thread_id, erase.message_id),
+                "{what}: {confirmed:?}"
+            );
+            confirmed
+        }
+        other => panic!(
+            "{what}: message.confirmed expected, got {other:?}\n{}",
             ctx.logs()
         ),
     }
@@ -245,17 +304,12 @@ pub fn ai(label: &str, name: &str) -> Agent {
     content::agent(label, name)
 }
 
-/// A store under a fresh UUIDv7, of `message`.
-fn storing(
-    thread: Uuid,
-    parent: Option<Uuid>,
-    message_id: Uuid,
-    message: MessageTurn,
-) -> StoreMessageV2 {
-    StoreMessageV2 {
+/// A `message.store` v3 of `message` under `message_id`: a message names no
+/// other message.
+fn storing(thread: Uuid, message_id: Uuid, message: MessageTurn) -> StoreMessageV3 {
+    StoreMessageV3 {
         message_id,
         thread_id: thread,
-        parent_message_id: parent,
         job_id: None,
         acting_user_id: None,
         impersonator_id: None,
@@ -265,25 +319,14 @@ fn storing(
 
 /// A complete user message by `author`: an input turn holding one human
 /// message of `author` with `content`.
-pub fn user_message(
-    thread: Uuid,
-    parent: Option<Uuid>,
-    author: Uuid,
-    content: Vec<PlainBlock>,
-) -> StoreMessageV2 {
-    user_entry_message(thread, parent, author, &content::human(author, content))
+pub fn user_message(thread: Uuid, author: Uuid, content: Vec<PlainBlock>) -> StoreMessageV3 {
+    user_entry_message(thread, author, &content::human(author, content))
 }
 
 /// A complete user message holding `entry`, as given.
-pub fn user_entry_message(
-    thread: Uuid,
-    parent: Option<Uuid>,
-    author: Uuid,
-    entry: &TurnEntry,
-) -> StoreMessageV2 {
+pub fn user_entry_message(thread: Uuid, author: Uuid, entry: &TurnEntry) -> StoreMessageV3 {
     let mut store = storing(
         thread,
-        parent,
         Uuid::now_v7(),
         MessageTurn::User(UserTurn {
             entry: LibraryJson::from_json(content::to_json(entry)),
@@ -296,56 +339,34 @@ pub fn user_entry_message(
 
 /// A complete AI message: the AI turn of `agent` holding `entries`, closed
 /// completed, and no annotation.
-pub fn ai_message(
-    thread: Uuid,
-    parent: Option<Uuid>,
-    agent: &Agent,
-    entries: Vec<TurnEntry>,
-) -> StoreMessageV2 {
+pub fn ai_message(thread: Uuid, agent: &Agent, entries: Vec<TurnEntry>) -> StoreMessageV3 {
     let message = Uuid::now_v7();
     let turn = content::ai_turn(message, agent, content::closed(entries));
-    whole_message(
-        thread,
-        parent,
-        message,
-        agent,
-        &Turn::from(turn),
-        Vec::new(),
-    )
+    whole_message(thread, message, agent, &Turn::from(turn), Vec::new())
 }
 
 /// A complete AI message under `message`'s id: `turn` as given (an AI turn or
 /// an input turn of incoming entries) and `annotations`.
 pub fn whole_message(
     thread: Uuid,
-    parent: Option<Uuid>,
     message: Uuid,
     agent: &Agent,
     turn: &Turn,
     annotations: Vec<PlacedAnnotation>,
-) -> StoreMessageV2 {
-    raw_whole_message(
-        thread,
-        parent,
-        message,
-        agent,
-        content::to_json(turn),
-        annotations,
-    )
+) -> StoreMessageV3 {
+    raw_whole_message(thread, message, agent, content::to_json(turn), annotations)
 }
 
 /// A complete AI message carrying `turn` as raw JSON: the adversarial path.
 pub fn raw_whole_message(
     thread: Uuid,
-    parent: Option<Uuid>,
     message: Uuid,
     agent: &Agent,
     turn: Value,
     annotations: Vec<PlacedAnnotation>,
-) -> StoreMessageV2 {
+) -> StoreMessageV3 {
     storing(
         thread,
-        parent,
         message,
         MessageTurn::Ai(AiTurn {
             agent_id: agent.uuid(),
@@ -359,10 +380,9 @@ pub fn raw_whole_message(
 }
 
 /// An AI message opened `STREAMING`, empty.
-pub fn streaming_message(thread: Uuid, parent: Option<Uuid>, agent: &Agent) -> StoreMessageV2 {
+pub fn streaming_message(thread: Uuid, agent: &Agent) -> StoreMessageV3 {
     storing(
         thread,
-        parent,
         Uuid::now_v7(),
         MessageTurn::Ai(AiTurn {
             agent_id: agent.uuid(),
@@ -373,7 +393,7 @@ pub fn streaming_message(thread: Uuid, parent: Option<Uuid>, agent: &Agent) -> S
 }
 
 /// `store` sent and confirmed with `status`; answers the message id.
-pub async fn store(ctx: &TestContext, store: StoreMessageV2, status: MessageStatus) -> Uuid {
+pub async fn store(ctx: &TestContext, store: StoreMessageV3, status: MessageStatus) -> Uuid {
     let message = store.message_id;
     let command_id = command(ctx, &store).await;
     let confirmed = message_confirmed(ctx, command_id, status, "the message's storage").await;
@@ -382,44 +402,36 @@ pub async fn store(ctx: &TestContext, store: StoreMessageV2, status: MessageStat
     message
 }
 
-/// `author` says `text` on `thread`, answering `parent`.
-pub async fn say(
-    ctx: &TestContext,
-    thread: Uuid,
-    parent: Option<Uuid>,
-    author: &Person,
-    text: &str,
-) -> Uuid {
+/// `author` says `text` on `thread`, after its last message.
+pub async fn say(ctx: &TestContext, thread: Uuid, author: &Person, text: &str) -> Uuid {
     store(
         ctx,
-        user_message(thread, parent, author.id, vec![content::text(text)]),
+        user_message(thread, author.id, vec![content::text(text)]),
         MessageStatus::Completed,
     )
     .await
 }
 
-/// `agent` answers `parent` with `entries`, its turn closed completed.
+/// `agent` answers with `entries`, its turn closed completed.
 pub async fn answer(
     ctx: &TestContext,
     thread: Uuid,
-    parent: Option<Uuid>,
     agent: Agent,
     entries: Vec<TurnEntry>,
 ) -> Uuid {
     store(
         ctx,
-        ai_message(thread, parent, &agent, entries),
+        ai_message(thread, &agent, entries),
         MessageStatus::Completed,
     )
     .await
 }
 
-/// `agent` answers `parent` in `text`, attaching `artifact` in an ARTIFACT
-/// annotation after its answer; its turn closed completed.
+/// `agent` answers in `text`, attaching `artifact` in an ARTIFACT annotation
+/// after its answer; its turn closed completed.
 pub async fn answer_attaching(
     ctx: &TestContext,
     thread: Uuid,
-    parent: Option<Uuid>,
     agent: Agent,
     text: &str,
     artifact: Uuid,
@@ -435,7 +447,6 @@ pub async fn answer_attaching(
         ctx,
         whole_message(
             thread,
-            parent,
             message,
             &agent,
             &turn,
@@ -447,15 +458,10 @@ pub async fn answer_attaching(
 }
 
 /// An AI message opened `STREAMING` and confirmed.
-pub async fn open_stream(
-    ctx: &TestContext,
-    thread: Uuid,
-    parent: Option<Uuid>,
-    agent: Agent,
-) -> Uuid {
+pub async fn open_stream(ctx: &TestContext, thread: Uuid, agent: Agent) -> Uuid {
     store(
         ctx,
-        streaming_message(thread, parent, &agent),
+        streaming_message(thread, &agent),
         MessageStatus::Streaming,
     )
     .await
@@ -512,6 +518,22 @@ pub fn deletion_of(thread: Uuid, message: Uuid, acting: Uuid) -> DeleteMessage {
     DeleteMessage {
         message_id: message,
         thread_id: thread,
+        acting_user_id: acting,
+    }
+}
+
+/// An erase of every message of `thread` stored after `message`, and of
+/// `message` itself when `including`, on `acting`'s gesture.
+pub fn erasure_of(
+    thread: Uuid,
+    message: Uuid,
+    including: bool,
+    acting: Option<Uuid>,
+) -> EraseMessages {
+    EraseMessages {
+        thread_id: thread,
+        message_id: message,
+        including,
         acting_user_id: acting,
     }
 }
@@ -603,63 +625,78 @@ pub async fn listed(ctx: &TestContext, passport: &Passport) -> Vec<Uuid> {
         .collect()
 }
 
-/// One page of a branch, the newest first: the raw answer.
-pub async fn branch_answer(
+/// One page of a thread's messages, the newest first, before the message
+/// `before` names: the raw answer.
+pub async fn page_answer(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
     size: u32,
     before: Option<Uuid>,
-    tip: Option<Uuid>,
 ) -> Value {
     ctx.run(
         passport,
         Q_MESSAGES,
-        json!({ "thread": thread, "size": size, "before": before, "tip": tip }),
+        json!({ "thread": thread, "size": size, "before": before }),
     )
     .await
 }
 
-/// One page of a branch, the newest first.
-pub async fn branch(
+/// One page of a thread's messages, the newest first.
+pub async fn page(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
     size: u32,
-    tip: Option<Uuid>,
+    before: Option<Uuid>,
 ) -> Vec<Value> {
-    let answer = branch_answer(ctx, passport, thread, size, None, tip).await;
+    let answer = page_answer(ctx, passport, thread, size, before).await;
     gql::data(&answer, "threadsMessages")
         .as_array()
         .cloned()
         .unwrap_or_else(|| panic!("a page of messages: {answer}"))
 }
 
-/// The ids of the active branch, oldest first.
-pub async fn active_branch(ctx: &TestContext, passport: &Passport, thread: Uuid) -> Vec<Uuid> {
-    let mut ids: Vec<Uuid> = branch(ctx, passport, thread, 50, None)
+/// Every message of a thread as `passport` reads it, oldest first: the pages
+/// read back from the newest, each before the oldest of the previous one.
+pub async fn messages(ctx: &TestContext, passport: &Passport, thread: Uuid) -> Vec<Value> {
+    const SIZE: u32 = 50;
+    let mut newest_first: Vec<Value> = Vec::new();
+    let mut before = None;
+    loop {
+        let read = page(ctx, passport, thread, SIZE, before).await;
+        let full = read.len() == SIZE as usize;
+        before = read.last().map(|view| uuid_of(&view["id"]));
+        newest_first.extend(read);
+        if !full {
+            break;
+        }
+    }
+    newest_first.reverse();
+    newest_first
+}
+
+/// The ids of a thread's messages, in the order they were stored.
+pub async fn message_ids(ctx: &TestContext, passport: &Passport, thread: Uuid) -> Vec<Uuid> {
+    messages(ctx, passport, thread)
         .await
         .iter()
         .map(|view| uuid_of(&view["id"]))
-        .collect();
-    ids.reverse();
-    ids
+        .collect()
 }
 
-/// One message, read as the tip of its own branch.
+/// One message, found in its thread's list.
 pub async fn message_view(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
     message: Uuid,
 ) -> Value {
-    let page = branch(ctx, passport, thread, 1, Some(message)).await;
-    let view = page
+    messages(ctx, passport, thread)
+        .await
         .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("message {message} reads as the tip of its branch"));
-    assert_eq!(uuid_of(&view["id"]), message);
-    view
+        .find(|view| uuid_of(&view["id"]) == message)
+        .unwrap_or_else(|| panic!("message {message} is in the list of thread {thread}"))
 }
 
 /// Waits until `message` reads as `holds` demands; answers that view.
@@ -718,21 +755,22 @@ pub async fn context(
     gql::data(&answer, "threadsContext").clone()
 }
 
-/// A runner's read of the context of the branch ending at `tip` — the active
-/// branch with no tip — whole or for `agent`, its artifacts included.
-pub async fn context_on(
+/// A runner's read of a thread's context up to the message `up_to` names —
+/// the whole thread with none — whole or for `agent`, its artifacts included
+/// (0.12.0, the cut argument of `common::constants`).
+pub async fn context_up_to(
     ctx: &TestContext,
     passport: &Passport,
     thread: Uuid,
     agent: Option<&Agent>,
-    tip: Option<Uuid>,
+    up_to: Option<Uuid>,
 ) -> Value {
     let agent = agent.map(|agent| agent.uuid().to_string());
     let answer = ctx
         .run(
             passport,
-            Q_CONTEXT_ON,
-            json!({ "thread": thread, "agent": agent, "tip": tip }),
+            Q_CONTEXT_UP_TO,
+            json!({ "thread": thread, "agent": agent, "upTo": up_to }),
         )
         .await;
     gql::data(&answer, "threadsContext").clone()
