@@ -41,11 +41,14 @@
 //! - **Erased ids stay used.** Every id is used once in the thread (T28): a
 //!   message stored afterwards under the id of an erased message, or reusing
 //!   an entry, block or annotation id of one, is refused KEY_REUSED — each
-//!   tried alone.
+//!   tried alone; so is an edit reusing an erased block id; a streamed
+//!   message reusing an erased entry id is stored FAILED with the code
+//!   `reused_identity`.
 //! - **A large erase** (second scenario): more than 1,000 messages after the
 //!   named one go with one confirmation; the list ends at the named message,
 //!   and a member following the thread ends on a head page holding none of
-//!   them.
+//!   them — told by a `Remove` for each message of its page, or by a fresh
+//!   `Reset` when the change is too large to be told message by message.
 //!
 //! The command is `integration.cmd.threads.message.erase.v1`
 //! (`contract_threads::EraseMessages`); its answer is `message.confirmed`
@@ -60,12 +63,12 @@
 //!
 //! "No entry or block of M3, M4 or M5 is left in the store" is read over every
 //! table of the store (`common::store`): no row holds their texts, and no row
-//! but the fact log's names one of their entries, blocks or annotations —
-//! but a row holding nothing but ids and dates, where an id stays reserved
-//! (`store::assert_only_reserved`): the id is still used, the entry is gone.
-//! The erased messages' own ids are read alike on the `threads` schema — a
-//! ghost row of `threads.message` fails here — while the engine's tables may
-//! keep the key of the removal pushed to the followers.
+//! but the fact log's and the reservation of erased ids
+//! (`threads.erased_identity`, ids only: the id stays used, the entry is gone)
+//! names one of their entries, blocks or annotations. The erased messages'
+//! own ids are read alike on the `threads` schema — a ghost row of
+//! `threads.message` fails here — while the engine's tables may keep the key
+//! of the removal pushed to the followers.
 //! The block of M3 the child thread C was started from is named by C's own
 //! rows only (C names it as its origin, which then leads nowhere).
 //!
@@ -189,11 +192,11 @@ async fn erasures(ctx: &TestContext, thread: Uuid) -> Vec<facts::Fact> {
 }
 
 /// A message's own id is named by no row of the `threads` schema but the fact
-/// log's, or a reservation of ids.
+/// log's and the reservation of erased ids.
 async fn no_row_names(ctx: &TestContext, message: Uuid, what: &str) {
-    let mut except = vec!["fact"];
+    let mut except = vec!["fact", stored::RESERVED_IDS];
     except.extend(ENGINE_TABLES);
-    stored::assert_only_reserved(&ctx.pool, &message.to_string(), &except, what).await;
+    stored::assert_nowhere(&ctx.pool, &message.to_string(), &except, what).await;
 }
 
 /// Sends `erase`, refused with `code`, and nothing changes: not a row of the
@@ -439,10 +442,10 @@ async fn t39_the_erase_command_removes_every_message_after_the_named_one_with_it
         stored::assert_nowhere(&ctx.pool, gone, &[], "an erased message's text").await;
     }
     for id in erased_ids.iter().chain([&x]) {
-        stored::assert_only_reserved(
+        stored::assert_nowhere(
             &ctx.pool,
             &id.to_string(),
-            &["fact"],
+            &["fact", stored::RESERVED_IDS],
             "an erased message's entry, block or annotation, or its artifact",
         )
         .await;
@@ -451,7 +454,13 @@ async fn t39_the_erase_command_removes_every_message_after_the_named_one_with_it
         no_row_names(&ctx, message, "an erased message").await;
     }
     // But the block C was started from: the only rows naming it are C's.
-    for (table, row) in stored::rows_holding(&ctx.pool, &origin.to_string(), &["fact"]).await {
+    for (table, row) in stored::rows_holding(
+        &ctx.pool,
+        &origin.to_string(),
+        &["fact", stored::RESERVED_IDS],
+    )
+    .await
+    {
         assert!(
             row.contains(&c.to_string()),
             "the origin block of C is named only by C: {table} {row}"
@@ -637,7 +646,13 @@ async fn t39_the_erase_command_removes_every_message_after_the_named_one_with_it
     // Y and its bytes.
     stored::assert_nowhere(&ctx.pool, M2_TEXT, &[], "M2's text").await;
     for id in &m2_ids {
-        stored::assert_only_reserved(&ctx.pool, &id.to_string(), &["fact"], "what M2 held").await;
+        stored::assert_nowhere(
+            &ctx.pool,
+            &id.to_string(),
+            &["fact", stored::RESERVED_IDS],
+            "what M2 held",
+        )
+        .await;
     }
     no_row_names(&ctx, m2, "M2").await;
     assert_eq!(read_mark(&ctx, &a, t).await, Value::Null);
@@ -662,6 +677,71 @@ async fn t39_the_erase_command_removes_every_message_after_the_named_one_with_it
     replayed_alike(&ctx, first_erase, "the first erase, redelivered").await;
     assert_eq!(message_ids(&ctx, &a.passport, t).await, vec![m1, m6]);
     assert_eq!(erasures(&ctx, t).await.len(), 2);
+    for feed in [&mut a_feed, &mut o_feed, &mut b_on_pod2] {
+        feed.drain().await;
+    }
+
+    // When A edits M1 with a block reusing the id of M3's first block.
+    let version = common::flows::message_version(&ctx, &a.passport, t, m1).await;
+    let m1_before = message_view(&ctx, &a.passport, t, m1).await;
+    let sent = command(
+        &ctx,
+        &common::flows::edit_of(
+            t,
+            m1,
+            a.id,
+            version,
+            vec![common::content::text_as(origin, "reworded")],
+        ),
+    )
+    .await;
+    // Then refused KEY_REUSED, and M1 is unchanged.
+    message_refused(
+        &ctx,
+        sent,
+        ReasonCode::KeyReused,
+        "an edit reusing an erased block id",
+    )
+    .await;
+    assert_eq!(message_view(&ctx, &a.passport, t, m1).await, m1_before);
+
+    // When a streamed message pushes an entry reusing the id of M3's
+    // response.
+    let streamed = open_stream(&ctx, t, a1.clone()).await;
+    let reusing = TurnEntry::from(
+        ModelResponse::new(
+            m3_reply[0].id(),
+            vec![said("the same response id, streamed")],
+            ResponseEnding::finished(),
+            ResponseMetadata::new(),
+        )
+        .expect("a model response on its own"),
+    );
+    let (last_seq, hash) = stream::push(
+        &ctx.nats.url(),
+        streamed,
+        0,
+        &[common::content::entry_chunk(&reusing)],
+    )
+    .await;
+    let sent = command(&ctx, &completion(t, streamed, last_seq, &hash)).await;
+    // Then it is stored FAILED, with the code reused_identity.
+    message_confirmed(
+        &ctx,
+        sent,
+        MessageStatus::Failed,
+        "a stream reusing an erased entry id",
+    )
+    .await;
+    let failed = facts::of(&ctx.pool, "message", streamed).await;
+    assert_eq!(
+        facts::the(&failed, "Failed").payload["reason"],
+        "reused_identity"
+    );
+    assert_eq!(
+        message_ids(&ctx, &a.passport, t).await,
+        vec![m1, m6, streamed]
+    );
     for feed in [&mut a_feed, &mut o_feed, &mut b_on_pod2] {
         feed.drain().await;
     }
@@ -813,12 +893,20 @@ async fn t39_a_large_erase_gets_one_answer_and_leaves_the_named_message_last() {
     let erased = erasures(&ctx, t).await;
     assert_eq!(erased.len(), 1);
     assert_eq!(erased[0].payload["count"], json!(AFTER));
-    // And (3) A is told each message of its head page is removed, and none of
-    // the erased messages is pushed.
+    // And (3) A is told: a Remove for each message of its head page, or a
+    // fresh Reset — then holding T and N alone — and none of the erased
+    // messages is pushed.
+    let is_reset = |delta: &Value| {
+        delta["__typename"]
+            .as_str()
+            .is_some_and(|name| name.ends_with("Reset"))
+    };
     let seen = feed
         .collect_until("A is told its head page is removed", |seen| {
-            head.iter()
-                .all(|id| seen.iter().any(|delta| removes(delta, *id)))
+            seen.iter().any(is_reset)
+                || head
+                    .iter()
+                    .all(|id| seen.iter().any(|delta| removes(delta, *id)))
         })
         .await;
     for delta in seen.iter().chain(&feed.drain().await) {
@@ -826,6 +914,17 @@ async fn t39_a_large_erase_gets_one_answer_and_leaves_the_named_message_last() {
             assert!(
                 upsert_of(delta, *id).is_none(),
                 "an erased message is never pushed: {delta}"
+            );
+        }
+        if is_reset(delta) {
+            let held: Vec<Uuid> = common::feed::views(delta)
+                .iter()
+                .map(|view| common::flows::uuid_of(&view["id"]))
+                .collect();
+            assert_eq!(
+                common::flows::sorted(&held),
+                common::flows::sorted(&[t, named]),
+                "a Reset after the erase holds T and N alone"
             );
         }
     }

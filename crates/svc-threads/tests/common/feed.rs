@@ -2,7 +2,9 @@
 //! transport the engine's ops contract declares: SSE (the gateway's leg) and
 //! `graphql-transport-ws` (the direct leg). Every stream opens on a `Reset`
 //! snapshot, then carries ordered `Upsert` / `Remove` deltas on a contiguous
-//! revision; a reconnect opens on a fresh `Reset`.
+//! revision; a reconnect opens on a fresh `Reset`, and so may a stream whose
+//! change is too large to be told delta by delta (a large erase, T39): a
+//! `Reset` read mid-stream is the new baseline.
 //!
 //! The harness handles take a bare document, so the ids a subscription names
 //! are written into it.
@@ -205,6 +207,7 @@ impl Live {
     fn note(&mut self, delta: &Value) {
         let kind = delta["__typename"].as_str().unwrap_or_default();
         if kind.ends_with("Reset") {
+            self.held.clear();
             for view in delta["views"].as_array().into_iter().flatten() {
                 self.held.extend(ids_in(&view["id"]));
             }
@@ -231,7 +234,14 @@ impl Live {
             "{}: a frame without its root: {frame}",
             self.root
         );
-        if let (Some(revision), Some(previous)) = (delta["revision"].as_i64(), self.revision) {
+        let reset = delta["__typename"]
+            .as_str()
+            .is_some_and(|name| name.ends_with("Reset"));
+        if reset {
+            // A Reset is a fresh baseline: the revision starts over from it.
+            self.revision = delta["revision"].as_i64();
+        } else if let (Some(revision), Some(previous)) = (delta["revision"].as_i64(), self.revision)
+        {
             assert_eq!(
                 revision,
                 previous + 1,

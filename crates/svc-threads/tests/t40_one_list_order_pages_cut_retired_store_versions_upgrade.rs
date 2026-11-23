@@ -56,10 +56,12 @@
 //! "Found nowhere in the store" is read over every table of the store
 //! (`common::store`), the engine's included: no row holds the texts of R1, U2
 //! and R3, and no row names their ids but the fact log, whose append-only
-//! history keeps the facts of their creation (which never carry content).
+//! history keeps the facts of their creation (which never carry content), and
+//! the reservation of removed ids (`threads.erased_identity`, ids only).
 //! R1 attaches artifact V: "removed with its artifacts" is V's row gone, the
 //! read access obtained before the upgrade fetching nothing and the bucket
-//! holding one object less (awaited: the bytes are purged after the commit).
+//! holding one object less (awaited: the bytes are purged after the commit),
+//! and V's facts ending on `Removed`, reason `PRUNED_AT_UPGRADE`.
 //!
 //! Concurrent stores (an addition the review asked for): ten stores sent at
 //! once on one thread are listed in the order Threads answered them — the
@@ -442,14 +444,32 @@ async fn t40_a_thread_that_held_branches_keeps_its_active_branch_and_each_other_
     // their ids but in the fact log's history.
     for (gone, text) in [(r1, texts[1]), (u2, texts[4]), (r3, texts[5])] {
         rows::assert_nowhere(&ctx.pool, text, &[], "a removed message's text").await;
-        rows::assert_only_reserved(&ctx.pool, &gone.to_string(), &["fact"], "a removed message")
-            .await;
+        rows::assert_nowhere(
+            &ctx.pool,
+            &gone.to_string(),
+            &["fact", rows::RESERVED_IDS],
+            "a removed message",
+        )
+        .await;
     }
     // And R1's artifact V went with it: no read access, its row gone, the
     // read access obtained before fetching nothing, the bucket holding one
     // object less.
     assert_eq!(download_url(&ctx, &a.passport, t, v).await, None);
-    rows::assert_only_reserved(&ctx.pool, &v.to_string(), &["fact"], "R1's artifact").await;
+    rows::assert_nowhere(
+        &ctx.pool,
+        &v.to_string(),
+        &["fact", rows::RESERVED_IDS],
+        "R1's artifact",
+    )
+    .await;
+    let v_facts = facts::of(&ctx.pool, "artifact", v).await;
+    let last = v_facts.last().expect("V's facts");
+    assert_eq!(
+        (last.event_type.as_str(), &last.payload["reason"]),
+        ("Removed", &json!("PRUNED_AT_UPGRADE")),
+        "V's facts end on Removed, pruned at the upgrade"
+    );
     eventually("V's bytes are gone", PUSH_TIMEOUT, || async {
         fetch(&v_url).await.0 != 200 && object_count(&ctx).await == objects - 1
     })

@@ -245,10 +245,17 @@ Threads drops the message tree: a thread's messages are one list, ordered by
   registry names the three values, not their keys); it never carries content.
   An erased message's artifact ends on its `Removed` fact.
 - **Erased ids stay used.** After an erase, the id of an erased message, and
-  every entry, block and annotation id it held, are refused `KEY_REUSED` (T28).
-  The store may keep them in a row holding nothing but ids and dates:
-  `store::assert_only_reserved` reads "found nowhere" that way, while any row
-  with content naming them fails.
+  every entry, block and annotation id it held, are refused `KEY_REUSED` on
+  store and edit, and a stream reusing one is stored `FAILED`
+  (`reused_identity`) (T28, T39). Threads keeps them, and the ids of the
+  messages the upgrade removed, in `threads.erased_identity` (ids only): the
+  "found nowhere" checks of T39 and T40 exempt that table as they exempt the
+  fact log (`store::RESERVED_IDS`), and still find no content anywhere. An
+  artifact the upgrade removed ends its facts on `Removed`, reason
+  `PRUNED_AT_UPGRADE` (an erased one, `MESSAGE_ERASED`).
+- **A large erase** (over 1,000 messages) is answered once; its followers may
+  be told by a fresh `ThreadFeedReset` instead of one `Remove` per message:
+  `feed::Live` takes a `Reset` read mid-stream as the new baseline.
 - **GraphQL.** `MessageView.parentMessageId` is gone, and so is `branchTip`
   from `threadsMessages`, `threadsThreadDeltas` and `threadsContext` (T40
   checks the SDL holds neither). `threadsMessages(threadId, size, before)`
