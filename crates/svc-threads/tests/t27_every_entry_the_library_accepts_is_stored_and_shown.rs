@@ -51,8 +51,8 @@ use common::content::{
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, ai, command, context, conversation_of, create, creation, listed,
-    message_refused, message_view, raw_whole_message, say, store, whole_message,
+    ai, command, context, conversation_of, create, creation, listed, message_ids, message_refused,
+    message_view, raw_whole_message, say, store, whole_message,
 };
 use common::{QUIET_WINDOW, TestContext};
 use contract_threads::llm::{ClosureReason, Conversation, Turn, TurnEntryKind};
@@ -83,7 +83,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     let (analyst, critic, scout) = (ai("a1", "Analyst"), ai("a2", "Critic"), ai("a3", "Scout"));
     let runner = ctx.service_account(true);
     let threads_commands_before = ctx.commands_not_sent_by_the_scenario().await;
-    let m0 = say(&ctx, t, None, &a, "Over to the agents").await;
+    let m0 = say(&ctx, t, &a, "Over to the agents").await;
     let listed_before = listed(&ctx, &a.passport).await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
@@ -110,7 +110,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     store(
         &ctx,
-        whole_message(t, Some(m0), m1, &analyst, &a1_turn, Vec::new()),
+        whole_message(t, m1, &analyst, &a1_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -126,7 +126,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     store(
         &ctx,
-        whole_message(t, Some(m1), m2, &critic, &request_turn, Vec::new()),
+        whole_message(t, m2, &critic, &request_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -135,7 +135,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     let queued_turn = Turn::from(input_turn(m3, vec![queue_position(2)]));
     store(
         &ctx,
-        whole_message(t, Some(m2), m3, &analyst, &queued_turn, Vec::new()),
+        whole_message(t, m3, &analyst, &queued_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -165,7 +165,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     store(
         &ctx,
-        whole_message(t, Some(m3), m4, &analyst, &a1_second_turn, Vec::new()),
+        whole_message(t, m4, &analyst, &a1_second_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -177,7 +177,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     store(
         &ctx,
-        whole_message(t, Some(m4), m5, &analyst, &notice_turn, Vec::new()),
+        whole_message(t, m5, &analyst, &notice_turn, Vec::new()),
         MessageStatus::Completed,
     )
     .await;
@@ -285,7 +285,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     let code = turn_refusal(&orphan_turn).expect("the library refuses that order");
     let refused = command(
         &ctx,
-        &raw_whole_message(t, Some(m5), orphan, &analyst, orphan_turn, Vec::new()),
+        &raw_whole_message(t, orphan, &analyst, orphan_turn, Vec::new()),
     )
     .await;
 
@@ -313,7 +313,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
     ));
     let refused = command(
         &ctx,
-        &whole_message(t, Some(m5), posing, &analyst, &posing_turn, Vec::new()),
+        &whole_message(t, posing, &analyst, &posing_turn, Vec::new()),
     )
     .await;
     // Then refused MESSAGE_INVALID (human_message_in_ai_message), and nothing
@@ -330,16 +330,15 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
         "{answer:?}"
     );
     assert!(facts::of(&ctx.pool, "message", posing).await.is_empty());
-    // And neither refused message reaches A, nor the branch.
+    // And neither refused message reaches A, nor T's list.
     a_feed.silence("a refused message reaches no one").await;
     assert_eq!(
-        active_branch(&ctx, &a.passport, t).await,
+        message_ids(&ctx, &a.passport, t).await,
         vec![m0, m1, m2, m3, m4, m5]
     );
 
     // When whole AI turns closed otherwise than completed are stored:
     // budget_exhausted, cancelled, failed, interrupted.
-    let mut parent = m5;
     let mut closed_otherwise = Vec::new();
     for (reason, status, read_as) in [
         (
@@ -374,7 +373,7 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
         // Then each is accepted, under the status its closure gives it.
         store(
             &ctx,
-            whole_message(t, Some(parent), message, &analyst, &turn, Vec::new()),
+            whole_message(t, message, &analyst, &turn, Vec::new()),
             status,
         )
         .await;
@@ -383,7 +382,6 @@ async fn t27_every_entry_the_library_accepts_is_stored_and_shown_with_no_behavio
         assert_eq!(closure_kind(&view).as_deref(), Some(kind.as_str()));
         assert_same_turn(&turn_of(&view), &turn, "a turn closed otherwise");
         closed_otherwise.push(message);
-        parent = message;
     }
     // And (3) each reaches A's feed.
     pushed_all(

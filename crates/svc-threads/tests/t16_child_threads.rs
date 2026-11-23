@@ -44,7 +44,7 @@ async fn t16_a_child_thread_names_its_parent_and_origin_block_then_lives_on_its_
     let k = block.id().as_uuid();
     store(
         &ctx,
-        user_message(p, None, a.id, vec![block]),
+        user_message(p, a.id, vec![block]),
         MessageStatus::Completed,
     )
     .await;
@@ -67,7 +67,7 @@ async fn t16_a_child_thread_names_its_parent_and_origin_block_then_lives_on_its_
     assert_eq!(view["originBlockId"], Value::String(k.to_string()));
     assert_eq!(member_ids(&view), sorted(&[a.id, b.id]));
     assert_eq!(thread_view(&ctx, &o.passport, c).await, Value::Null);
-    let on_c = say(&ctx, c, None, &b, "child's own talk").await;
+    let on_c = say(&ctx, c, &b, "child's own talk").await;
 
     // When a child of P is to be owned by B, not a member of P.
     let mut b_owned = creation(Some(b.id), &[]);
@@ -153,7 +153,7 @@ async fn t16_a_child_thread_names_its_parent_and_origin_block_then_lives_on_its_
         BTreeMap::from([("kms".to_string(), vec!["k1".to_string()])])
     );
     assert_eq!(
-        common::flows::active_branch(&ctx, &b.passport, c).await,
+        common::flows::message_ids(&ctx, &b.passport, c).await,
         vec![on_c]
     );
     assert!(ctx.published_members(c).await.is_some());

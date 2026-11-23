@@ -1,17 +1,18 @@
-//! **T09 — Deleting a message: author only, the node stays.**
+//! **T09 — Deleting a message: author only, the message stays.**
 //!
-//! > M1, by user A, has two answers M2 (an AI message carrying an attached
-//! > artifact X) and M2b, a fork. The harness sends message.delete for M1 with
-//! > acting user B, also a member: refused NOT_THE_AUTHOR, nothing changes.
-//! > With acting user A: confirmed; M1 reads as deleted with no content, still
-//! > in the tree, M2 and M2b stay readable under it, and a member following T
-//! > is told once. A Deleted fact records it; no fact, before or after, carries
+//! > M1, by user A, is followed by M2 (an AI message carrying an attached
+//! > artifact X) and M2b. The harness sends message.delete for M1 with acting
+//! > user B, also a member: refused NOT_THE_AUTHOR, nothing changes. With
+//! > acting user A: confirmed; M1 reads as deleted with no content, still in
+//! > the list, M2 and M2b stay readable after it, and a member following T is
+//! > told once. A Deleted fact records it; no fact, before or after, carries
 //! > M1's text, and no block of M1 is left in the store. A runner's context no
 //! > longer contains M1. Deleting M1 again is confirmed and changes nothing.
 //! > Deleting an unknown message is refused MESSAGE_NOT_FOUND. Deleting M2, the
 //! > AI's message, with acting user A is refused NOT_THE_AUTHOR: an AI message
-//! > is never deleted, it is regenerated; M2 and its artifact X stay, X's read
-//! > access still returns its bytes (an artifact goes with its thread — T17).
+//! > is never deleted, it can only be erased; M2 and its artifact X stay, X's
+//! > read access still returns its bytes (an artifact goes with its thread —
+//! > T17).
 //!
 //! M2 carries X as an ARTIFACT annotation after its answer. "No block of M1 is
 //! left in the store" is read over every table of the store, whatever the
@@ -28,10 +29,10 @@ use common::content::{after, ai_turn, artifact, closed, human, reply, text};
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    ai, answer, branch, command, context, conversation_of, create_thread, message_confirmed,
+    ai, answer, command, context, conversation_of, create_thread, message_confirmed, message_ids,
     message_refused, message_view, store, turn_ids, user_entry_message, whole_message,
 };
-use common::{TestContext, flows::uuid_of, store as stored};
+use common::{TestContext, store as stored};
 use contract_threads::llm::{Turn, TurnEntry};
 use contract_threads::{DeleteMessage, MessageStatus, ReasonCode};
 use serde_json::json;
@@ -49,7 +50,7 @@ fn delete(thread: Uuid, message: Uuid, acting: Uuid) -> DeleteMessage {
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
 async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_message_is_never_deleted()
 {
-    // Given T with members O, A and B; M1 by A; two answers M2 (carrying an
+    // Given T with members O, A and B; M1 by A, followed by M2 (carrying an
     // artifact X) and M2b; B following T; a runner.
     let ctx = TestContext::setup().await;
     let (o, a, b) = (
@@ -64,7 +65,7 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     let m1_entry = human(a.id, vec![secret_block]);
     let m1 = store(
         &ctx,
-        user_entry_message(t, None, a.id, &m1_entry),
+        user_entry_message(t, a.id, &m1_entry),
         MessageStatus::Completed,
     )
     .await;
@@ -79,7 +80,6 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
         &ctx,
         whole_message(
             t,
-            Some(m1),
             m2_id,
             &analyst,
             &m2_turn,
@@ -88,7 +88,7 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
         MessageStatus::Completed,
     )
     .await;
-    let m2b = answer(&ctx, t, Some(m1), analyst.clone(), reply("noted, again")).await;
+    let m2b = answer(&ctx, t, analyst.clone(), reply("noted, again")).await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
     facts::assert_no_fact_carries(&ctx.pool, SECRET, "before the deletion").await;
 
@@ -116,18 +116,21 @@ async fn t09_only_its_author_deletes_a_message_whose_node_stays_and_an_ai_messag
     let confirmed =
         message_confirmed(&ctx, deleted, MessageStatus::Completed, "A deleting M1").await;
     assert!(confirmed.deleted, "{confirmed:?}");
-    // And (2) M1 reads as deleted, without content, still in the tree.
+    // And (2) M1 reads as deleted, without content, still in the list.
     let gone = message_view(&ctx, &o.passport, t, m1).await;
     assert_eq!(gone["deleted"], true, "{gone}");
     assert_eq!(gone["entries"], json!([]), "no entry, block or annotation");
-    // And M2 and M2b stay readable under it.
+    // And M2 and M2b stay readable after it, in their place.
+    assert_eq!(
+        message_ids(&ctx, &b.passport, t).await,
+        vec![m1, m2, m2b],
+        "M1 keeps its place; M2 and M2b stay after it"
+    );
     for answer in [m2, m2b] {
-        let page: Vec<_> = branch(&ctx, &b.passport, t, 10, Some(answer))
-            .await
-            .iter()
-            .map(|view| uuid_of(&view["id"]))
-            .collect();
-        assert_eq!(page, vec![answer, m1], "the fork stays readable under M1");
+        assert_eq!(
+            message_view(&ctx, &b.passport, t, answer).await["deleted"],
+            false
+        );
     }
     // And (3) B is told once.
     let pushed = b_feed

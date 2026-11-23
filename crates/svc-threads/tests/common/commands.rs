@@ -14,6 +14,7 @@ use contract_threads::{
     ThreadsCommand, ThreadsEvent,
 };
 use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::constants::PUSH_TIMEOUT;
@@ -32,6 +33,14 @@ pub enum Answer {
     ThreadRefused(ThreadCommandRefused),
     MessageConfirmed(MessageCommandConfirmed),
     MessageRefused(MessageCommandRefused),
+    /// An answer on one of the four subjects that this suite's
+    /// `contract-threads` cannot decode — a reason code it does not know yet,
+    /// such as 0.12.0's `COMMAND_VERSION_RETIRED` — kept as its subject and
+    /// its payload, the JSON the consumer receives.
+    Undecoded {
+        subject: String,
+        payload: Value,
+    },
 }
 
 /// A capture of every answer Threads publishes, bound before the first command
@@ -80,18 +89,22 @@ impl Answers {
 }
 
 fn decode(subject: &str, payload: &[u8]) -> Answer {
-    fn inner<T: serde::de::DeserializeOwned>(payload: &[u8]) -> T {
+    fn inner<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Option<T> {
         serde_json::from_slice::<IntegrationEvent<T>>(payload)
-            .expect("an answer in the integration envelope")
-            .payload
+            .ok()
+            .map(|event| event.payload)
     }
-    match subject {
-        s if s.ends_with(".thread.confirmed.v1") => Answer::ThreadConfirmed(inner(payload)),
-        s if s.ends_with(".thread.refused.v1") => Answer::ThreadRefused(inner(payload)),
-        s if s.ends_with(".message.confirmed.v1") => Answer::MessageConfirmed(inner(payload)),
-        s if s.ends_with(".message.refused.v1") => Answer::MessageRefused(inner(payload)),
+    let decoded = match subject {
+        s if s.ends_with(".thread.confirmed.v1") => inner(payload).map(Answer::ThreadConfirmed),
+        s if s.ends_with(".thread.refused.v1") => inner(payload).map(Answer::ThreadRefused),
+        s if s.ends_with(".message.confirmed.v1") => inner(payload).map(Answer::MessageConfirmed),
+        s if s.ends_with(".message.refused.v1") => inner(payload).map(Answer::MessageRefused),
         other => panic!("not an answer subject: {other}"),
-    }
+    };
+    decoded.unwrap_or_else(|| Answer::Undecoded {
+        subject: subject.to_string(),
+        payload: inner::<Value>(payload).expect("an answer in the integration envelope"),
+    })
 }
 
 /// Sends `command` as `actor`, under a fresh UUIDv7 that is both the envelope's
@@ -108,7 +121,7 @@ pub async fn send<C: ThreadsCommand + Serialize>(
 
 /// Sends `command` under `command_id` — published again under the same id, it
 /// is the bus redelivering one command. The envelope's schema version is the
-/// command's own (`message.store` travels as v1 or v2).
+/// command's own (`message.store` travels as v3).
 pub async fn send_as<C: ThreadsCommand + Serialize>(
     nats: &FabricTestNats,
     actor: Actor,
@@ -149,5 +162,29 @@ where
         .publish_command(&C::coords(), &envelope)
         .await
         .expect("the commanding service publishes its v1 command");
+    command_id
+}
+
+/// Sends a command of the published language of 0.11.0 (`contract-threads`
+/// 0.9.0, `message.store` v2 naming a parent) as `actor`, under a fresh
+/// UUIDv7; answers that id. A consumer still on `message.store` v2 sends
+/// exactly this; 0.11.0 itself stores with it.
+pub async fn send_v2<C>(nats: &FabricTestNats, actor: Actor, command: &C) -> Uuid
+where
+    C: contract_threads_v0_9::ThreadsCommand + Serialize,
+{
+    let command_id = Uuid::now_v7();
+    let envelope = IntegrationCommand::new(
+        command_id,
+        C::command_type(),
+        C::VERSION,
+        Utc::now(),
+        EventMetadata::new(actor, command_id),
+        command,
+    );
+    nats.fabric()
+        .publish_command(&C::coords(), &envelope)
+        .await
+        .expect("the commanding service publishes its v2 command");
     command_id
 }

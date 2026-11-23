@@ -6,15 +6,15 @@
 //! > confirmed CANCELLED; M7 holds the response, c1's result and a cancelled
 //! > closure, c2 without a result, and the library loads the turn; a member
 //! > following T sees the end. Cancelling M7 again is refused
-//! > MESSAGE_NOT_STREAMING. M8, a regeneration of M7, pushes a response with
-//! > calls c3 and c4 and c3's result, then the deltas of a text response that
-//! > never ends, and is failed with its seal (last_seq and hash): confirmed
-//! > FAILED, its turn closed failed and the unfinished response kept
-//! > interrupted: members read it, a runner never receives it; a chunk beyond
-//! > last_seq arriving after the seal is refused and M8 reads as sealed. A
-//! > runner reading the thread's context gets M8, which ends the active branch,
-//! > with its complete entries and its closure, in a conversation the library
-//! > loads (the cancelled M7 is left out). Completing a streaming message M10
+//! > MESSAGE_NOT_STREAMING. M8, stored after M7, pushes a response with calls
+//! > c3 and c4 and c3's result, then the deltas of a text response that never
+//! > ends, and is failed with its seal (last_seq and hash): confirmed FAILED,
+//! > its turn closed failed and the unfinished response kept interrupted:
+//! > members read it, a runner never receives it; a chunk beyond last_seq
+//! > arriving after the seal is refused and M8 reads as sealed. A runner
+//! > reading the thread's context gets M8, with its complete entries and its
+//! > closure, in a conversation the library loads (the cancelled M7 is left
+//! > out). Completing a streaming message M10
 //! > whose last response left a tool call without a result is confirmed FAILED:
 //! > the library refuses a completed closure while a call is unanswered. M9, an
 //! > AI answer stored COMPLETED, cancelled then failed: each refused
@@ -86,7 +86,7 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Look it up").await;
+    let m1 = say(&ctx, t, &a, "Look it up").await;
     let runner = ctx.service_account(true);
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
     let nats = ctx.nats.url();
@@ -94,7 +94,7 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
 
     // When M7 streams a response ending with calls c1 and c2, then the results
     // answering c1 only, and a user's stop is relayed with no seal.
-    let m7 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let m7 = open_stream(&ctx, t, analyst.clone()).await;
     let mut r7 = Streamed::start(m7, None);
     let c1 = r7.call("search", &["{\"q\":\"one\"}"]);
     let c2 = r7.call("search", &["{\"q\":\"two\"}"]);
@@ -177,10 +177,10 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
     )
     .await;
 
-    // When M8, a regeneration of M7, streams a response calling c3 and c4,
+    // When M8, stored after M7, streams a response calling c3 and c4,
     // c3's result, then the deltas of a text response that never ends, and is
     // failed with its seal.
-    let m8 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let m8 = open_stream(&ctx, t, analyst.clone()).await;
     let mut r8 = Streamed::start(m8, None);
     let c3 = r8.call("search", &["{\"q\":\"three\"}"]);
     let c4 = r8.call("search", &["{\"q\":\"four\"}"]);
@@ -242,9 +242,9 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
 
     // When a runner reads the thread's context.
     let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
-    // Then M8 ends the active branch, with its complete entries and its
-    // closure, in a conversation the library loads — the cancelled M7 left out,
-    // the interrupted response never received.
+    // Then the conversation is A's question then M8, with its complete
+    // entries and its closure, in a conversation the library loads — the
+    // cancelled M7 left out, the interrupted response never received.
     assert_eq!(turn_ids(&conversation), vec![m1, m8]);
     let m8_turn = conversation.turns()[1].as_ai().expect("M8, an AI turn");
     assert_eq!(m8_turn.entries().len(), 3, "{m8_turn:?}");
@@ -263,7 +263,7 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
 
     // When a streaming message M10, whose last response leaves a call without
     // a result, is completed.
-    let m10 = open_stream(&ctx, t, Some(m8), analyst.clone()).await;
+    let m10 = open_stream(&ctx, t, analyst.clone()).await;
     let mut r10 = Streamed::start(m10, None);
     r10.call("search", &["{\"q\":\"ten\"}"]);
     r10.complete(ResponseEnding::tool_use());
@@ -285,7 +285,7 @@ async fn t08_a_cancelled_or_failed_message_closes_its_turn_and_leaves_its_open_t
     let mut m9_entries = vec![calling(&[&lookup])];
     m9_entries.push(results(vec![result_of(&lookup, "found nine", false)]));
     m9_entries.extend(reply("All done."));
-    let m9 = answer(&ctx, t, Some(m10), analyst.clone(), m9_entries).await;
+    let m9 = answer(&ctx, t, analyst.clone(), m9_entries).await;
     let before = message_view(&ctx, &a.passport, t, m9).await;
     let cancelled = command(&ctx, &cancel(t, m9, None)).await;
     let failed = command(&ctx, &fail(t, m9, None)).await;

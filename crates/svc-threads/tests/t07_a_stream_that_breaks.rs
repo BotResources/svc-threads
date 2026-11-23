@@ -47,7 +47,7 @@ use common::content::{
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, ai, await_message, command, completion, context, conversation_of, create_thread,
+    ai, await_message, command, completion, context, conversation_of, create_thread, message_ids,
     message_refused, message_view, open_stream, say, streaming_message, thread_confirmed,
 };
 use common::{QUIET_WINDOW, SHORT_STREAM_IDLE, TestContext, Windows, stream};
@@ -117,14 +117,14 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     .await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
     let nats = ctx.nats.url();
     let analyst = ai("a1", "Analyst");
 
     // When M3 is opened, its response started, then a delta names a block the
     // response never opened.
-    let m3 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let m3 = open_stream(&ctx, t, analyst.clone()).await;
     let r3 = Streamed::start(m3, None);
     let orphan = r3.refused(DeltaOp::text_appended(block_id(), "orphan"));
     let refusal = r3
@@ -169,7 +169,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     // When M4 is opened and receives three pushes of a text response, each
     // within the stream window of the previous one, though the three span more
     // than a window.
-    let m4 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let m4 = open_stream(&ctx, t, analyst.clone()).await;
     let mut r4 = Streamed::start(m4, Some("m-1"));
     r4.text(&["half ", "said"], false);
     let m4_chunks = r4.chunks();
@@ -255,7 +255,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
 
     // When M5 is opened and receives a frame under the previous version's
     // accumulator name.
-    let m5 = open_stream(&ctx, t, Some(m1), ai("a2", "Critic")).await;
+    let m5 = open_stream(&ctx, t, ai("a2", "Critic")).await;
     let r5 = Streamed::start(m5, None);
     stream::push_under_previous_accumulator(&nats, m5, 0, &r5.chunks()[0]).await;
 
@@ -268,7 +268,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     assert_eq!(closure_kind(&view).as_deref(), Some("failed"));
 
     // When a writer pushes a model response as a whole ENTRY.
-    let whole = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let whole = open_stream(&ctx, t, analyst.clone()).await;
     let mut response = Streamed::start(whole, None);
     response.text(&["whole"], true);
     response.complete(ResponseEnding::finished());
@@ -292,7 +292,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     .await;
 
     // When a writer pushes an ENTRY while its response is still produced.
-    let mid = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let mid = open_stream(&ctx, t, analyst.clone()).await;
     let mut producing = Streamed::start(mid, None);
     producing.text(&["mid"], false);
     let mut mid_chunks = producing.chunks();
@@ -318,7 +318,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     );
 
     // When a writer pushes a closure.
-    let closing = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let closing = open_stream(&ctx, t, analyst.clone()).await;
     stream::push(
         &nats,
         closing,
@@ -349,7 +349,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     )
     .await;
     thread_confirmed(&ctx, closed, "closing T").await;
-    let open_m6 = streaming_message(t, Some(m1), &analyst);
+    let open_m6 = streaming_message(t, &analyst);
     let m6 = open_m6.message_id;
     let refused = command(&ctx, &open_m6).await;
     let mut r6 = Streamed::start(m6, None);
@@ -367,7 +367,7 @@ async fn t07_a_broken_stream_fails_its_message_and_keeps_an_unfinished_response_
     a_feed.silence("M6's chunks are never folded").await;
     assert!(facts::of(&ctx.pool, "message", m6).await.is_empty());
     assert!(
-        !active_branch(&ctx, &a.passport, t).await.contains(&m6),
+        !message_ids(&ctx, &a.passport, t).await.contains(&m6),
         "no message M6"
     );
 

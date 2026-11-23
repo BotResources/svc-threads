@@ -55,7 +55,7 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
     let ctx = TestContext::setup().await;
     let (o, a) = (ctx.enrol("olga").await, ctx.enrol("ada").await);
     let t = create_thread(&ctx, Some(&o), &[&a]).await;
-    let m1 = say(&ctx, t, None, &a, "before the close").await;
+    let m1 = say(&ctx, t, &a, "before the close").await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
     // When the harness closes T as CANCELLED.
@@ -78,7 +78,7 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
     assert!(facts::types(&facts::of(&ctx.pool, "thread", t).await).contains(&"Cancelled"));
 
     // When a message is stored on T, then T is closed again as COMPLETED.
-    let message = command(&ctx, &user_message(t, Some(m1), a.id, vec![text("late")])).await;
+    let message = command(&ctx, &user_message(t, a.id, vec![text("late")])).await;
     let reclose = command(&ctx, &close(t, ClosingStatus::Completed, o.id)).await;
 
     // Then both are refused THREAD_NOT_OPEN, and T still reads CANCELLED, with
@@ -88,7 +88,7 @@ async fn t17_a_closed_thread_never_changes_status_and_stops_messages() {
     let view = thread_view(&ctx, &a.passport, t).await;
     assert_eq!(view["status"], "CANCELLED");
     assert_eq!(
-        common::flows::active_branch(&ctx, &a.passport, t).await,
+        common::flows::message_ids(&ctx, &a.passport, t).await,
         vec![m1]
     );
 
@@ -105,19 +105,11 @@ async fn t17_a_deleted_thread_goes_with_everything_it_holds_its_entry_and_its_ti
     let mut born = creation(Some(o.id), &[a.id]);
     born.resources = BTreeMap::from([("documents".to_string(), vec!["d1".to_string()])]);
     let u = create(&ctx, born).await;
-    let m1 = say(&ctx, u, None, &a, "summarise this").await;
+    let m1 = say(&ctx, u, &a, "summarise this").await;
     let runner = ctx.service_account(true);
     let file = File::csv("summary\nok\n");
     let x = upload(&ctx, &runner.passport, u, &file).await;
-    let m2 = answer_attaching(
-        &ctx,
-        u,
-        Some(m1),
-        ai("a1", "Analyst"),
-        "the summary is done",
-        x,
-    )
-    .await;
+    let m2 = answer_attaching(&ctx, u, ai("a1", "Analyst"), "the summary is done", x).await;
     let attached = annotations_of(&message_view(&ctx, &a.passport, u, m2).await);
     assert_eq!(attached.len(), 1, "M2's ARTIFACT annotation");
     let annotation = uuid_of(&attached[0].1["id"]);

@@ -115,7 +115,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
     let s = create_thread(&ctx, Some(&a), &[]).await;
 
     // When the harness stores M1, then sends the store again under its id.
-    let store_m1 = user_message(s, None, a.id, vec![text("the first wording")]);
+    let store_m1 = user_message(s, a.id, vec![text("the first wording")]);
     let m1 = store_m1.message_id;
     let store = send(&ctx.nats, commanding_service(), &store_m1).await;
     let first = nth_answer(&ctx, store, 1, "the store").await;
@@ -167,7 +167,7 @@ async fn t24_a_command_received_again_gets_the_same_answer_and_never_applies_its
     assert_eq!(second, first, "the stored refusal, not a new judgment");
 
     // Given M2, A's second message, deleted.
-    let m2 = say(&ctx, s, Some(m1), &a, "a message A deletes").await;
+    let m2 = say(&ctx, s, &a, "a message A deletes").await;
     let delete_m2 = deletion_of(s, m2, a.id);
     let delete = send(&ctx.nats, commanding_service(), &delete_m2).await;
     confirmed(

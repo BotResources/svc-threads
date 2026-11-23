@@ -57,10 +57,10 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
         ctx.enrol("dora").await,
     );
     let t = create_thread(&ctx, Some(&o), &[&a, &b, &c]).await;
-    let m1 = say(&ctx, t, None, &a, "is this settled?").await;
-    let m2 = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let m2f = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let m2c = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let m1 = say(&ctx, t, &a, "is this settled?").await;
+    let m2 = open_stream(&ctx, t, ai("a1", "Analyst")).await;
+    let m2f = open_stream(&ctx, t, ai("a1", "Analyst")).await;
+    let m2c = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let mut settled = Streamed::start(m2, None);
     settled.text(&["it is ", "settled"], true);
     settled.complete(ResponseEnding::finished());
@@ -102,7 +102,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
     // THREAD_RESOLVED and nothing changes.
     let m1_before = message_view(&ctx, &a.passport, t, m1).await;
     let facts_before = facts::count(&ctx.pool).await;
-    let stored = command(&ctx, &user_message(t, Some(m1), a.id, vec![text("more")])).await;
+    let stored = command(&ctx, &user_message(t, a.id, vec![text("more")])).await;
     message_refused(
         &ctx,
         stored,
@@ -256,7 +256,7 @@ async fn t22_a_resolved_thread_accepts_no_message_until_it_is_reopened_and_is_no
         })
         .await;
     // And messages are accepted again; A edits and deletes again.
-    let m3 = say(&ctx, t, Some(m2), &a, "thanks").await;
+    let m3 = say(&ctx, t, &a, "thanks").await;
     let edited = command(&ctx, &edit_of(t, m1, a.id, v1, vec![text("rephrased")])).await;
     message_confirmed(
         &ctx,

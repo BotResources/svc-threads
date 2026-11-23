@@ -42,6 +42,7 @@ br-scope-declaration-contract.workspace = true
 br-util-nats-fabric.workspace = true
 conformance-directory = { git = "https://github.com/BotResources/br-e2e-harness", package = "conformance-directory", tag = "conformance-directory/v0.1.0", version = "0.1.0" }
 contract-threads-v0-4 = { git = "https://github.com/BotResources/svc-threads", package = "contract-threads", tag = "contract-threads/v0.4.0", version = "0.4.0" }
+contract-threads-v0-9 = { git = "https://github.com/BotResources/svc-threads", package = "contract-threads", tag = "contract-threads/v0.9.0", version = "0.9.0" }
 dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rusty-s3 = "0.10"

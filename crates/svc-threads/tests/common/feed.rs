@@ -18,20 +18,13 @@ use super::{MESSAGE_FIELDS, PUSH_TIMEOUT, QUIET_WINDOW, THREAD_FIELDS, TestConte
 pub const THREAD_FEED: &str = "threadsThreadDeltas";
 pub const THREADS_LIST: &str = "threadsThreadsDeltas";
 
-/// Following `thread` live: the thread and the head page of its active branch.
+/// Following `thread` live: the thread and the head page of its messages.
 pub fn thread_feed(thread: Uuid, size: u32) -> String {
-    thread_feed_on(thread, size, None)
-}
-
-/// Following `thread` live: the thread and the head page of the branch ending
-/// at `tip`, or of its active branch.
-pub fn thread_feed_on(thread: Uuid, size: u32, tip: Option<Uuid>) -> String {
     let view = format!(
         "__typename ... on ThreadView {{ {THREAD_FIELDS} }} ... on MessageView {{ {MESSAGE_FIELDS} }}"
     );
-    let tip = tip.map_or_else(String::new, |tip| format!(", branchTip: \"{tip}\""));
     format!(
-        "subscription {{ {THREAD_FEED}(threadId: \"{thread}\", size: {size}{tip}) {{ __typename \
+        "subscription {{ {THREAD_FEED}(threadId: \"{thread}\", size: {size}) {{ __typename \
          ... on ThreadFeedReset {{ revision views {{ {view} }} }} \
          ... on ThreadFeedUpsert {{ revision view {{ {view} }} }} \
          ... on ThreadFeedRemove {{ revision projector key }} }} }}"

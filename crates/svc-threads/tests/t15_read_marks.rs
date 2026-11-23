@@ -56,11 +56,11 @@ async fn t15_a_member_sets_their_own_read_mark_the_readers_own_state_with_no_fac
         ctx.enrol("ugo").await,
     );
     let t = create_thread(&ctx, Some(&o), &[&a, &b]).await;
-    let m1 = say(&ctx, t, None, &o, "one").await;
-    let m2 = say(&ctx, t, Some(m1), &o, "two").await;
-    let m3 = say(&ctx, t, Some(m2), &o, "three").await;
+    let m1 = say(&ctx, t, &o, "one").await;
+    let m2 = say(&ctx, t, &o, "two").await;
+    let m3 = say(&ctx, t, &o, "three").await;
     let other = create_thread(&ctx, Some(&a), &[&u]).await;
-    let n = say(&ctx, other, None, &a, "elsewhere").await;
+    let n = say(&ctx, other, &a, "elsewhere").await;
 
     // And (2) the affordances offer A to mark T and M2.
     gql::assert_allowed(&thread_view(&ctx, &a.passport, t).await, "setReadMark");
