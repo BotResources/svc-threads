@@ -34,7 +34,8 @@ pub use library::LibraryJson;
 pub use members::{MEMBERS_MANIFEST_KEY, MEMBERS_PREFIX, MEMBERS_VERSION, PublishedThreadMembers};
 pub use message::{
     AiDelivery, AiTurn, CancelMessage, CompleteMessage, CompleteMessageV2, DeleteMessage,
-    EditMessage, FailMessage, FailMessageV2, MessageTurn, StoreMessageV2, StreamSeal, UserTurn,
+    EditMessage, EraseMessages, FailMessage, FailMessageV2, MessageTurn, RETIRED_STORE_VERSIONS,
+    StoreMessageV3, StreamSeal, UserTurn,
 };
 pub use reason::ReasonCode;
 pub use resources::{

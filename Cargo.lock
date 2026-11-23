@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
-version = "0.9.0"
+version = "0.12.0"
 dependencies = [
  "br-core-integration",
  "br-llm-messages 2.1.0",
@@ -3669,7 +3669,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "svc-threads"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "async-graphql",
  "br-core-auth",
@@ -3682,8 +3682,8 @@ dependencies = [
  "chrono",
  "conformance-directory",
  "conformance-scope",
+ "contract-threads 0.12.0",
  "contract-threads 0.4.0",
- "contract-threads 0.9.0",
  "dotenvy",
  "futures-util",
  "reqwest",
