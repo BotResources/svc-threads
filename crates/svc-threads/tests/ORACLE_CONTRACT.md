@@ -285,12 +285,11 @@ Threads drops the message tree: a thread's messages are one list, ordered by
   tests). Rewritten on their 0.12.0 gestures: T05, T06, T08, T09, T11, T19,
   T26, T31 (one test now, the silence case on thread V within it). Removed:
   T10 (forks and the active branch) and T25 (store.v1 converted), deleted from
-  the registry; `t37_a_runner_reads_the_context_of_a_named_branch.rs`,
-  superseded by T40's cut; `t38_following_a_named_branch_live.rs`, a branch
-  feed that no longer exists. T36 keeps its scenario, the artifact "of another
-  branch" read as the artifact of a message stored after the message the
-  runner names. The registry gestures of T36 and T37 still speak of branches:
-  to be corrected by the operator.
+  the registry; `t37_a_runner_reads_the_context_of_a_named_branch.rs` (T37,
+  deleted from the registry, its cut now T40's);
+  `t38_following_a_named_branch_live.rs`, a branch feed that no longer exists.
+  T36 follows its corrected gesture: the runner names M2, and W is the
+  artifact of M3, stored after M2.
 
 ## 0.11.0 additions
 

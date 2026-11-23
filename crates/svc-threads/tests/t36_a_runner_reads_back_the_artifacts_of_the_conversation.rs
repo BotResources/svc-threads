@@ -1,21 +1,17 @@
 //! **T36 — A runner reads back the artifacts of the conversation.**
 //!
-//! > Thread T's active branch holds AI message M1 attaching artifact X
-//! > (report.csv) and AI message M2 attaching artifact Y; a PENDING artifact Z
-//! > was never attached, and message M3 on another branch attaches artifact W.
-//! > A threads:runner service account reads T's context: it receives X and Y
-//! > with id, name, media type, size, digest and message, and neither Z nor W.
-//! > Asking for X's read access, the bytes read are the stored ones; a context
-//! > read that does not ask for an access receives none. A service account
-//! > without threads:runner is refused RUNNER_SCOPE_REQUIRED.
+//! > Thread T holds AI message M1 attaching artifact X (report.csv) and AI
+//! > message M2 attaching artifact Y; a PENDING artifact Z was never attached,
+//! > and message M3, stored after M2, attaches artifact W. A threads:runner
+//! > service account reads T's context naming M2: it receives X and Y with id,
+//! > name, media type, size, digest and message, and neither Z nor W. Asking
+//! > for X's read access, the bytes read are the stored ones; a context read
+//! > that does not ask for an access receives none. A service account without
+//! > threads:runner is refused RUNNER_SCOPE_REQUIRED.
 //!
-//! **The registry gesture still speaks of branches** (it was not reworded at
-//! 0.12.0; a gesture to correct by the operator). Threads has no branch any
-//! more: "M3 on another branch" is read as M3 stored after M2, outside the
-//! conversation the runner receives because the runner names M2 — the cut of
-//! a runner's context (T40). So "the active branch" is the list up to M2, and
-//! every read of the gesture names M2. A read naming no message, which
-//! receives W too, proves W was attached and that the cut alone keeps it out.
+//! Every read of the gesture names M2, with the cut argument of
+//! `threadsContext` (T40). Beyond the gesture, a read naming no message
+//! receives W too: W is attached, and the cut alone keeps it out.
 //!
 //! The artifacts come beside the conversation, never inside it, in the order
 //! of the messages in the list, then of the `ARTIFACT` annotations naming
