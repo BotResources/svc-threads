@@ -94,6 +94,12 @@ Breaking: senders, clients and runners move with Threads (README, *Deploy:
 - e2e T10 (*Forks and the active branch*) and T25 (*A message stored with
   store.v1 is converted*), deleted with the gestures they specified.
 
+### Security
+
+- `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592, a stack overflow in `Url::origin()`
+  on nested `blob:` URLs), with `form_urlencoded` 1.2.3. Lockfile only, through
+  the NATS client and the HTTP stack; `cargo deny` refused 2.5.8.
+
 ## 0.11.0 - 2026-11-18
 
 Threads 0.11 (registry patch 0.11.0): Threads publishes the resources of each
