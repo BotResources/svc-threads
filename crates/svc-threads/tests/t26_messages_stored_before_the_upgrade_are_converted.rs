@@ -773,7 +773,11 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
         "the fork's text, after the list migration",
     )
     .await;
-    for (table, rows) in now.iter().filter(|(table, _)| table.as_str() != "fact") {
+    // (Its id stays reserved, ids only, as an erased message's.)
+    for (table, rows) in now
+        .iter()
+        .filter(|(table, _)| !["fact", store::RESERVED_IDS].contains(&table.as_str()))
+    {
         for row in rows {
             assert!(
                 !row.to_string().contains(&fork.to_string()),

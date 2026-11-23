@@ -705,17 +705,14 @@ async fn t39_the_erase_command_removes_every_message_after_the_named_one_with_it
     .await;
     assert_eq!(message_view(&ctx, &a.passport, t, m1).await, m1_before);
 
-    // When a streamed message pushes an entry reusing the id of M3's
-    // response.
+    // When a streamed message pushes an entry — a mail, whole — under the id
+    // of M3's response.
     let streamed = open_stream(&ctx, t, a1.clone()).await;
-    let reusing = TurnEntry::from(
-        ModelResponse::new(
-            m3_reply[0].id(),
-            vec![said("the same response id, streamed")],
-            ResponseEnding::finished(),
-            ResponseMetadata::new(),
-        )
-        .expect("a model response on its own"),
+    let reusing = common::content::mail_as(
+        m3_reply[0].id().as_uuid(),
+        &a2,
+        Uuid::now_v7(),
+        vec![text("the same entry id, streamed")],
     );
     let (last_seq, hash) = stream::push(
         &ctx.nats.url(),
