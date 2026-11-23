@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "contract-threads"
-version = "0.12.0"
+version = "0.10.0"
 dependencies = [
  "br-core-integration",
  "br-llm-messages 2.1.0",
@@ -3697,7 +3697,7 @@ dependencies = [
  "chrono",
  "conformance-directory",
  "conformance-scope",
- "contract-threads 0.12.0",
+ "contract-threads 0.10.0",
  "contract-threads 0.4.0",
  "contract-threads 0.9.0",
  "dotenvy",

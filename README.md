@@ -91,7 +91,7 @@ is additive.
   named a parent. Threads answers both with `message.refused`
   `COMMAND_VERSION_RETIRED` and stores nothing. Every service that stores
   messages (the agents service, the runners) is upgraded to v3
-  (`contract-threads` 0.12.0) in the same rollout.
+  (`contract-threads` 0.10.0) in the same rollout.
 - **Clients move with Threads.** `MessageView.parentMessageId` is gone, and
   `branchTip` is gone from `threadsMessages`, `threadsThreadDeltas` and
   `threadsContext`. A query that still names them fails GraphQL validation.

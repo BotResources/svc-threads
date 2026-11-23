@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
-## 0.12.0 - 2026-11-23
+## 0.10.0 - 2026-11-23
 
 The published language of Threads 0.12 (registry patch 0.12.0): a thread's
 messages form one list, in the order they were stored. A message names no
-other message. The version follows the service's (0.9.0 to 0.12.0): no
-0.10 or 0.11 of this crate exists.
+other message.
 
 ### Added
 
