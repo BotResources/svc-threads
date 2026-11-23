@@ -173,8 +173,12 @@ pub fn due<'r>(
             Verdict::Fail => {
                 let sealed = match cx.seal_current::<TurnContent>(&state.id).await {
                     Ok(sealed) => sealed,
+                    // A STREAMING row whose stream is sealed already: a marker
+                    // another message left under the same id (a deleted
+                    // thread's) refuses every chunk of this one. Fail it on what
+                    // folded rather than leave it STREAMING for good.
                     Err(EngineError::Accumulator(AccumulatorError::AlreadySealed { .. })) => {
-                        return Ok(());
+                        cx.accumulated::<TurnContent>(&state.id).await?.state
                     }
                     Err(error) => return Err(error.into()),
                 };

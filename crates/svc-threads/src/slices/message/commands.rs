@@ -22,6 +22,7 @@ use super::{MessageCause, message_cause, store, watch};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
 use crate::fault::Fault;
 use crate::slices::artifact::lifecycle;
+use crate::slices::artifact::{self, state::RemovalReason};
 use crate::slices::thread::ThreadCause;
 use crate::slices::thread::state::{Thread, ThreadState};
 use crate::slices::thread::transitions::Applied;
@@ -303,7 +304,11 @@ async fn store_message(
     }
     let artifacts = refuse_on!(lifecycle::ready(cx, thread.id, &judged.content.artifacts()).await?);
 
-    let now = call.meta.occurred_at;
+    // The list's order is the store order: under the thread's lock, after the
+    // thread's latest message, whatever the clock of the pod that dispatched
+    // the command.
+    let latest = store::latest_created_at(cx.connection(), thread.id).await?;
+    let now = store::list_position(call.meta.occurred_at, latest);
     let status = judged.status;
     let message = transitions::store(
         NewMessage {
@@ -355,7 +360,14 @@ async fn delete_message(
     let mut state = refuse_on!(message_of(cx, command.thread_id, command.message_id).await?);
     let applied = refuse_on!(state.delete(command.acting_user_id, &call.meta)?);
     if applied == Applied::Changed {
-        lifecycle::delete_all_of_message(cx, state.thread_id, state.id, &call.meta).await?;
+        let artifacts =
+            artifact::store::ids_of_messages(cx.connection(), state.thread_id, &[state.id]).await?;
+        artifact::remove_artifacts(
+            cx,
+            &artifacts,
+            Some((RemovalReason::MessageDeleted, &call.meta)),
+        )
+        .await?;
         cx.save(&state).await?;
         cx.impact_caused::<Message, _>(
             &state.id,

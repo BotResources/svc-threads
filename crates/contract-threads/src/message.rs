@@ -218,6 +218,12 @@ impl ThreadsCommand for DeleteMessage {
 /// nothing. Its confirmation names the named message: `status` is its status
 /// and `deleted` its flag when it stays, and the status it had when it went
 /// too.
+///
+/// The ids an erased message held (its own, its entries', blocks' and
+/// annotations') stay reserved in the thread: a later message reusing one is
+/// refused `KEY_REUSED`. An erase removes what is stored when it runs: a
+/// `message.store` sent before the erase is confirmed may be stored first, and
+/// then be erased too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EraseMessages {
     pub thread_id: Uuid,

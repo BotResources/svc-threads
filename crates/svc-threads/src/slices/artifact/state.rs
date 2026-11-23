@@ -122,6 +122,9 @@ literal_enum! {
         MessageDeleted => "MESSAGE_DELETED",
         /// Its message was erased with the end of its thread.
         MessageErased => "MESSAGE_ERASED",
+        /// Its message was off its thread's active branch at the upgrade to
+        /// one list of messages; recorded by migration `9800000008` only.
+        PrunedAtUpgrade => "PRUNED_AT_UPGRADE",
     }
 }
 

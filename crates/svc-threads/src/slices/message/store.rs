@@ -1,5 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 
+use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
+
 use contract_threads::llm::{
     ActorRef, AgentId, Author, BlockId, BlockRecord, ContentBlockKind, EntryId, EntryRecord,
     HumanId, ObservedAt, OpaqueJson, RepresentationState, TurnEntryKind, TurnId, TurnKind,
@@ -26,6 +28,11 @@ use crate::fault::{corrupt, encode};
 use crate::slices::thread::state::{MEMBER_DIM, UnknownStoredValue};
 
 pub const TABLE: &str = "threads.message";
+
+/// The ids of erased messages, entries, blocks and annotations, kept reserved
+/// for the life of their thread (removed with it by cascade). Ids only, never
+/// content.
+pub const ERASED_IDENTITY_TABLE: &str = "threads.erased_identity";
 
 pub const CONTENT_SCHEMA: &str = contract_threads::llm::CONVERSATION_SCHEMA;
 
@@ -388,6 +395,10 @@ pub async fn insert_identities(
     Ok(())
 }
 
+/// The ids among `ids` that are held: by a message (other than `except`), or
+/// reserved by a message erased from a thread that still exists
+/// ([`ERASED_IDENTITY_TABLE`]). An id is used once in its thread, for the
+/// life of the thread, erasure included.
 pub async fn held_ids(
     conn: &mut PgConnection,
     ids: &[Uuid],
@@ -396,16 +407,21 @@ pub async fn held_ids(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar(&format!(
         "SELECT id FROM threads.message_identity \
-         WHERE id = ANY($1) AND ($2::uuid IS NULL OR message_id <> $2) ORDER BY id",
-    )
+         WHERE id = ANY($1) AND ($2::uuid IS NULL OR message_id <> $2) \
+         UNION \
+         SELECT id FROM {ERASED_IDENTITY_TABLE} WHERE id = ANY($1) \
+         ORDER BY id"
+    ))
     .bind(ids)
     .bind(except)
     .fetch_all(conn)
     .await?)
 }
 
+/// Each held id among `ids` with the message that holds it, or held it before
+/// it was erased.
 pub async fn holders(
     conn: &mut PgConnection,
     ids: &[Uuid],
@@ -413,9 +429,12 @@ pub async fn holders(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(sqlx::query_as(
-        "SELECT id, message_id FROM threads.message_identity WHERE id = ANY($1) ORDER BY id",
-    )
+    Ok(sqlx::query_as(&format!(
+        "SELECT id, message_id FROM threads.message_identity WHERE id = ANY($1) \
+         UNION ALL \
+         SELECT id, message_id FROM {ERASED_IDENTITY_TABLE} WHERE id = ANY($1) \
+         ORDER BY id"
+    ))
     .bind(ids)
     .fetch_all(conn)
     .await?)
@@ -489,6 +508,33 @@ fn list_page_query() -> String {
     )
 }
 
+/// The `created_at` of the most recent message of a thread, if any.
+pub async fn latest_created_at(
+    conn: &mut PgConnection,
+    thread: Uuid,
+) -> Result<Option<DateTime<Utc>>, EngineError> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT max(created_at) FROM {TABLE} WHERE thread_id = $1"
+    ))
+    .bind(thread)
+    .fetch_one(conn)
+    .await?)
+}
+
+/// The `created_at` of a message stored now in a thread whose latest message
+/// is dated `latest`: the later of `now` and one microsecond after `latest`.
+/// A thread's list is ordered by `created_at` (then id), so the list order is
+/// the order messages were stored under the thread's lock, across pods and
+/// clock skew. `now` is truncated to the microsecond the store keeps, so that
+/// the date read back is the one ordered here.
+pub fn list_position(now: DateTime<Utc>, latest: Option<DateTime<Utc>>) -> DateTime<Utc> {
+    let now = now.trunc_subsecs(6);
+    match latest {
+        Some(latest) => now.max(latest + TimeDelta::microseconds(1)),
+        None => now,
+    }
+}
+
 /// The end of a thread's list from a named message: the named message's own
 /// status and flag, and every message from it on, in list order, the named
 /// one first. `None` when the thread holds no such message.
@@ -545,14 +591,30 @@ pub async fn tail_from(
     }))
 }
 
-/// Deletes erased messages. Their entries, blocks, annotations, identities,
-/// 0.4 items and blocks, stream watch rows and the read marks set on them go
-/// by cascade; their artifacts (`ON DELETE RESTRICT`) are removed first,
-/// through their own store, so that their bytes are released.
-pub async fn erase(conn: &mut PgConnection, messages: &[Uuid]) -> Result<(), EngineError> {
+/// Deletes erased messages, after reserving every id they held (their own,
+/// their entries', blocks' and annotations') in [`ERASED_IDENTITY_TABLE`], so
+/// that none is used again in the thread. Their entries, blocks, annotations,
+/// identities, 0.4 items and blocks, stream watch rows and the read marks set
+/// on them go by cascade; their artifacts (`ON DELETE RESTRICT`) are removed
+/// first, through their own store, so that their bytes are released.
+pub async fn erase(
+    conn: &mut PgConnection,
+    thread: Uuid,
+    messages: &[Uuid],
+) -> Result<(), EngineError> {
     if messages.is_empty() {
         return Ok(());
     }
+    sqlx::query(&format!(
+        "INSERT INTO {ERASED_IDENTITY_TABLE} (id, thread_id, message_id) \
+         SELECT i.id, $1, i.message_id FROM threads.message_identity i \
+         WHERE i.message_id = ANY($2) \
+         ON CONFLICT (id) DO NOTHING"
+    ))
+    .bind(thread)
+    .bind(messages)
+    .execute(&mut *conn)
+    .await?;
     sqlx::query(&format!("DELETE FROM {TABLE} WHERE id = ANY($1)"))
         .bind(messages)
         .execute(conn)
@@ -907,6 +969,40 @@ mod tests {
         );
         assert_eq!(annotation_body("ERROR", content).unwrap(), body);
         assert!(annotation_body("error", serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn a_message_is_dated_after_the_latest_of_its_thread_whatever_the_clock() {
+        use chrono::TimeZone;
+        let at = |micros: i64| Utc.timestamp_micros(micros).single().unwrap();
+        assert_eq!(list_position(at(1_000), None), at(1_000));
+        assert_eq!(
+            list_position(at(1_000), Some(at(400))),
+            at(1_000),
+            "a clock ahead of the latest keeps its date"
+        );
+        assert_eq!(
+            list_position(at(1_000), Some(at(5_000))),
+            at(5_001),
+            "a clock behind the latest (an earlier dispatch, another pod) comes right after it"
+        );
+        assert_eq!(
+            list_position(at(5_000), Some(at(5_000))),
+            at(5_001),
+            "the same microsecond comes after"
+        );
+        let with_nanos = at(7_000) + TimeDelta::nanoseconds(999);
+        assert_eq!(
+            list_position(with_nanos, Some(at(6_000))),
+            at(7_000),
+            "dated to the microsecond the store keeps"
+        );
+        let mut latest = None;
+        for _ in 0..3 {
+            let next = list_position(at(9_000), latest);
+            assert!(latest.is_none_or(|latest| next > latest));
+            latest = Some(next);
+        }
     }
 
     /// A page is a plain read of the list, newest first, behind the caller's

@@ -28,6 +28,9 @@ other message. The version follows the service's (0.9.0 to 0.12.0): no
   acting_user_id? }`. It erases every message stored after `message_id`, and
   `message_id` itself when `including` is set. It is answered by
   `message.confirmed` / `message.refused` like every message command.
+  The ids an erased message held stay reserved in its thread (`KEY_REUSED`).
+  A `message.store` sent before an erase is confirmed may be stored first, and
+  then be erased too.
 - `ReasonCode::CommandVersionRetired` (`COMMAND_VERSION_RETIRED`): the answer
   to `message.store` v1 and v2.
 - `RETIRED_STORE_VERSIONS` (`[1, 2]`): the `message.store` versions Threads

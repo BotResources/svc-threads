@@ -103,11 +103,25 @@ is additive.
   to it of each agent whose answer is not on the branch. Every other message
   goes, with its content, read marks and artifacts. A thread whose messages
   hang from more than one root keeps only the root of its most recent message.
-  The column `parent_message_id`, its key and its index go. One transaction,
-  under the migrator's lock: all or nothing. The removed artifacts' bytes are
-  purged once 0.12 serves (`released_bytes` cron, a queue in
-  `threads.released_blob`). Facts are left as recorded.
+  - Each removed artifact ends its facts on `Removed` (reason
+    `PRUNED_AT_UPGRADE`).
+  - The ids the removed messages held stay reserved in their thread
+    (`threads.erased_identity`, as for an erased message).
+  - The chunks the engine's accumulator still held for a removed `STREAMING`
+    message are deleted. A chunk its writer pushes after the upgrade is kept by
+    the engine until its seal retention (24 h by default) sweeps it, and is
+    shown nowhere.
+  - The column `parent_message_id`, its key and its index go.
+  - One transaction, under the migrator's lock: all or nothing.
+  - The removed artifacts' bytes are purged once 0.12 serves (`released_bytes`
+    cron, a queue in `threads.released_blob`).
+  - The facts already recorded are left as they are.
+- **The list is ordered by date.** A kept message dated before a kept message
+  it answered moves before it in the list. From 0.12 on, a message is always
+  dated after the latest message of its thread.
 - **Count what goes before the rollout**, read-only, on the 0.11 database:
+  the messages removed, the user messages among them, the threads touched,
+  and the kept messages dated before a kept message they answered:
 
   ```sql
   WITH RECURSIVE tip AS (
@@ -133,10 +147,20 @@ is additive.
                          WHERE o.parent_message_id = a.parent_message_id
                            AND o.agent = a.agent)
        ORDER BY a.parent_message_id, a.agent, a.created_at DESC, a.id DESC)
+  ), removed AS (
+      SELECT m.* FROM threads.message m
+      WHERE NOT EXISTS (SELECT 1 FROM kept k WHERE k.id = m.id)
   )
-  SELECT m.thread_id, count(*) AS removed
-  FROM threads.message m WHERE NOT EXISTS (SELECT 1 FROM kept k WHERE k.id = m.id)
-  GROUP BY m.thread_id ORDER BY removed DESC;
+  SELECT 'messages removed' AS what, count(*) FROM removed
+  UNION ALL
+  SELECT 'user messages removed', count(*) FROM removed WHERE author_user_id IS NOT NULL
+  UNION ALL
+  SELECT 'threads touched', count(DISTINCT thread_id) FROM removed
+  UNION ALL
+  SELECT 'kept before a kept message they answered', count(*)
+  FROM threads.message c JOIN threads.message p ON p.id = c.parent_message_id
+  WHERE c.id IN (SELECT id FROM kept) AND p.id IN (SELECT id FROM kept)
+    AND (c.created_at, c.id) < (p.created_at, p.id);
   ```
 
 - **Take a database backup** right before `migrate`: it is the only way back.

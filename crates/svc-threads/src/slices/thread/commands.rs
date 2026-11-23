@@ -271,7 +271,8 @@ pub async fn delete_thread(
     reason: DeletionReason,
     meta: &FactMeta,
 ) -> Result<(), Fault> {
-    artifact::delete_all_of_thread(ops, thread.id).await?;
+    let artifacts = artifact::store::ids_of_thread(ops.connection(), thread.id).await?;
+    artifact::remove_artifacts(ops, &artifacts, None).await?;
     closing::seal_streams_of_thread(ops, thread.id).await?;
     let deleted = thread.deleted_fact(reason, meta)?;
     facts::append(
