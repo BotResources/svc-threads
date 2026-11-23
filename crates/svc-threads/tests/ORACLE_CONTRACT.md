@@ -104,8 +104,8 @@ content }`.
 ## GraphQL (0.5.0 SDL, as the suite reads it)
 
 ```graphql
-type MessageView {            # blocks and items are gone
-  id threadId parentMessageId jobId status deleted createdAt editedAt version affordances
+type MessageView {            # blocks and items are gone; parentMessageId too (0.12.0)
+  id threadId jobId status deleted createdAt editedAt version affordances
   author: AuthorView!         # aiId: the agent id, a UUIDv7 string
   turnKind: TurnKind!         # INPUT_TURN | AI_TURN
   entries: [EntryView!]!      # in order; [] for a deleted message
@@ -126,7 +126,7 @@ enum AnnotationKind { ARTIFACT THREAD_REFERENCE JOB_REFERENCE ERROR WARNING }
 threadsContext(threadId: UUID!, agentId: String): ThreadContext
 type ThreadContext {
   threadId: UUID!
-  conversation: JSON          # no agent named: the active branch, br-llm-messages/5; null otherwise
+  conversation: JSON          # no agent named: the thread in order (0.12.0), br-llm-messages/5; null otherwise
   projectedThread: JSON       # an agent named: br-llm-messages-projected-thread/1; null otherwise
   members: [MemberView!]!
   resources: [ResourceView!]!
@@ -213,6 +213,94 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.12.0 changes — one list
+
+Threads drops the message tree: a thread's messages are one list, ordered by
+`created_at`, then `id`. No parent, no branch, no fork.
+
+- **Commands.** `message.store` v3 is `message.store` v2 without
+  `parent_message_id`; v1 and v2 are refused `COMMAND_VERSION_RETIRED` in a
+  `message.refused` answer and store nothing (T40). `message.erase` v1
+  (`integration.cmd.threads.message.erase.v1`) carries `thread_id`,
+  `message_id`, `including: bool` and an optional `acting_user_id`: it removes
+  every message stored after the named one, and the named one when
+  `including`, whoever wrote them and whatever their status, with their
+  entries, blocks, annotations, artifacts (bytes included) and the read marks
+  set on them. Refusals, in that order: `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`,
+  `THREAD_RESOLVED`, `MESSAGE_NOT_FOUND`; nothing to remove is confirmed and
+  changes nothing; a late chunk or close of an erased `STREAMING` message finds
+  no message (`MESSAGE_NOT_FOUND`). Answered by `message.confirmed` naming the
+  command, the thread and the message named; the suite does not assert the
+  answer's `status`, which the registry leaves open (T39).
+- **The contract's types.** The suite sends them with `contract-threads`
+  0.12.0's `StoreMessageV3` and `EraseMessages`, and reads
+  `ReasonCode::CommandVersionRetired` from the closed enum.
+- **The retired versions on the bus.** `store.v1` travels through
+  `contract-threads` 0.4.0 (dev-dependency `contract-threads-v0-4`), `store.v2`
+  through `contract-threads` 0.9.0 by its git tag (dev-dependency
+  `contract-threads-v0-9`), as consumers still on them send them
+  (`commands::send_v2`, `previous::command_v2`).
+- **The fact.** The thread fact `MessagesErased` is read under the payload keys
+  `message_id`, `including` and `count` (an assumption of the oracle: the
+  registry names the three values, not their keys); it never carries content.
+  An erased message's artifact ends on its `Removed` fact.
+- **Erased ids stay used.** After an erase, the id of an erased message, and
+  every entry, block and annotation id it held, are refused `KEY_REUSED` on
+  store and edit, and a stream reusing one is stored `FAILED`
+  (`reused_identity`) (T28, T39). Threads keeps them, and the ids of the
+  messages the upgrade removed, in `threads.erased_identity` (ids only): the
+  "found nowhere" checks of T39 and T40 exempt that table as they exempt the
+  fact log (`store::RESERVED_IDS`), and still find no content anywhere. An
+  artifact the upgrade removed ends its facts on `Removed`, reason
+  `PRUNED_AT_UPGRADE` (an erased one, `MESSAGE_ERASED`).
+- **A large erase** (over 1,000 messages) is answered once; its followers may
+  be told by a fresh `ThreadFeedReset` instead of one `Remove` per message:
+  `feed::Live` takes a `Reset` read mid-stream as the new baseline.
+- **GraphQL.** `MessageView.parentMessageId` is gone, and so is `branchTip`
+  from `threadsMessages`, `threadsThreadDeltas` and `threadsContext` (T40
+  checks the SDL holds neither). `threadsMessages(threadId, size, before)`
+  still answers a page the newest first, `before` naming the oldest message of
+  the previous page; `threadsThreadDeltas(threadId, size)` follows the head
+  page of the list. A runner names the message its context stops at — the
+  messages up to that one included, whole or as an agent's context, with the
+  `ATTACHED` artifacts of those messages — with an argument the registry does
+  not name: the suite assumes **`upTo: UUID`**, defined once in
+  `common::constants` (`context_cut_arg!`, used by `Q_CONTEXT_UP_TO`,
+  `Q_CONTEXT_ARTIFACTS`, `Q_CONTEXT_ARTIFACT_ACCESS`); a rename is that one
+  line. A named message that is not one of the thread's gives the thread's
+  context with an empty conversation and no artifact.
+- **The suite's reads.** `flows::page` / `page_answer` read one page;
+  `flows::messages` / `message_ids` read the whole list, oldest first;
+  `flows::message_view` finds one message in it; `flows::context_up_to` reads
+  the cut; `commands::Answers::order_of` gives the order Threads answered
+  commands in (T40's concurrent stores). `feed::Live::until_revoked` now waits
+  for the removal of every object the view held, the thread and each message,
+  and fails on any `Upsert`, or any removal of an object never held, once the
+  revocation began (the cause of an intermittent T02 failure). `branch`, `branch_answer`, `active_branch`, `context_on`,
+  `feed::thread_feed_on` and `Q_CONTEXT_ON` are gone, and every message
+  builder of `common::flows` lost its parent.
+- **The upgrade from branches (T40).** `svc-threads` 0.11.0, the last release
+  with branches, is built once from its tag (`previous::branches_release_binary`,
+  `TestContext::setup_branches_release`; `THREADS_BRANCHES_RELEASE_BIN` skips
+  the build) and commanded with its own `store.v2`; it is read before the
+  upgrade with its own SDL (`previous::Q_MESSAGES_0_11`,
+  `message_view_0_11`). The active branch (the parent chain ending at the most
+  recent message) stays with, for each message of it, the latest AI answer of
+  each agent whose answer is not on it; every other message goes, found
+  nowhere in the store but the fact log's history. T26, which upgrades
+  straight from 0.4.0, meets the same rule: its "second answer to the same
+  message" is another agent's, so it stays.
+- **Scenarios.** New: T39 (`t39_erasing_the_end_of_a_thread.rs`) and T40
+  (`t40_one_list_order_pages_cut_retired_store_versions_upgrade.rs`, two
+  tests). Rewritten on their 0.12.0 gestures: T05, T06, T08, T09, T11, T19,
+  T26, T31 (one test now, the silence case on thread V within it). Removed:
+  T10 (forks and the active branch) and T25 (store.v1 converted), deleted from
+  the registry; `t37_a_runner_reads_the_context_of_a_named_branch.rs` (T37,
+  deleted from the registry, its cut now T40's);
+  `t38_following_a_named_branch_live.rs`, a branch feed that no longer exists.
+  T36 follows its corrected gesture: the runner names M2, and W is the
+  artifact of M3, stored after M2.
+
 ## 0.11.0 additions
 
 - `contract-threads` 0.9.0, module `resources`: `PublishedThreadResources {
@@ -257,7 +345,7 @@ in that output.
   resources; the files are told apart by their titles, as the summary's
   `t34_…` file is the registry's T35.
 
-## 0.10.1 additions
+## 0.10.1 additions (removed in 0.12.0)
 
 - `threadsThreadDeltas(threadId: UUID!, size: Int!, branchTip: UUID)`. With
   `branchTip`, the head page followed is that of the branch ending at that
@@ -269,7 +357,7 @@ in that output.
   enters the feed once it is. The suite opens it with
   `feed::thread_feed_on`; T38 (number proposed by the oracle) asserts it.
 
-## 0.10.0 additions
+## 0.10.0 additions (removed in 0.12.0: the cut replaces `branchTip`)
 
 - `threadsContext(threadId: UUID!, agentId: String, branchTip: UUID):
   ThreadContext`. With `branchTip`, the conversation — whole or the agent

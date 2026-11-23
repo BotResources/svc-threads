@@ -1,7 +1,7 @@
 //! `integration.cmd.threads.message.edit.v1`: a `COMPLETED` user message that
 //! is not deleted, rewritten in place by its author. Its human message's
 //! content is replaced whole by the library's plain blocks; the message keeps
-//! its id, its entry's id, its place in the tree and every descendant, even
+//! its id, its entry's id, its place in the list and every later message, even
 //! those written on its previous content. Threads keeps no history of the
 //! previous content: the `Edited` fact records the new blocks' kinds and
 //! positions, never their text.

@@ -3,10 +3,11 @@
 //! declares, the reason codes, the GraphQL documents the scenarios send, and the
 //! timeouts.
 //!
-//! Every root, argument and field below is the SDL the suite reads: 0.4.0's,
-//! with the 0.5.0 message and context shapes `tests/ORACLE_CONTRACT.md` names
-//! (the registry carries no 0.5.0 SDL). A rename is a naming alignment in this
-//! one file, never a change of what is asserted.
+//! Every root, argument and field below is the SDL the suite reads: the last
+//! implemented SDL the registry carries (0.11.0), with the 0.12.0 changes
+//! `tests/ORACLE_CONTRACT.md` names — no `parentMessageId`, no `branchTip`,
+//! and the runner's cut of a context (`context_cut_arg!`). A rename is a
+//! naming alignment in this one file, never a change of what is asserted.
 //! `affordances` is the engine's JSON scalar `{ action: { allowed, reason? } }`.
 
 use std::time::Duration;
@@ -108,9 +109,11 @@ pub const Q_CHILD_THREADS: &str = "query($thread: UUID!, $size: Int!, $after: UU
     lastActivityAt version readMark affordances members { userId displayName inRoster } \
     resources { key ids } } }";
 
-pub const Q_MESSAGES: &str = "query($thread: UUID!, $size: Int!, $before: UUID, $tip: UUID) { \
-    threadsMessages(threadId: $thread, size: $size, before: $before, branchTip: $tip) { \
-        id threadId parentMessageId jobId status deleted createdAt editedAt version affordances \
+/// One page of a thread's messages, the newest first; `before` names the
+/// oldest message of the previous page (0.12.0: one list, no branch).
+pub const Q_MESSAGES: &str = "query($thread: UUID!, $size: Int!, $before: UUID) { \
+    threadsMessages(threadId: $thread, size: $size, before: $before) { \
+        id threadId jobId status deleted createdAt editedAt version affordances \
         author { kind userId aiId name } turnKind \
         entries { id index kind state content annotations { id index kind content } } } }";
 
@@ -124,23 +127,50 @@ pub const Q_CONTEXT_FOR: &str = "query($thread: UUID!, $agent: String) { \
     threadsContext(threadId: $thread, agentId: $agent) { \
     threadId conversation projectedThread members { userId displayName } resources { key ids } } }";
 
-/// The context of the branch ending at `tip` — the active branch with no tip —
-/// whole or for an agent, with its attached artifacts (0.10.0).
-pub const Q_CONTEXT_ON: &str = "query($thread: UUID!, $agent: String, $tip: UUID) { \
-    threadsContext(threadId: $thread, agentId: $agent, branchTip: $tip) { \
-    threadId conversation projectedThread members { userId displayName } resources { key ids } \
-    artifacts { id name mediaType size sha256 messageId } } }";
+/// The argument of `threadsContext` by which a runner names a message, to
+/// receive the thread's conversation up to that message included (0.12.0).
+/// The registry fixes the behaviour, not the name: this is the oracle's
+/// assumption, to align on the implementation's name here and only here.
+macro_rules! context_cut_arg {
+    () => {
+        "upTo"
+    };
+}
+
+/// The name of the cut argument, for the messages a scenario prints.
+pub const CONTEXT_CUT_ARG: &str = context_cut_arg!();
+
+/// The context of a thread, whole or for an agent, up to the message `upTo`
+/// names — the whole thread with `upTo` null — with its attached artifacts
+/// (0.12.0).
+pub const Q_CONTEXT_UP_TO: &str = concat!(
+    "query($thread: UUID!, $agent: String, $upTo: UUID) { ",
+    "threadsContext(threadId: $thread, agentId: $agent, ",
+    context_cut_arg!(),
+    ": $upTo) { ",
+    "threadId conversation projectedThread members { userId displayName } resources { key ids } ",
+    "artifacts { id name mediaType size sha256 messageId } } }"
+);
 
 /// The attached artifacts a runner receives with a thread's context, whole or
-/// for an agent, without asking for any read access (0.9.0).
-pub const Q_CONTEXT_ARTIFACTS: &str = "query($thread: UUID!, $agent: String) { \
-    threadsContext(threadId: $thread, agentId: $agent) { \
-    threadId artifacts { id name mediaType size sha256 messageId } } }";
+/// for an agent, up to the message `upTo` names or whole, without asking for
+/// any read access (0.9.0; the cut, 0.12.0).
+pub const Q_CONTEXT_ARTIFACTS: &str = concat!(
+    "query($thread: UUID!, $agent: String, $upTo: UUID) { ",
+    "threadsContext(threadId: $thread, agentId: $agent, ",
+    context_cut_arg!(),
+    ": $upTo) { ",
+    "threadId artifacts { id name mediaType size sha256 messageId } } }"
+);
 
-/// The same, asking for a read access to each (0.9.0).
-pub const Q_CONTEXT_ARTIFACT_ACCESS: &str = "query($thread: UUID!, $agent: String) { \
-    threadsContext(threadId: $thread, agentId: $agent) { \
-    threadId artifacts { id name mediaType size sha256 messageId downloadUrl } } }";
+/// The same, asking for a read access to each (0.9.0; the cut, 0.12.0).
+pub const Q_CONTEXT_ARTIFACT_ACCESS: &str = concat!(
+    "query($thread: UUID!, $agent: String, $upTo: UUID) { ",
+    "threadsContext(threadId: $thread, agentId: $agent, ",
+    context_cut_arg!(),
+    ": $upTo) { ",
+    "threadId artifacts { id name mediaType size sha256 messageId downloadUrl } } }"
+);
 
 pub const Q_ARTIFACT_DOWNLOAD: &str = "query($thread: UUID!, $artifact: UUID!) { \
     threadsArtifactDownload(threadId: $thread, artifactId: $artifact) }";
@@ -164,7 +194,7 @@ pub const S_THREADS: &str = "subscription($size: Int!) { threadsThreadsDeltas(si
     ... on ThreadsRemove { revision key } } }";
 
 /// The fields of a message the suite reads, on every channel.
-pub const MESSAGE_FIELDS: &str = "id threadId parentMessageId jobId status deleted createdAt \
+pub const MESSAGE_FIELDS: &str = "id threadId jobId status deleted createdAt \
     editedAt version affordances author { kind userId aiId name } turnKind \
     entries { id index kind state content annotations { id index kind content } }";
 

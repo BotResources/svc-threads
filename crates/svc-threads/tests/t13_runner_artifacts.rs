@@ -52,28 +52,27 @@ use common::content::{
 use common::facts;
 use common::feed::{Live, in_reset, upsert_of};
 use common::flows::{
-    ai, branch_answer, command, completion, context, create_thread, message_confirmed,
-    message_refused, message_view, open_stream, say, store, whole_message,
+    ai, command, completion, context, create_thread, message_confirmed, message_refused,
+    message_view, open_stream, page_answer, say, store, whole_message,
 };
 use common::{
     KEY_REUSED, PUSH_TIMEOUT, RUNNER_SCOPE_REQUIRED, SHORT_UPLOAD_WINDOW, TestContext, Windows,
     eventually, gql, stream,
 };
 use contract_threads::llm::{ResponseEnding, Turn};
-use contract_threads::{MessageStatus, ReasonCode, StoreMessageV2};
+use contract_threads::{MessageStatus, ReasonCode, StoreMessageV3};
 use serde_json::json;
 use uuid::Uuid;
 
 /// An AI answer on `thread` naming `attached` in an ARTIFACT annotation after
 /// its answer.
-fn naming(thread: Uuid, parent: Uuid, attached: Uuid) -> StoreMessageV2 {
+fn naming(thread: Uuid, attached: Uuid) -> StoreMessageV3 {
     let analyst = ai("a1", "Analyst");
     let answer = reply("the report is attached");
     let message = Uuid::now_v7();
     let turn = Turn::from(ai_turn(message, &analyst, closed(answer.clone())));
     whole_message(
         thread,
-        Some(parent),
         message,
         &analyst,
         &turn,
@@ -89,8 +88,8 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     let (a, u) = (ctx.enrol("ada").await, ctx.enrol("ugo").await);
     let t = create_thread(&ctx, Some(&a), &[]).await;
     let t2 = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
-    let m1_t2 = say(&ctx, t2, None, &a, "And here?").await;
+    say(&ctx, t, &a, "Send me the report").await;
+    say(&ctx, t2, &a, "And here?").await;
     let runner = ctx.service_account(true);
     let file = File::csv("quarter,revenue\nQ3,42\n");
 
@@ -141,7 +140,7 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     assert!(facts::of(&ctx.pool, "artifact", huge).await.is_empty());
 
     // When, before the bytes land, a message naming X is stored.
-    let early = naming(t, m1, x);
+    let early = naming(t, x);
     let m2 = early.message_id;
     let refused = command(&ctx, &early).await;
     // Then refused ARTIFACT_NOT_READY; nothing is stored.
@@ -168,7 +167,7 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
         ),
     )
     .await;
-    let streamed = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let streamed = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let mut answer = Streamed::start(streamed, None);
     answer.text(&["the report follows"], true);
     answer.complete(ResponseEnding::finished());
@@ -238,7 +237,7 @@ async fn t13_a_runners_artifact_is_uploaded_pinned_attached_when_ready_and_read_
     assert_eq!(download_url(&ctx, &a.passport, t2, x).await, None);
 
     // When a message of T2 names X.
-    let foreign = command(&ctx, &naming(t2, m1_t2, x)).await;
+    let foreign = command(&ctx, &naming(t2, x)).await;
     // Then refused ARTIFACT_NOT_READY.
     message_refused(
         &ctx,
@@ -277,11 +276,11 @@ async fn t13_an_upload_never_attached_is_removed_after_the_upload_window() {
     .await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me both").await;
+    say(&ctx, t, &a, "Send me both").await;
     let runner = ctx.service_account(true);
     let file = File::csv("kept\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
-    let stored = command(&ctx, &naming(t, m1, x)).await;
+    let stored = command(&ctx, &naming(t, x)).await;
     message_confirmed(&ctx, stored, MessageStatus::Completed, "attaching X").await;
     let url = download_url(&ctx, &a.passport, t, x)
         .await
@@ -302,7 +301,7 @@ async fn t13_an_upload_never_attached_is_removed_after_the_upload_window() {
     })
     .await;
     // And a message naming Y is refused ARTIFACT_NOT_READY.
-    let late = command(&ctx, &naming(t, m1, y)).await;
+    let late = command(&ctx, &naming(t, y)).await;
     message_refused(
         &ctx,
         late,
@@ -334,14 +333,14 @@ async fn t13_a_member_reads_the_name_media_type_and_size_of_an_attached_artifact
     let ctx = TestContext::setup().await;
     let (a, u) = (ctx.enrol("ada").await, ctx.enrol("ugo").await);
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    say(&ctx, t, &a, "Send me the report").await;
     let runner = ctx.service_account(true);
     let file = File::csv("quarter,revenue\nQ3,42\n");
     let x = upload(&ctx, &runner.passport, t, &file).await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
 
     // When a message naming X in an ARTIFACT annotation is stored.
-    let naming_x = naming(t, m1, x);
+    let naming_x = naming(t, x);
     let m2 = naming_x.message_id;
     store(&ctx, naming_x, MessageStatus::Completed).await;
 
@@ -371,7 +370,7 @@ async fn t13_a_member_reads_the_name_media_type_and_size_of_an_attached_artifact
     );
 
     // And U, not a member, reads nothing of it.
-    let refused = branch_answer(&ctx, &u.passport, t, 10, None, Some(m2)).await;
+    let refused = page_answer(&ctx, &u.passport, t, 10, None).await;
     let raw = refused.to_string();
     assert!(
         !raw.contains("report.csv") && !raw.contains(&x.to_string()),

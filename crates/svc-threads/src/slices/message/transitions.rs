@@ -44,7 +44,6 @@ struct AnnotationShape {
 #[derive(Serialize)]
 struct CreatedFact<'a> {
     author: AuthorShape,
-    parent_message_id: Option<Uuid>,
     job_id: Option<Uuid>,
     status: &'static str,
     turn_kind: &'a str,
@@ -124,7 +123,6 @@ fn entry_shapes(content: &Content) -> Vec<EntryFact> {
 pub struct NewMessage {
     pub id: Uuid,
     pub thread_id: Uuid,
-    pub parent_message_id: Option<Uuid>,
     pub author: MessageAuthor,
     pub job_id: Option<Uuid>,
     pub status: MessageStatus,
@@ -149,7 +147,6 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
         CREATED,
         &CreatedFact {
             author,
-            parent_message_id: new.parent_message_id,
             job_id: new.job_id,
             status: new.status.as_str(),
             turn_kind: new.turn_kind.as_str(),
@@ -163,7 +160,6 @@ pub fn store(new: NewMessage, meta: &FactMeta) -> Result<MessageState, EngineErr
     Ok(MessageState {
         id: new.id,
         thread_id: new.thread_id,
-        parent_message_id: new.parent_message_id,
         author: new.author,
         job_id: new.job_id,
         status: new.status,
@@ -356,7 +352,6 @@ mod tests {
                 NewMessage {
                     id,
                     thread_id: Uuid::now_v7(),
-                    parent_message_id: None,
                     author: MessageAuthor::User {
                         user_id: author,
                         display_name: None,
@@ -418,7 +413,6 @@ mod tests {
             NewMessage {
                 id,
                 thread_id: Uuid::now_v7(),
-                parent_message_id: None,
                 author: MessageAuthor::User {
                     user_id: author,
                     display_name: Some("Ada".into()),

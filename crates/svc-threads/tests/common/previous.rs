@@ -1,15 +1,23 @@
-//! The previous release, `svc-threads` 0.4.0, as a deployment ran it before the
-//! upgrade, and its published language (`contract-threads` 0.4.0, every command
-//! v1): what a consumer still on `message.store` v1 sends (T25), and how the
-//! messages the upgrade converts were stored (T26) — through that release's
-//! own commands and stream, never a row written by the suite.
+//! The previous releases a deployment ran before upgrading to this version,
+//! and their published languages — how the messages an upgrade converts were
+//! stored, through those releases' own commands and stream, never a row
+//! written by the suite:
 //!
-//! The release's binary is built once from its tag (`cargo install --git`,
-//! the repository of this crate), or taken from `THREADS_PREVIOUS_BIN`.
+//! - `svc-threads` 0.4.0, commanded with `contract-threads` 0.4.0 (every
+//!   command v1): the messages the conversion to the library's model reads
+//!   (T26), and the `message.store` v1 a consumer still on it sends, now
+//!   retired (T40). Taken from `THREADS_PREVIOUS_BIN`, or built once.
+//! - `svc-threads` 0.10.1: the threads stored before the resources were
+//!   published (T38). Its thread commands are this version's. Taken from
+//!   `THREADS_LAST_RELEASE_BIN`, or built once.
+//! - `svc-threads` 0.11.0, the last release with branches, commanded with
+//!   `contract-threads` 0.9.0 (`message.store` v2 naming a parent): the threads
+//!   that held branches when they upgrade to the list, and the
+//!   `message.store` v2 a consumer still on it sends, now retired (T40). Taken
+//!   from `THREADS_BRANCHES_RELEASE_BIN`, or built once.
 //!
-//! The last release before this version, `svc-threads` 0.10.1, is built the
-//! same way (or taken from `THREADS_LAST_RELEASE_BIN`): the upgrade T38 starts
-//! from. Its commands are this version's (the thread commands are unchanged).
+//! A release's binary is built once from its tag (`cargo install --git`, the
+//! repository of this crate).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -28,7 +36,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::commands::{commanding_service, send_v1};
+use super::commands::{commanding_service, send_v1, send_v2};
 use super::stream::push_raw;
 use super::{PUSH_TIMEOUT, TestContext, gql};
 
@@ -39,6 +47,10 @@ pub const PREVIOUS_RELEASE_TAG: &str = "svc-threads/v0.4.0";
 /// when it upgrades to this one (T38, the threads it stored before the
 /// resources were published).
 pub const LAST_RELEASE_TAG: &str = "svc-threads/v0.10.1";
+
+/// The tag of the last release with branches: the one whose threads upgrade
+/// to the list (T40).
+pub const BRANCHES_RELEASE_TAG: &str = "svc-threads/v0.11.0";
 
 /// The binary of the previous release.
 pub fn binary() -> PathBuf {
@@ -64,6 +76,21 @@ pub fn last_release_binary() -> PathBuf {
                 LAST_RELEASE_TAG,
                 "svc-threads-0.10.1",
                 "THREADS_LAST_RELEASE_BIN",
+            )
+        })
+        .clone()
+}
+
+/// The binary of the last release with branches, built once from its tag, or
+/// taken from `THREADS_BRANCHES_RELEASE_BIN`.
+pub fn branches_release_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            release_binary(
+                BRANCHES_RELEASE_TAG,
+                "svc-threads-0.11.0",
+                "THREADS_BRANCHES_RELEASE_BIN",
             )
         })
         .clone()
@@ -109,6 +136,95 @@ pub async fn command_v1<C: ThreadsCommand + Serialize>(ctx: &TestContext, comman
     let command_id = send_v1(&ctx.nats, commanding_service(), command).await;
     ctx.sent.lock().expect("the ledger").push(command_id);
     command_id
+}
+
+/// Sends a command of 0.11.0's published language (`contract-threads` 0.9.0)
+/// as the commanding service; answers its id, entered in the ledger the
+/// teardown checks.
+pub async fn command_v2<C>(ctx: &TestContext, command: &C) -> Uuid
+where
+    C: contract_threads_v0_9::ThreadsCommand + Serialize,
+{
+    let command_id = send_v2(&ctx.nats, commanding_service(), command).await;
+    ctx.sent.lock().expect("the ledger").push(command_id);
+    command_id
+}
+
+/// A `message.store` v2 of 0.11.0 answering `parent`: a complete user message
+/// of `author` saying `text`.
+pub fn user_message_v2(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    author: Uuid,
+    text: &str,
+) -> contract_threads_v0_9::StoreMessageV2 {
+    let entry = super::content::human(author, vec![super::content::text(text)]);
+    contract_threads_v0_9::StoreMessageV2 {
+        message_id: Uuid::now_v7(),
+        thread_id: thread,
+        parent_message_id: parent,
+        job_id: None,
+        acting_user_id: Some(author),
+        impersonator_id: None,
+        message: contract_threads_v0_9::MessageTurn::User(contract_threads_v0_9::UserTurn {
+            entry: contract_threads_v0_9::LibraryJson::from_json(super::content::to_json(&entry)),
+            annotations: Vec::new(),
+        }),
+    }
+}
+
+/// A `message.store` v2 of 0.11.0 answering `parent`: a complete AI message
+/// of `agent` answering in `text`, its turn closed completed.
+pub fn ai_message_v2(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    agent: &super::content::Agent,
+    text: &str,
+) -> contract_threads_v0_9::StoreMessageV2 {
+    ai_message_v2_attaching(thread, parent, agent, text, None)
+}
+
+/// The same, attaching `artifact`, when named, in an ARTIFACT annotation
+/// after its answer.
+pub fn ai_message_v2_attaching(
+    thread: Uuid,
+    parent: Option<Uuid>,
+    agent: &super::content::Agent,
+    text: &str,
+    artifact: Option<Uuid>,
+) -> contract_threads_v0_9::StoreMessageV2 {
+    let message = Uuid::now_v7();
+    let replied = super::content::reply(text);
+    let annotations = artifact
+        .map(|artifact| {
+            let placed = super::content::after(&replied[0], super::content::artifact(artifact));
+            vec![
+                serde_json::from_value(super::content::to_json(&placed))
+                    .expect("0.11.0 reads the same placed annotation"),
+            ]
+        })
+        .unwrap_or_default();
+    let turn = contract_threads::llm::Turn::from(super::content::ai_turn(
+        message,
+        agent,
+        super::content::closed(replied),
+    ));
+    contract_threads_v0_9::StoreMessageV2 {
+        message_id: message,
+        thread_id: thread,
+        parent_message_id: parent,
+        job_id: None,
+        acting_user_id: None,
+        impersonator_id: None,
+        message: contract_threads_v0_9::MessageTurn::Ai(contract_threads_v0_9::AiTurn {
+            agent_id: agent.uuid(),
+            author_name: agent.name.clone(),
+            delivery: contract_threads_v0_9::AiDelivery::Completed {
+                turn: contract_threads_v0_9::LibraryJson::from_json(super::content::to_json(&turn)),
+                annotations,
+            },
+        }),
+    }
 }
 
 /// The v1 AI author: an opaque id and a name.
@@ -343,6 +459,37 @@ pub const Q_MESSAGES_0_4: &str = "query($thread: UUID!, $size: Int!, $before: UU
         author { kind userId aiId name } \
         blocks { id index kind content } \
         items { index kind status stopReason usage model blocks { id index kind content } } } }";
+
+/// One page of a branch, as 0.11.0 served it: `branchTip` names the message
+/// another branch ends at.
+pub const Q_MESSAGES_0_11: &str = "query($thread: UUID!, $size: Int!, $before: UUID, $tip: UUID) { \
+    threadsMessages(threadId: $thread, size: $size, before: $before, branchTip: $tip) { \
+        id threadId parentMessageId jobId status deleted createdAt editedAt version \
+        author { kind userId aiId name } turnKind \
+        entries { id index kind state content annotations { id index kind content } } } }";
+
+/// One message, as 0.11.0 served it: the tip of its own branch.
+pub async fn message_view_0_11(
+    ctx: &TestContext,
+    passport: &br_core_auth::Passport,
+    thread: Uuid,
+    message: Uuid,
+) -> Value {
+    let answer = ctx
+        .run(
+            passport,
+            Q_MESSAGES_0_11,
+            serde_json::json!({ "thread": thread, "size": 1, "before": null, "tip": message }),
+        )
+        .await;
+    let view = gql::data(&answer, "threadsMessages")[0].clone();
+    assert_eq!(
+        view["id"],
+        serde_json::json!(message),
+        "0.11.0 reads {message} as the tip of its branch: {answer}"
+    );
+    view
+}
 
 /// One message, as the previous release served it.
 pub async fn message_view_0_4(

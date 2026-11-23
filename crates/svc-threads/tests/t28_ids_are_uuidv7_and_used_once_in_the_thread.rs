@@ -7,7 +7,7 @@ use common::content::{
 use common::facts;
 use common::feed::{Live, upsert_of};
 use common::flows::{
-    active_branch, ai, await_message, command, completion, create_thread, message_confirmed,
+    ai, await_message, command, completion, create_thread, message_confirmed, message_ids,
     message_refused, open_stream, raw_whole_message, store, streaming_message, user_entry_message,
     user_message, whole_message,
 };
@@ -16,7 +16,7 @@ use contract_threads::llm::{
     AgentId, ModelResponse, ResponseEnding, ResponseMetadata, Turn, TurnEntry,
 };
 use contract_threads::{
-    Chunk, LibraryJson, MessageStatus, MessageTurn, ReasonCode, StoreMessageV2,
+    Chunk, LibraryJson, MessageStatus, MessageTurn, ReasonCode, StoreMessageV3,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -32,14 +32,14 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     let e1 = human(a.id, vec![b1]);
     let m1 = store(
         &ctx,
-        user_entry_message(t, None, a.id, &e1),
+        user_entry_message(t, a.id, &e1),
         MessageStatus::Completed,
     )
     .await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
     let analyst = ai("a1", "Analyst");
     let m2 = Uuid::now_v7();
-    let refused = |store: StoreMessageV2, code: ReasonCode, what: &'static str| {
+    let refused = |store: StoreMessageV3, code: ReasonCode, what: &'static str| {
         let (ctx, a) = (&ctx, &a);
         async move {
             let sent = command(ctx, &store).await;
@@ -48,22 +48,17 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
                 facts::of(&ctx.pool, "message", m2).await.is_empty(),
                 "{what}"
             );
-            assert_eq!(active_branch(ctx, &a.passport, t).await, vec![m1], "{what}");
+            assert_eq!(message_ids(ctx, &a.passport, t).await, vec![m1], "{what}");
             answer
         }
     };
-    let as_m2 = |mut store: StoreMessageV2| {
+    let as_m2 = |mut store: StoreMessageV3| {
         store.message_id = m2;
         store
     };
 
     refused(
-        as_m2(user_message(
-            t,
-            Some(m1),
-            a.id,
-            vec![text_as(b1_id, "mine")],
-        )),
+        as_m2(user_message(t, a.id, vec![text_as(b1_id, "mine")])),
         ReasonCode::KeyReused,
         "a block reusing b1's id",
     )
@@ -80,7 +75,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     );
     let turn = Turn::from(ai_turn(m2, &analyst, closed(vec![reusing_entry])));
     refused(
-        whole_message(t, Some(m1), m2, &analyst, &turn, Vec::new()),
+        whole_message(t, m2, &analyst, &turn, Vec::new()),
         ReasonCode::KeyReused,
         "an entry reusing e1's id",
     )
@@ -95,7 +90,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         (entry_v4, "an entry id that is not a UUIDv7"),
         (block_v4, "a block id that is not a UUIDv7"),
     ] {
-        let mut store = as_m2(user_message(t, Some(m1), a.id, vec![text("placeholder")]));
+        let mut store = as_m2(user_message(t, a.id, vec![text("placeholder")]));
         if let MessageTurn::User(user) = &mut store.message {
             user.entry = contract_threads::LibraryJson::from_json(entry);
         }
@@ -112,7 +107,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     twice["entries"][0]["content"][1]["id"] = first_id;
     let code = turn_refusal(&twice).expect("the library refuses an id used twice");
     let answer = refused(
-        raw_whole_message(t, Some(m1), m2, &analyst, twice, Vec::new()),
+        raw_whole_message(t, m2, &analyst, twice, Vec::new()),
         ReasonCode::MessageInvalid,
         "an id used twice inside M2",
     )
@@ -125,7 +120,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         .code()
         .as_str()
         .to_string();
-    let mut opened = as_m2(streaming_message(t, Some(m1), &analyst));
+    let mut opened = as_m2(streaming_message(t, &analyst));
     if let MessageTurn::Ai(message) = &mut opened.message {
         message.agent_id = v4;
     }
@@ -143,7 +138,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )));
     whole["agent"] = Value::String(v4.to_string());
     let whole_code = turn_refusal(&whole).expect("the library refuses a v4 agent's turn");
-    let mut foreign_agent = raw_whole_message(t, Some(m1), m2, &analyst, whole, Vec::new());
+    let mut foreign_agent = raw_whole_message(t, m2, &analyst, whole, Vec::new());
     if let MessageTurn::Ai(message) = &mut foreign_agent.message {
         message.agent_id = v4;
     }
@@ -160,14 +155,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     let mut note = warning("NOTE", "an annotation");
     note.id = Uuid::new_v4();
     refused(
-        whole_message(
-            t,
-            Some(m1),
-            m2,
-            &analyst,
-            &turn,
-            vec![after(&answered[0], note)],
-        ),
+        whole_message(t, m2, &analyst, &turn, vec![after(&answered[0], note)]),
         ReasonCode::IdNotUuidV7,
         "an annotation id that is not a UUIDv7",
     )
@@ -185,24 +173,23 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     let not_human = mail(&critic, t, vec![text("a mail is no user's")]);
     for (store, error, what) in [
         (
-            whole_message(t, Some(m1), m2, &analyst, &elsewhere, Vec::new()),
+            whole_message(t, m2, &analyst, &elsewhere, Vec::new()),
             "turn_id_mismatch",
             "a turn under another id than M2's",
         ),
         (
-            whole_message(t, Some(m1), m2, &critic, &a1_turn, Vec::new()),
+            whole_message(t, m2, &critic, &a1_turn, Vec::new()),
             "author_mismatch",
             "a1's turn sent as a2's",
         ),
         (
-            whole_message(t, Some(m1), m2, &renamed, &a1_turn, Vec::new()),
+            whole_message(t, m2, &renamed, &a1_turn, Vec::new()),
             "author_mismatch",
             "a1's turn under another author name",
         ),
         (
             whole_message(
                 t,
-                Some(m1),
                 m2,
                 &analyst,
                 &annotated_turn,
@@ -212,7 +199,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
             "an annotation after an entry M2 does not hold",
         ),
         (
-            as_m2(user_entry_message(t, Some(m1), a.id, &not_human)),
+            as_m2(user_entry_message(t, a.id, &not_human)),
             "not_a_user_turn",
             "a USER form holding no human message",
         ),
@@ -228,7 +215,6 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
         &ctx,
         &whole_message(
             t,
-            Some(m1),
             m2,
             &analyst,
             &turn,
@@ -237,7 +223,7 @@ async fn t28_every_id_of_a_message_is_a_uuidv7_used_once_in_the_thread() {
     )
     .await;
     message_confirmed(&ctx, sent, MessageStatus::Completed, "M2 with fresh ids").await;
-    assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1, m2]);
+    assert_eq!(message_ids(&ctx, &a.passport, t).await, vec![m1, m2]);
     a_feed
         .until("M2 reaches A's feed", |delta| {
             upsert_of(delta, m2).is_some()
@@ -257,12 +243,12 @@ async fn t28_a_streamed_message_reusing_a_held_entry_id_is_stored_failed_with_re
     let e1 = human(a.id, vec![text("the first block")]);
     let m1 = store(
         &ctx,
-        user_entry_message(t, None, a.id, &e1),
+        user_entry_message(t, a.id, &e1),
         MessageStatus::Completed,
     )
     .await;
 
-    let m2 = open_stream(&ctx, t, Some(m1), analyst.clone()).await;
+    let m2 = open_stream(&ctx, t, analyst.clone()).await;
     let mut reusing = to_json(&mail(&analyst, t, vec![text("a note")]));
     reusing["id"] = Value::String(e1.id().as_uuid().to_string());
     let mut response = Streamed::start(m2, None);
@@ -290,7 +276,7 @@ async fn t28_a_streamed_message_reusing_a_held_entry_id_is_stored_failed_with_re
         facts::the(&failed, "Failed").payload["reason"],
         "reused_identity"
     );
-    assert_eq!(active_branch(&ctx, &a.passport, t).await, vec![m1, m2]);
+    assert_eq!(message_ids(&ctx, &a.passport, t).await, vec![m1, m2]);
 
     ctx.teardown().await;
 }

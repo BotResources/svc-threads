@@ -18,7 +18,7 @@ use service_engine::{BlobReader, BlobRef, PersistenceExt, UploadUrl};
 use uuid::Uuid;
 
 use super::state::{ArtifactState, Declared, RemovalReason};
-use super::store::{self, ArtifactStore};
+use super::store::ArtifactStore;
 use super::{MAX_ARTIFACT_BYTES, ThreadArtifact};
 use crate::access;
 use crate::command::Refusal;
@@ -305,28 +305,19 @@ async fn remove(
     Ok(())
 }
 
-/// Removes every artifact of a thread being deleted. The thread is loaded and
-/// locked by the caller.
-pub async fn delete_all_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(), Fault> {
-    let ids = store::ids_of(ops.connection(), thread, None).await?;
-    let artifacts = ops.load_many::<ArtifactState>(&ids).await?;
-    for artifact in &artifacts {
-        remove(ops, artifact, None).await?;
-    }
-    purge_after_commit(ops, &artifacts)
-}
-
-/// Removes the artifacts of a message its author deleted.
-pub async fn delete_all_of_message(
+/// Removes the artifacts `ids` (the caller found them under a lock it holds on
+/// their thread), each with its `Removed` fact when the removal has a reason
+/// of its own: a message deleted or erased. A thread's deletion records none,
+/// its `Deleted` fact covering them. Their bytes are released in the
+/// transaction and purged once it committed.
+pub async fn remove_artifacts(
     ops: &mut Ops<'_>,
-    thread: Uuid,
-    message: Uuid,
-    meta: &FactMeta,
+    ids: &[Uuid],
+    removal: Option<(RemovalReason, &FactMeta)>,
 ) -> Result<(), Fault> {
-    let ids = store::ids_of(ops.connection(), thread, Some(message)).await?;
-    let artifacts = ops.load_many::<ArtifactState>(&ids).await?;
+    let artifacts = ops.load_many::<ArtifactState>(ids).await?;
     for artifact in &artifacts {
-        remove(ops, artifact, Some((RemovalReason::MessageDeleted, meta))).await?;
+        remove(ops, artifact, removal).await?;
     }
     purge_after_commit(ops, &artifacts)
 }
@@ -381,21 +372,25 @@ pub fn bytes_released<'r>(
     cx: &'r mut Reaction<'r>,
     message: BytesReleased,
 ) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let held: Vec<Uuid> =
-            sqlx::query_scalar("SELECT blob_ref FROM threads.artifact WHERE blob_ref = ANY($1)")
-                .bind(&message.blob_refs)
-                .fetch_all(cx.connection())
-                .await?;
-        let released: Vec<BlobRef> = message
-            .blob_refs
-            .iter()
-            .filter(|reference| !held.contains(reference))
-            .map(|reference| BlobRef(*reference))
-            .collect();
-        reader()?.purge_references(&released).await?;
-        Ok(())
-    })
+    Box::pin(async move { purge_unheld(cx.connection(), &message.blob_refs).await })
+}
+
+/// Purges the bytes behind `blob_refs` that no artifact holds, through the
+/// engine's blob reader (object and blob row). Purging a reference already
+/// purged changes nothing.
+pub async fn purge_unheld(conn: &mut sqlx::PgConnection, blob_refs: &[Uuid]) -> Result<(), Fault> {
+    let held: Vec<Uuid> =
+        sqlx::query_scalar("SELECT blob_ref FROM threads.artifact WHERE blob_ref = ANY($1)")
+            .bind(blob_refs)
+            .fetch_all(conn)
+            .await?;
+    let released: Vec<BlobRef> = blob_refs
+        .iter()
+        .filter(|reference| !held.contains(reference))
+        .map(|reference| BlobRef(*reference))
+        .collect();
+    reader()?.purge_references(&released).await?;
+    Ok(())
 }
 
 /// The artifact itself, unlocked: its thread, for a reaction that must lock the

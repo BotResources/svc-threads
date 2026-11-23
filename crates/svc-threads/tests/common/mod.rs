@@ -221,6 +221,18 @@ impl TestContext {
         .await
     }
 
+    /// The nominal boot of the last release with branches (`svc-threads`
+    /// 0.11.0): what a deployment ran, and stored its branches with, before
+    /// upgrading to the list.
+    pub async fn setup_branches_release() -> Self {
+        Self::boot_on(
+            previous::branches_release_binary(),
+            Handshake::Accept,
+            Windows::default(),
+        )
+        .await
+    }
+
     async fn boot_on(binary: PathBuf, handshake: Handshake, windows: Windows) -> Self {
         let _ = dotenvy::dotenv();
 

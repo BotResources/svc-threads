@@ -89,9 +89,10 @@ pub struct ThreadView {
     /// When it was resolved, set together with `resolvedBy`.
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    /// The date of the latest message — stored, or a streamed one closed by
-    /// its writer —, or the creation date while there is none: the order of
-    /// the list.
+    /// The date of the thread's latest activity: its creation, then each
+    /// message stored and each streamed message its writer closed; the order
+    /// of the list. A chunk, an edit, a deletion or an erasure does not move
+    /// it, so it may name a message erased since.
     pub last_activity_at: DateTime<Utc>,
     pub version: i64,
     pub members: Vec<MemberView>,

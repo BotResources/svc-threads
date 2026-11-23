@@ -59,26 +59,25 @@ impl ThreadContext {
     }
 }
 
-/// One context: a thread, read whole or for an agent, along the branch ending
-/// at `tip` — the active branch when none is named. The tip is part of the
-/// key, so that the context of one branch is never rendered for another; it is
-/// left out of the key's JSON when absent, so that an active-branch key is
-/// encoded as it was before tips existed.
+/// One context: a thread, read whole or for an agent, its whole list or the
+/// list up to the message `up_to` names, that message included. The bound is
+/// part of the key, so that a bounded context is never rendered for another
+/// read; it is left out of the key's JSON when absent.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContextKey {
     pub thread: Uuid,
     pub agent: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tip: Option<Uuid>,
+    pub up_to: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContextWindow {
     pub thread: Option<Uuid>,
     pub agent: Option<Uuid>,
-    /// The message the branch ends at; none for the active branch.
+    /// The last message of the conversation read; none for the whole list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tip: Option<Uuid>,
+    pub up_to: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -103,9 +102,9 @@ impl Projector for ContextView {
     }
 
     /// Never live: no noun and no inverse, so no impact reaches a context, and
-    /// every read populates and renders afresh under its own key — a tip's
-    /// included. Making it live would need the message noun's impacts routed
-    /// to every key of the thread, whatever its tip.
+    /// every read populates and renders afresh under its own key — a bounded
+    /// one included. Making it live would need the message noun's impacts
+    /// routed to every key of the thread, whatever its bound.
     fn nouns(&self) -> &'static [NounName] {
         &[]
     }
@@ -138,7 +137,7 @@ impl Projector for ContextView {
                 .then_some(ContextKey {
                     thread,
                     agent: window.agent,
-                    tip: window.tip,
+                    up_to: window.up_to,
                 })
                 .into_iter()
                 .collect();
@@ -202,16 +201,17 @@ fn plain_kinds() -> Vec<&'static str> {
         .collect()
 }
 
-/// The context of one branch in one statement: `$1` the thread, `$2` the agent
+/// The context of one thread in one statement: `$1` the thread, `$2` the agent
 /// read for (or none), `$3` the plain block kinds a foreign response keeps, `$4`
-/// the message the branch ends at (or none: the thread's most recent message).
+/// the last message of the conversation (or none: the whole list).
 ///
-/// The tip is looked for among the thread's own messages only, as
-/// `threadsMessages` looks for it: a tip unknown to the thread, or a message of
-/// another thread, ends no branch, and the conversation is empty. A tip that is
-/// deleted, cancelled, or failed before its first entry still ends its branch:
-/// the `turn` filter leaves it out of the conversation, as it leaves out such a
-/// message anywhere on a branch, and its ancestors stay.
+/// The messages are the thread's list, in the order they were stored
+/// (`created_at`, then id). The bound is looked for among the thread's own
+/// messages only: a message unknown to the thread, or a message of another
+/// thread, bounds nothing, and the conversation is empty. A bound that is
+/// deleted, cancelled, or failed before its first entry still bounds the
+/// conversation: the `turn` filter leaves it out, as it leaves out such a
+/// message anywhere in the list, and the messages before it stay.
 pub fn context_query() -> String {
     let response = TurnEntryKind::ModelResponse.as_str();
     let closure = TurnEntryKind::TurnClosure.as_str();
@@ -220,22 +220,20 @@ pub fn context_query() -> String {
     let cancelled = MessageStatus::Cancelled.as_str();
     let failed = MessageStatus::Failed.as_str();
     format!(
-        "WITH RECURSIVE tip AS ( \
-             SELECT m.id FROM threads.message m WHERE m.thread_id = $1 \
-               AND ($4::uuid IS NULL OR m.id = $4) \
-             ORDER BY m.created_at DESC, m.id DESC LIMIT 1 \
-         ), branch AS ( \
-             SELECT m.id, m.parent_message_id, 0 AS depth \
-             FROM threads.message m JOIN tip ON m.id = tip.id \
-             UNION ALL \
-             SELECT p.id, p.parent_message_id, b.depth + 1 \
-             FROM threads.message p JOIN branch b ON p.id = b.parent_message_id \
+        "WITH bound AS ( \
+             SELECT m.created_at, m.id FROM threads.message m \
+             WHERE m.thread_id = $1 AND m.id = $4 \
+         ), list AS ( \
+             SELECT m.id, row_number() OVER (ORDER BY m.created_at, m.id) AS ordinal \
+             FROM threads.message m WHERE m.thread_id = $1 \
+               AND ($4::uuid IS NULL OR EXISTS ( \
+                   SELECT 1 FROM bound b WHERE (m.created_at, m.id) <= (b.created_at, b.id))) \
          ), turn AS ( \
-             SELECT m.id, b.depth, m.status, m.turn_kind, m.author_user_id, m.author_agent_id, \
-                    m.author_ai_name, m.observed_at, \
+             SELECT m.id, l.ordinal, m.status, m.turn_kind, m.author_user_id, \
+                    m.author_agent_id, m.author_ai_name, m.observed_at, \
                     (m.turn_kind = '{ai_turn}' AND $2::uuid IS NOT NULL \
                      AND m.author_agent_id <> $2) AS foreign_turn \
-             FROM branch b JOIN threads.message m ON m.id = b.id \
+             FROM list l JOIN threads.message m ON m.id = l.id \
              WHERE NOT m.deleted AND m.status <> '{cancelled}' \
                AND (m.status <> '{failed}' OR EXISTS ( \
                    SELECT 1 FROM threads.message_entry f \
@@ -245,46 +243,46 @@ pub fn context_query() -> String {
                     e.sender_id, e.author, e.observed_at, \
                     CASE WHEN t.foreign_turn AND e.kind = '{response}' THEN '{{}}'::jsonb \
                          ELSE e.payload END AS payload, \
-                    t.depth, t.foreign_turn \
+                    t.ordinal, t.foreign_turn \
              FROM turn t JOIN threads.message_entry e ON e.message_id = t.id \
              WHERE e.state = '{complete}' \
                AND (NOT t.foreign_turn OR e.kind = '{response}') \
          ) \
-         SELECT 0 AS row_kind, t.depth, t.id AS message_id, t.id, 0 AS position, \
+         SELECT 0 AS row_kind, t.ordinal, t.id AS message_id, t.id, 0 AS position, \
                 t.status AS kind, t.turn_kind AS state, NULL::text AS sender_kind, \
                 t.author_user_id AS sender_id, t.author_ai_name AS author, t.observed_at, \
                 NULL::jsonb AS payload, NULL::uuid AS entry_id, NULL::uuid AS parent_id, \
                 t.author_agent_id AS call_id \
          FROM turn t \
          UNION ALL \
-         SELECT 1, e.depth, e.message_id, e.id, e.position, e.kind, e.state, e.sender_kind, \
+         SELECT 1, e.ordinal, e.message_id, e.id, e.position, e.kind, e.state, e.sender_kind, \
                 e.sender_id, e.author, e.observed_at, e.payload, NULL, NULL, NULL \
          FROM entry e \
          UNION ALL \
-         SELECT 2, e.depth, b.message_id, b.id, b.position, b.kind, b.state, NULL, NULL, NULL, \
-                b.observed_at, b.payload, b.entry_id, b.parent_id, b.call_id \
+         SELECT 2, e.ordinal, b.message_id, b.id, b.position, b.kind, b.state, NULL, NULL, \
+                NULL, b.observed_at, b.payload, b.entry_id, b.parent_id, b.call_id \
          FROM entry e JOIN threads.entry_block b ON b.entry_id = e.id \
          WHERE b.state = '{complete}' \
            AND (NOT e.foreign_turn OR e.kind <> '{response}' \
                 OR (b.parent_id IS NULL AND b.kind = ANY($3))) \
-         ORDER BY 2 DESC, 1, 5"
+         ORDER BY 2, 1, 5"
     )
 }
 
-struct BranchTurn {
+struct ListedTurn {
     message: MessageState,
     foreign: bool,
 }
 
 #[derive(Default)]
-struct Branch {
-    turns: Vec<BranchTurn>,
+struct Listed {
+    turns: Vec<ListedTurn>,
     entries: Vec<EntryRecord>,
     blocks: Vec<BlockRecord>,
     drafts: Vec<ResponseDraft>,
 }
 
-impl Branch {
+impl Listed {
     fn streaming(&self) -> Vec<uuid::Uuid> {
         self.turns
             .iter()
@@ -312,26 +310,26 @@ async fn read(
         .map(AgentId::from_uuid)
         .transpose()
         .map_err(corrupt)?;
-    let mut branch = read_branch(conn, chunks, key, agent).await?;
-    if closed_meanwhile(conn, &branch.streaming()).await? {
-        branch = read_branch(conn, chunks, key, agent).await?;
+    let mut listed = read_list(conn, chunks, key, agent).await?;
+    if closed_meanwhile(conn, &listed.streaming()).await? {
+        listed = read_list(conn, chunks, key, agent).await?;
     }
-    let messages: Vec<Uuid> = branch.turns.iter().map(|turn| turn.message.id).collect();
+    let messages: Vec<Uuid> = listed.turns.iter().map(|turn| turn.message.id).collect();
     let artifacts = artifact_context::of_messages(conn, &messages).await?;
-    let records = branch
+    let records = listed
         .turns
         .iter()
         .map(|turn| turn.message.turn_record())
         .collect::<Result<Vec<TurnRecord>, _>>()?;
     let set = RecordSet::new()
         .with_turns(records)
-        .with_entries(branch.entries)
-        .with_blocks(branch.blocks);
+        .with_entries(listed.entries)
+        .with_blocks(listed.blocks);
     let conversation = ConversationId::from_uuid(key.thread).map_err(corrupt)?;
     let read = match agent {
         Some(agent) => {
             let pending: Vec<PendingResponse<'_>> =
-                branch.drafts.iter().map(PendingResponse::from).collect();
+                listed.drafts.iter().map(PendingResponse::from).collect();
             let projected = set
                 .into_projected_thread_pending(conversation, agent, &pending)
                 .map_err(|error| store_fault(key.thread, &error))?;
@@ -368,26 +366,26 @@ async fn closed_meanwhile(
     .await?)
 }
 
-async fn read_branch(
+async fn read_list(
     conn: &mut PgConnection,
     chunks: &service_engine::accumulator::ChunkReader,
     key: &ContextKey,
     agent: Option<AgentId>,
-) -> Result<Branch, EngineError> {
+) -> Result<Listed, EngineError> {
     let rows = sqlx::query(&context_query())
         .bind(key.thread)
         .bind(key.agent)
         .bind(plain_kinds())
-        .bind(key.tip)
+        .bind(key.up_to)
         .fetch_all(&mut *conn)
         .await?;
-    let mut branch = Branch::default();
+    let mut listed = Listed::default();
     for row in &rows {
         let row_kind: i32 = row.try_get("row_kind")?;
         match row_kind {
-            0 => branch.turns.push(turn_of_row(row, agent)?),
-            1 => branch.entries.push(entry_of_row(row)?),
-            2 => branch.blocks.push(block_of_row(row)?),
+            0 => listed.turns.push(turn_of_row(row, agent)?),
+            1 => listed.entries.push(entry_of_row(row)?),
+            2 => listed.blocks.push(block_of_row(row)?),
             other => {
                 return Err(corrupt(UnknownStoredValue {
                     column: "context.row_kind",
@@ -396,7 +394,7 @@ async fn read_branch(
             }
         }
     }
-    let streaming: Vec<&BranchTurn> = branch
+    let streaming: Vec<&ListedTurn> = listed
         .turns
         .iter()
         .filter(|turn| turn.message.status == MessageStatus::Streaming)
@@ -442,10 +440,10 @@ async fn read_branch(
             drafts.push(producing.clone());
         }
     }
-    branch.entries.extend(entries);
-    branch.blocks.extend(blocks);
-    branch.drafts = drafts;
-    Ok(branch)
+    listed.entries.extend(entries);
+    listed.blocks.extend(blocks);
+    listed.drafts = drafts;
+    Ok(listed)
 }
 
 fn reduced_entry(kind: TurnEntryKind) -> bool {
@@ -464,7 +462,7 @@ fn store_fault(thread: Uuid, error: &contract_threads::llm::Error) -> EngineErro
     EngineError::Service(format!("the context of thread {thread} does not load: {error}").into())
 }
 
-fn turn_of_row(row: &PgRow, agent: Option<AgentId>) -> Result<BranchTurn, EngineError> {
+fn turn_of_row(row: &PgRow, agent: Option<AgentId>) -> Result<ListedTurn, EngineError> {
     let unknown = |column: &'static str, value: &str| {
         corrupt(UnknownStoredValue {
             column,
@@ -496,7 +494,6 @@ fn turn_of_row(row: &PgRow, agent: Option<AgentId>) -> Result<BranchTurn, Engine
     let message = MessageState {
         id: row.try_get("id")?,
         thread_id: Uuid::nil(),
-        parent_message_id: None,
         author,
         job_id: None,
         status: MessageStatus::parse(&status).map_err(corrupt)?,
@@ -513,7 +510,7 @@ fn turn_of_row(row: &PgRow, agent: Option<AgentId>) -> Result<BranchTurn, Engine
         members: BTreeSet::new(),
         pending: Vec::new(),
     };
-    Ok(BranchTurn { message, foreign })
+    Ok(ListedTurn { message, foreign })
 }
 
 fn author_agent(author: &MessageAuthor) -> Option<AgentId> {
@@ -666,15 +663,27 @@ mod tests {
     }
 
     #[test]
-    fn the_context_is_read_in_one_statement_over_its_branch() {
+    fn the_context_is_read_in_one_statement_over_the_list_up_to_its_bound() {
         let query = context_query();
-        assert_eq!(query.matches("WITH RECURSIVE").count(), 1);
-        let tip = &query[query.find("tip AS").unwrap()..query.find("branch AS").unwrap()];
         assert!(
-            tip.contains("m.thread_id = $1")
-                && tip.contains("($4::uuid IS NULL OR m.id = $4)")
-                && tip.contains("ORDER BY m.created_at DESC, m.id DESC LIMIT 1"),
-            "the named tip, among the thread's own messages, or else the most recent: {tip}"
+            !query.contains("RECURSIVE"),
+            "no message names another: {query}"
+        );
+        let bound = &query[query.find("bound AS").unwrap()..query.find("list AS").unwrap()];
+        assert!(
+            bound.contains("m.thread_id = $1") && bound.contains("m.id = $4"),
+            "the bound, among the thread's own messages only: {bound}"
+        );
+        let list = &query[query.find("list AS").unwrap()..query.find("turn AS").unwrap()];
+        assert!(
+            list.contains("row_number() OVER (ORDER BY m.created_at, m.id)")
+                && list.contains("($4::uuid IS NULL OR EXISTS (")
+                && list.contains("(m.created_at, m.id) <= (b.created_at, b.id)"),
+            "the list in the order it was stored, up to its bound included: {list}"
+        );
+        assert!(
+            query.ends_with("ORDER BY 2, 1, 5"),
+            "the oldest message first: {query}"
         );
         assert!(
             query.contains("e.state = 'complete'"),
@@ -693,56 +702,55 @@ mod tests {
         assert_eq!(
             query.matches("$4").count(),
             2,
-            "the tip is read by the tip CTE only"
+            "the bound is read by the bound and list CTEs only"
         );
     }
 
-    /// The window and the key name the tip, so that two branches of one
-    /// thread are two contexts; an active-branch read encodes as it did
-    /// before tips existed.
+    /// The window and the key name the bound, so that a bounded read and a
+    /// whole one are two contexts; a whole read encodes without it.
     #[test]
-    fn the_tip_is_part_of_the_context_key_and_absent_when_none_is_named() {
-        let (thread, agent, tip) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let active = ContextKey {
+    fn the_bound_is_part_of_the_context_key_and_absent_when_none_is_named() {
+        let (thread, agent, up_to) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let whole = ContextKey {
             thread,
             agent: Some(agent),
-            tip: None,
+            up_to: None,
         };
-        let tipped = ContextKey {
-            tip: Some(tip),
-            ..active.clone()
+        let bounded = ContextKey {
+            up_to: Some(up_to),
+            ..whole.clone()
         };
-        assert_ne!(active, tipped);
+        assert_ne!(whole, bounded);
         assert_eq!(
-            serde_json::to_value(&active).unwrap(),
+            serde_json::to_value(&whole).unwrap(),
             serde_json::json!({ "thread": thread, "agent": agent })
         );
         assert_eq!(
-            serde_json::to_value(&tipped).unwrap(),
-            serde_json::json!({ "thread": thread, "agent": agent, "tip": tip })
+            serde_json::to_value(&bounded).unwrap(),
+            serde_json::json!({ "thread": thread, "agent": agent, "up_to": up_to })
         );
         let decoded: ContextKey =
             serde_json::from_value(serde_json::json!({ "thread": thread, "agent": null }))
-                .expect("a key without a tip decodes");
-        assert_eq!(decoded.tip, None);
+                .expect("a key without a bound decodes");
+        assert_eq!(decoded.up_to, None);
 
         let window = ContextWindow {
             thread: Some(thread),
             agent: None,
-            tip: None,
+            up_to: None,
         };
         assert_eq!(
             WindowParams::encode(&window).unwrap().as_value(),
             &serde_json::json!({ "thread": thread, "agent": null })
         );
-        let tipped: ContextWindow = WindowParams::encode(&ContextWindow {
-            tip: Some(tip),
+        let bounded: ContextWindow = WindowParams::encode(&ContextWindow {
+            up_to: Some(up_to),
             ..window
         })
         .unwrap()
         .decode()
         .unwrap();
-        assert_eq!(tipped.tip, Some(tip));
+        assert_eq!(bounded.up_to, Some(up_to));
     }
 
     #[test]

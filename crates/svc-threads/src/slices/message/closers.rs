@@ -155,6 +155,18 @@ async fn seal(
     };
     match sealed {
         Ok(draft) => Ok(Ok(draft)),
+        // The row is STREAMING (the caller checked it under the thread's lock)
+        // and its stream is sealed all the same: a marker left by another
+        // message under the same id (a deleted thread's), which refuses every
+        // chunk of this one. A writer's seal cannot match a stream that
+        // received nothing; a close without one closes what folded, so that
+        // the message ends instead of being retried until dead-lettered.
+        Err(EngineError::Accumulator(AccumulatorError::AlreadySealed { .. })) => match seal {
+            Some(_) => Ok(Err(
+                Refusal::new(ReasonCode::StreamMismatch).with("error", "stream_sealed")
+            )),
+            None => Ok(Ok(cx.accumulated::<TurnContent>(&message).await?.state)),
+        },
         Err(error) => match seal_refusal(&error, cx.delivered()) {
             Some(refusal) => Ok(Err(refusal)),
             None => match error {

@@ -196,9 +196,18 @@ pub async fn seal_streams_of_thread(ops: &mut Ops<'_>, thread: Uuid) -> Result<(
     .bind(thread)
     .fetch_all(ops.connection())
     .await?;
+    seal_streams(ops, &streaming).await
+}
+
+/// Seals the streams of `STREAMING` messages that are going away (their
+/// thread deleted, or the end of the list erased), in the transaction that
+/// removes them: the chunks already received are dropped with the seal, and a
+/// chunk that arrives later is refused on every pod, so nothing of the message
+/// is folded or shown again.
+pub async fn seal_streams(ops: &mut Ops<'_>, streaming: &[Uuid]) -> Result<(), Fault> {
     for message in streaming {
-        sealed_or_already(ops.seal_current::<TurnContent>(&message).await.map(|_| ()))?;
-        legacy_refusal(ops, message).await?;
+        sealed_or_already(ops.seal_current::<TurnContent>(message).await.map(|_| ()))?;
+        legacy_refusal(ops, *message).await?;
     }
     Ok(())
 }

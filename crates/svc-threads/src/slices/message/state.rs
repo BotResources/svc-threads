@@ -93,7 +93,7 @@ pub enum MessageChange {
     /// creation when it arrives whole, at its close when it streamed, at an
     /// edit (replacing what was there).
     ContentWritten,
-    /// Its author deleted it: its content goes, the node stays.
+    /// Its author deleted it: its content goes, the message stays in the list.
     ContentRemoved,
     Recorded(Fact),
 }
@@ -103,7 +103,6 @@ pub enum MessageChange {
 pub struct MessageState {
     pub id: Uuid,
     pub thread_id: Uuid,
-    pub parent_message_id: Option<Uuid>,
     pub author: MessageAuthor,
     pub job_id: Option<Uuid>,
     pub status: MessageStatus,
@@ -205,7 +204,6 @@ pub(crate) mod tests {
         MessageState {
             id: Uuid::now_v7(),
             thread_id: Uuid::now_v7(),
-            parent_message_id: None,
             author: agent(),
             job_id: None,
             status: MessageStatus::Completed,

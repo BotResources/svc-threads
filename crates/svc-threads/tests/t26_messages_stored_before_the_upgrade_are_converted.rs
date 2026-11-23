@@ -4,10 +4,11 @@
 //! > commands: thread T holding a user message, an AI message COMPLETED with a
 //! > step carrying a thinking with its signature, a text and a tool call, a tool
 //! > results item and an ARTIFACT block, an AI message FAILED with an
-//! > interrupted tool result, a deleted user message, an edited one, a fork and
-//! > a STREAMING message; and a resolved thread T2. It then starts the new
-//! > version on the same database: it becomes ready; every message keeps its
-//! > id, its parent, its status, its version and edited_at, every block its id;
+//! > interrupted tool result, a deleted user message, an edited one, a second
+//! > answer to the same message and a STREAMING message; and a resolved thread
+//! > T2. It then starts the new version on the same database: it becomes
+//! > ready; every message keeps its id, its status, its version and edited_at,
+//! > every block its id;
 //! > the AI messages read as turns of the library with their entries and
 //! > closures, the thinking's signature as replay material byte for byte, the
 //! > ARTIFACT block as an annotation after its entry, the interrupted tool
@@ -30,6 +31,14 @@
 //! STREAMING one, which the gesture itself names FAILED; its version is kept
 //! all the same, as every message's.
 //!
+//! 0.4.0 stores a tree: each message names its parent. The upgrade to 0.12.0
+//! also turns that tree into one list (T40): the active branch — the chain
+//! ending at the most recent message, M7 — stays, with the latest answer of
+//! each other agent to a message of it. M6, "a second answer to the same
+//! message", is therefore the answer of another agent (Critic) to M1, whose
+//! analyst answer M2 is on the branch: kept, as the gesture's "every message
+//! keeps its id" demands. Its date keeps its place in the list, after M5.
+//!
 //! "Read as turns of the library" is read content for content: each converted
 //! entry's blocks equal the library's own construction from the very inputs
 //! the previous version was given — the texts, the thinking and its signature,
@@ -44,9 +53,17 @@
 //! conversion wrote alike — and the engine's tables a content passes through;
 //! the texts, and the 0.4 block ids that carried them.
 //!
+//! In the second scenario T also holds a fork F off the active branch. The
+//! list migration of 0.12.0 runs at `migrate`, before the conversion at
+//! `serve`: F is removed even though the conversion then fails and the new
+//! version never becomes ready. The scenario states that fact as it is; it is
+//! put to the operator, the gesture being silent on it.
+//!
 //! "No message is converted half-way" is read on the store, table by table:
 //! every row the previous version stored keeps, column for column, what it
-//! held, and no table the new version adds holds a row of these messages.
+//! held — on the columns the new version keeps: 0.12.0 drops
+//! `parent_message_id`, a schema change, not a row converted — and no table
+//! the new version adds holds a row of these messages.
 //!
 //! Channels: the answers (4); the messages, threads, read marks and artifacts
 //! as members read them, before and after (2); the fact log and the store; a
@@ -192,6 +209,8 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     let x = upload(&ctx, &runner.passport, t, &file).await;
     let agent = Uuid::now_v7();
     let analyst = || author(&agent.to_string(), "Analyst");
+    let other_agent = Uuid::now_v7();
+    let critic = || author(&other_agent.to_string(), "Critic");
     const THOUGHT: &str = "  weighing it\n\tcarefully ";
     const SIGNATURE: &str = "c2lnbmF0dXJlPT0=";
 
@@ -312,7 +331,7 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     )
     .await;
     message_confirmed(&ctx, edited, MessageStatus::Completed, "M5 edited").await;
-    // M6, a fork: another answer to M1;
+    // M6, a second answer to M1, by another agent;
     let another = ai_text("another take");
     let another_id = another.id;
     let m6 = stored_v1(
@@ -320,7 +339,7 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         &ai_message(
             t,
             Some(m1),
-            analyst(),
+            critic(),
             vec![step(StopReason::EndTurn, None, vec![another])],
         ),
         MessageStatus::Completed,
@@ -376,16 +395,14 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         upgrade.output
     );
 
-    // And every message keeps its id, its parent, its version, its edited_at
-    // and its deletion, every block its id, every status but the STREAMING
-    // message's.
+    // And every message keeps its id, its version, its edited_at and its
+    // deletion, every block its id, every status but the STREAMING message's.
     let mut after = Vec::new();
     for (message, old) in messages.iter().zip(&before) {
         let view = message_view(&ctx, &o.passport, t, *message).await;
         for field in [
             "id",
             "threadId",
-            "parentMessageId",
             "version",
             "editedAt",
             "deleted",
@@ -549,7 +566,8 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     );
     assert_eq!(calling.ending(), &ResponseEnding::tool_use());
     turn_of(&v3);
-    // M4, deleted: no content. M5, edited: its new content. M6, the fork.
+    // M4, deleted: no content. M5, edited: its new content. M6, the critic's
+    // second answer to M1.
     assert_eq!(v4["entries"], json!([]));
     assert_eq!(kinds_of(&v5), vec!["human_message"]);
     assert_human(&v5, b.id, vec![text_as(second_wording, "second wording")]);
@@ -567,10 +585,15 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
     assert_eq!(kinds_of(&v7), vec!["turn_closure"], "{v7}");
     assert_eq!(closure_kind(&v7).as_deref(), Some("interrupted"));
 
-    // And a runner's context of T loads in the library: the active branch,
-    // ending at M7, without the deleted M4 and M7 failed before an entry.
+    // And the thread reads as one list, in the order the messages were
+    // stored; a runner's context of T loads in the library: the thread in
+    // order, without the deleted M4 and M7 failed before an entry.
+    assert_eq!(
+        common::flows::message_ids(&ctx, &o.passport, t).await,
+        messages.to_vec()
+    );
     let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
-    assert_eq!(turn_ids(&conversation), vec![m1, m2, m3, m5]);
+    assert_eq!(turn_ids(&conversation), vec![m1, m2, m3, m5, m6]);
 
     // And T2 is still resolved; members, resources, read marks and artifacts
     // are unchanged; no fact is added and no version is raised.
@@ -678,7 +701,9 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH, and builds the previous release"]
 async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becoming_ready() {
     // Given the previous version running, and through its commands: T holding
-    // A's message M1 and an AI message M2 whose author id is not a UUIDv7.
+    // A's message M1, F — A's second message answering M1, a fork — and an AI
+    // message M2 answering M1 whose author id is not a UUIDv7, the most
+    // recent.
     let mut ctx = TestContext::setup_previous().await;
     let a = ctx.enrol("ada").await;
     let mut born = creation(Some(a.id), &[]);
@@ -689,6 +714,14 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
         &user_message(t, None, a.id, vec![user_text("convertible")]),
         MessageStatus::Completed,
         "M1",
+    )
+    .await;
+    const FORK: &str = "a fork off the active branch";
+    let fork = stored_v1(
+        &ctx,
+        &user_message(t, Some(m1), a.id, vec![user_text(FORK)]),
+        MessageStatus::Completed,
+        "F",
     )
     .await;
     let m2 = stored_v1(
@@ -724,14 +757,58 @@ async fn t26_a_message_that_cannot_be_converted_keeps_the_new_version_from_becom
         upgrade.output
     );
 
-    // And no message is converted half-way: every row the previous version
-    // stored keeps what it held, and no table the new version adds holds a row
-    // of these messages.
+    // And the fork F is gone, though no message was converted and the new
+    // version never became ready. This is a fact of 0.12.0 stated as is, not
+    // a rule of the registry: the list migration (keep the active branch, M1
+    // then M2, with the latest answer of each other agent) runs at `migrate`,
+    // in its own transaction, before `serve` converts the messages; when the
+    // conversion then fails, the fork stays removed. Whether the upgrade
+    // should be all or nothing across both steps is a question for the
+    // operator.
     let now = store::snapshot_json(&ctx.pool).await;
+    store::assert_nowhere(
+        &ctx.pool,
+        FORK,
+        &[],
+        "the fork's text, after the list migration",
+    )
+    .await;
+    // (Its id stays reserved, ids only, as an erased message's.)
+    for (table, rows) in now
+        .iter()
+        .filter(|(table, _)| !["fact", store::RESERVED_IDS].contains(&table.as_str()))
+    {
+        for row in rows {
+            assert!(
+                !row.to_string().contains(&fork.to_string()),
+                "the fork is gone: {table} {row}"
+            );
+        }
+    }
+    // And no message is converted half-way: every other row the previous
+    // version stored keeps what it held, on every column the new version
+    // keeps — the schema drops `parent_message_id`, which a message no longer
+    // has, and that is no conversion of a row — and no table the new version
+    // adds holds a row of these messages.
+    let (then, kept) = store::on_kept_columns(&before, &now);
+    let without_the_fork = |rows: std::collections::BTreeMap<String, Vec<String>>| {
+        rows.into_iter()
+            .map(|(table, rows)| {
+                let rows = if table == "fact" {
+                    rows
+                } else {
+                    rows.into_iter()
+                        .filter(|row| !row.contains(&fork.to_string()))
+                        .collect()
+                };
+                (table, rows)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
     assert_eq!(
-        store::restricted_to(&before, &now),
-        store::restricted_to(&before, &before),
-        "the rows of the previous version are untouched"
+        without_the_fork(kept),
+        without_the_fork(then),
+        "the rows of the previous version, the fork's but, are untouched"
     );
     for (table, rows) in now.iter().filter(|(table, _)| !before.contains_key(*table)) {
         for row in rows {

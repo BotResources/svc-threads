@@ -95,20 +95,35 @@ mod tests {
         );
     }
 
-    /// A runner reads the context of the active branch, or of the branch ending
-    /// at the message it names, as a member reads a branch's messages.
+    /// A runner reads the whole list, or the list up to the message it names;
+    /// a member pages through the list and follows its head. No root names a
+    /// branch, and no view names a parent.
     #[test]
-    fn the_runner_context_reads_the_active_branch_or_the_one_a_tip_ends() {
+    fn the_messages_are_one_list_and_a_runner_bounds_its_context_with_up_to() {
         let sdl = sdl();
         assert!(
             sdl.contains(
-                "threadsContext(threadId: UUID!, agentId: String, branchTip: UUID): ThreadContext\n"
+                "threadsContext(threadId: UUID!, agentId: String, upTo: UUID): ThreadContext\n"
             ),
-            "threadsContext takes a thread, an optional agent and an optional tip:\n{sdl}"
+            "threadsContext takes a thread, an optional agent and an optional bound:\n{sdl}"
         );
         assert!(
-            sdl.contains("branchTip: UUID): [MessageView!]!"),
-            "the tip is named as threadsMessages names it:\n{sdl}"
+            sdl.contains(
+                "threadsMessages(threadId: UUID!, size: Int!, before: UUID): [MessageView!]!"
+            ),
+            "threadsMessages pages through the list:\n{sdl}"
+        );
+        assert!(
+            sdl.contains("threadsThreadDeltas(threadId: UUID!, size: Int!): ThreadFeedDelta!"),
+            "threadsThreadDeltas follows the head of the list:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("branchTip"),
+            "a root still names a branch:\n{sdl}"
+        );
+        assert!(
+            !sdl.contains("parentMessageId"),
+            "a message still names its parent:\n{sdl}"
         );
     }
 

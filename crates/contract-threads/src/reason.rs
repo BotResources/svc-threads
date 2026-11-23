@@ -49,7 +49,8 @@ wire_enum! {
         MessageNotStreaming => "MESSAGE_NOT_STREAMING",
         /// A seal whose last chunk or digest differs from what Threads received.
         StreamMismatch => "STREAM_MISMATCH",
-        /// Storing, editing or deleting a message on a resolved thread.
+        /// Storing, editing, deleting or erasing messages on a resolved
+        /// thread.
         ThreadResolved => "THREAD_RESOLVED",
         /// Resolving a thread that is already resolved.
         ThreadAlreadyResolved => "THREAD_ALREADY_RESOLVED",
@@ -61,6 +62,10 @@ wire_enum! {
         /// An edit made from a version the message has left; the refusal names
         /// the current one (`current_version`).
         VersionConflict => "VERSION_CONFLICT",
+        /// A version of a command Threads no longer accepts (`message.store`
+        /// v1 and v2, which named a parent): nothing is stored, send the
+        /// current version.
+        CommandVersionRetired => "COMMAND_VERSION_RETIRED",
     }
 }
 
@@ -108,6 +113,7 @@ mod tests {
             "ID_NOT_UUIDV7",
             "ORIGIN_BLOCK_REQUIRED",
             "RESOURCE_KEY_INVALID",
+            "COMMAND_VERSION_RETIRED",
         ] {
             assert!(ReasonCode::parse(named).is_ok(), "{named}");
         }

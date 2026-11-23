@@ -74,6 +74,18 @@ impl Answers {
         self.for_command(command_id).remove(0)
     }
 
+    /// `commands`, in the order their first answers were published on the
+    /// bus: the order Threads answered them in.
+    pub fn order_of(&self, commands: &[Uuid]) -> Vec<Uuid> {
+        let mut order: Vec<Uuid> = Vec::new();
+        for correlation in self.capture.correlation_ids() {
+            if commands.contains(&correlation) && !order.contains(&correlation) {
+                order.push(correlation);
+            }
+        }
+        order
+    }
+
     pub async fn stop(self) {
         self.capture.stop().await;
     }
@@ -108,7 +120,7 @@ pub async fn send<C: ThreadsCommand + Serialize>(
 
 /// Sends `command` under `command_id` — published again under the same id, it
 /// is the bus redelivering one command. The envelope's schema version is the
-/// command's own (`message.store` travels as v1 or v2).
+/// command's own (`message.store` travels as v3).
 pub async fn send_as<C: ThreadsCommand + Serialize>(
     nats: &FabricTestNats,
     actor: Actor,
@@ -149,5 +161,29 @@ where
         .publish_command(&C::coords(), &envelope)
         .await
         .expect("the commanding service publishes its v1 command");
+    command_id
+}
+
+/// Sends a command of the published language of 0.11.0 (`contract-threads`
+/// 0.9.0, `message.store` v2 naming a parent) as `actor`, under a fresh
+/// UUIDv7; answers that id. A consumer still on `message.store` v2 sends
+/// exactly this; 0.11.0 itself stores with it.
+pub async fn send_v2<C>(nats: &FabricTestNats, actor: Actor, command: &C) -> Uuid
+where
+    C: contract_threads_v0_9::ThreadsCommand + Serialize,
+{
+    let command_id = Uuid::now_v7();
+    let envelope = IntegrationCommand::new(
+        command_id,
+        C::command_type(),
+        C::VERSION,
+        Utc::now(),
+        EventMetadata::new(actor, command_id),
+        command,
+    );
+    nats.fabric()
+        .publish_command(&C::coords(), &envelope)
+        .await
+        .expect("the commanding service publishes its v2 command");
     command_id
 }

@@ -40,6 +40,7 @@
 //! | resources | add/remove resource ids | resource, `thread` noun | Upsert |
 //! | read marks | the member's own gesture | resource, `thread_reader` noun (re-render by key, no list repopulation) | Upsert to the reader (only their own mark shows); no delta to the others |
 //! | read marks | member removal | with the membership change | as members |
+//! | version, read marks | `message.erase` (the read marks set on an erased message go) | resource, `thread` noun | Upsert (the version raised, the mark gone); `last_activity_at` does not move |
 //! | thread deleted | delete command, owner left the roster | resource, `thread` noun + principal facts of every member | Remove |
 //! | a member's name, standing | directory mirror | foreign `threads.known_user`, inverted to the user's threads | Upsert |
 //! | the caller's standing | directory mirror | principal facts, `ROSTER_DEPS`; the resolver ends the sessions of a caller no longer active | windows repopulated, or sessions ended |
@@ -88,6 +89,7 @@ literal_enum! {
         ReadMarkSet => "READ_MARK_SET",
         MessageStored => "MESSAGE_STORED",
         MessageClosed => "MESSAGE_CLOSED",
+        MessagesErased => "MESSAGES_ERASED",
     }
 }
 

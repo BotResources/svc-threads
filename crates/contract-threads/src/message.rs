@@ -22,12 +22,17 @@ macro_rules! message_command {
     };
 }
 
+/// `message.store` v3 — a message stored at the end of its thread's list,
+/// complete or opened `STREAMING`. A message names no other message: the
+/// messages of a thread form one list, in the order they were stored.
+///
+/// `message.store` v1 and v2, which named a parent, are retired: Threads
+/// answers them `message.refused` with `COMMAND_VERSION_RETIRED` and stores
+/// nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoreMessageV2 {
+pub struct StoreMessageV3 {
     pub message_id: Uuid,
     pub thread_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_message_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,10 +42,10 @@ pub struct StoreMessageV2 {
     pub message: MessageTurn,
 }
 
-impl ThreadsCommand for StoreMessageV2 {
+impl ThreadsCommand for StoreMessageV3 {
     const AGGREGATE: &'static str = MESSAGE_AGGREGATE;
     const VERB: &'static str = "store";
-    const VERSION: u8 = 2;
+    const VERSION: u8 = 3;
 
     fn thread_id(&self) -> Uuid {
         self.thread_id
@@ -50,6 +55,11 @@ impl ThreadsCommand for StoreMessageV2 {
         self.acting_user_id
     }
 }
+
+/// The versions of `message.store` that named a parent. Threads still
+/// answers them, `message.refused` with `COMMAND_VERSION_RETIRED`, and stores
+/// nothing.
+pub const RETIRED_STORE_VERSIONS: [u8; 2] = [1, 2];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
@@ -197,6 +207,34 @@ impl ThreadsCommand for DeleteMessage {
     }
 }
 
+/// `message.erase` — the end of a thread erased: every message stored after
+/// `message_id` (by `created_at`, then id), and `message_id` itself when
+/// `including`, whoever wrote them and whatever their status, with their
+/// entries, blocks, annotations and artifacts (bytes included).
+///
+/// Refused `THREAD_NOT_FOUND`, `THREAD_NOT_OPEN`, `THREAD_RESOLVED` and
+/// `MESSAGE_NOT_FOUND` (the named message is not one of the thread's), in that
+/// order. An erase that finds nothing to remove is confirmed and changes
+/// nothing. Its confirmation names the named message: `status` is its status
+/// and `deleted` its flag when it stays, and the status it had when it went
+/// too.
+///
+/// The ids an erased message held (its own, its entries', blocks' and
+/// annotations') stay reserved in the thread: a later message reusing one is
+/// refused `KEY_REUSED`. An erase removes what is stored when it runs: a
+/// `message.store` sent before the erase is confirmed may be stored first, and
+/// then be erased too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EraseMessages {
+    pub thread_id: Uuid,
+    pub message_id: Uuid,
+    /// Whether the named message goes too.
+    pub including: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_user_id: Option<Uuid>,
+}
+message_command!(EraseMessages, "erase");
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditMessage {
     pub message_id: Uuid,
@@ -235,19 +273,19 @@ mod tests {
             "thread_id": thread_id,
             "message": { "kind": "USER", "entry": entry },
         });
-        let store: StoreMessageV2 = serde_json::from_value(wire.clone()).unwrap();
+        let store: StoreMessageV3 = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(&store).unwrap(), wire);
         let MessageTurn::User(user) = &store.message else {
             panic!("a user message");
         };
         assert!(user.annotations.is_empty());
-        assert_eq!(StoreMessageV2::coords().version, 2);
-        assert_eq!(StoreMessageV2::command_type(), "message.store");
+        assert_eq!(StoreMessageV3::coords().version, 3);
+        assert_eq!(StoreMessageV3::command_type(), "message.store");
     }
 
     #[test]
     fn a_user_message_holding_annotations_still_decodes_so_that_threads_refuses_it() {
-        let store: StoreMessageV2 = serde_json::from_value(json!({
+        let store: StoreMessageV3 = serde_json::from_value(json!({
             "message_id": Uuid::now_v7(),
             "thread_id": Uuid::now_v7(),
             "message": {
@@ -376,6 +414,43 @@ mod tests {
         assert_eq!(DeleteMessage::command_type(), "message.delete");
         assert_eq!(EditMessage::command_type(), "message.edit");
         assert_eq!(EditMessage::coords().version, 1);
+        assert_eq!(EraseMessages::command_type(), "message.erase");
+        assert_eq!(EraseMessages::coords().version, 1);
         assert_eq!(CancelMessage::coords().aggregate.as_str(), "message");
+    }
+
+    #[test]
+    fn a_v3_store_names_no_parent_and_an_old_parent_field_is_not_read() {
+        let wire = json!({
+            "message_id": Uuid::now_v7(),
+            "thread_id": Uuid::now_v7(),
+            "parent_message_id": Uuid::now_v7(),
+            "message": { "kind": "AI", "agent_id": Uuid::now_v7(), "author_name": "Analyst", "status": "STREAMING" },
+        });
+        let store: StoreMessageV3 = serde_json::from_value(wire).unwrap();
+        let back = serde_json::to_value(&store).unwrap();
+        assert!(back.get("parent_message_id").is_none(), "{back}");
+        assert_eq!(RETIRED_STORE_VERSIONS, [1, 2]);
+    }
+
+    #[test]
+    fn an_erase_names_its_message_and_whether_it_goes_too() {
+        let (thread_id, message_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let erase: EraseMessages = serde_json::from_value(json!({
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "including": true,
+        }))
+        .unwrap();
+        assert!(erase.including);
+        assert_eq!(erase.acting_user_id, None);
+        assert!(
+            serde_json::from_value::<EraseMessages>(json!({
+                "thread_id": thread_id,
+                "message_id": message_id,
+            }))
+            .is_err(),
+            "including is required"
+        );
     }
 }

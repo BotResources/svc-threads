@@ -1,14 +1,13 @@
-//! **T19 — Editing a message: author only, the content is replaced, the node
-//! stays.**
+//! **T19 — Editing a message: author only, the content is replaced, the
+//! message stays.**
 //!
-//! > M1, by user A, has an AI answer M2 written on M1's text and a fork M2b.
-//! > The harness sends message.edit for M1 with acting user B, also a member:
-//! > refused NOT_THE_AUTHOR, nothing changes. With acting user A and M1's
-//! > current version, new content keeping the id of M1's first text block and
-//! > adding an image block: confirmed; M1 reads with the new content, an
-//! > edited_at and a
-//! > version raised by one, still the parent of M2 and M2b, which stay readable
-//! > under it; a runner's context carries the new content. An Edited fact
+//! > M1, by user A, has an AI answer M2 written on M1's text and a second
+//! > answer M2b. The harness sends message.edit for M1 with acting user B,
+//! > also a member: refused NOT_THE_AUTHOR, nothing changes. With acting user A
+//! > and M1's current version, new content keeping the id of M1's first text
+//! > block and adding an image block: confirmed; M1 reads with the new content,
+//! > an edited_at and a version raised by one, still before M2 and M2b, which
+//! > stay readable after it; a runner's context carries the new content. An Edited fact
 //! > records it; no fact, before or after, carries the old or the new text, and
 //! > no block of the old content is left in the store. A new block reusing the
 //! > id of a block of another message is refused KEY_REUSED; a list naming one
@@ -45,9 +44,9 @@ use common::content::{
 };
 use common::facts;
 use common::flows::{
-    ai, answer, branch, command, context, conversation_of, create_thread, deletion_of, edit_of,
-    message_confirmed, message_refused, message_version, message_view, open_stream, raw_edit_of,
-    reopening_of, resolution_of, say, thread_confirmed, uuid_of,
+    ai, answer, command, context, conversation_of, create_thread, deletion_of, edit_of,
+    message_confirmed, message_ids, message_refused, message_version, message_view, open_stream,
+    raw_edit_of, reopening_of, resolution_of, say, thread_confirmed, uuid_of,
 };
 use common::{Person, TestContext, store};
 use contract_threads::llm::{IncomingEntry, PlainBlock};
@@ -86,10 +85,10 @@ async fn refused_changing_nothing(
 
 #[tokio::test]
 #[ignore = "real-infra e2e: needs Postgres (E2E_PG_ADMIN_URL), nats-server, the nats CLI and minio on PATH"]
-async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_place_and_descendants_stay()
- {
+async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_every_later_message_stays()
+{
     // Given T with members O, A and B; M1 by A; M2, an AI answer written on
-    // M1's text, and its fork M2b; a runner.
+    // M1's text, and a second answer M2b; a runner.
     let ctx = TestContext::setup().await;
     let (o, a, b) = (
         ctx.enrol("olga").await,
@@ -103,27 +102,23 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     let first_block = Uuid::now_v7();
     let m1 = common::flows::store(
         &ctx,
-        common::flows::user_message(t, None, a.id, vec![text_as(first_block, OLD)]),
+        common::flows::user_message(t, a.id, vec![text_as(first_block, OLD)]),
         MessageStatus::Completed,
     )
     .await;
     let m2 = answer(
         &ctx,
         t,
-        Some(m1),
         ai("a1", "Analyst"),
         reply("an answer to the old wording"),
     )
     .await;
-    let m2b = answer(
-        &ctx,
-        t,
-        Some(m1),
-        ai("a1", "Analyst"),
-        reply("another answer"),
-    )
-    .await;
+    let m2b = answer(&ctx, t, ai("a1", "Analyst"), reply("another answer")).await;
     let runner = ctx.service_account(true);
+    let later_before = [
+        message_view(&ctx, &b.passport, t, m2).await,
+        message_view(&ctx, &b.passport, t, m2b).await,
+    ];
     let v = message_version(&ctx, &a.passport, t, m1).await;
     let created_at = message_view(&ctx, &a.passport, t, m1).await["createdAt"].clone();
     let added = image();
@@ -167,17 +162,18 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         view["createdAt"], created_at,
         "an edit keeps the creation date"
     );
-    // And it is still the parent of M2 and M2b, which stay readable under it.
-    for reply in [m2, m2b] {
-        let page: Vec<Uuid> = branch(&ctx, &b.passport, t, 10, Some(reply))
-            .await
-            .iter()
-            .map(|view| uuid_of(&view["id"]))
-            .collect();
+    // And it is still before M2 and M2b, which stay readable after it: the
+    // replies written on the previous content stay.
+    assert_eq!(
+        message_ids(&ctx, &b.passport, t).await,
+        vec![m1, m2, m2b],
+        "the edited M1 keeps its place, and every later message stays"
+    );
+    for (reply, before) in [m2, m2b].into_iter().zip(&later_before) {
         assert_eq!(
-            page,
-            vec![reply, m1],
-            "the replies stay under the edited M1"
+            &message_view(&ctx, &b.passport, t, reply).await,
+            before,
+            "a later message reads exactly as before the edit"
         );
     }
     // And a runner's context carries the new content, not the old.
@@ -274,8 +270,8 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
 
     // When a streaming, a failed and a cancelled AI message, and a deleted user
     // message of A are edited — then each is refused MESSAGE_NOT_EDITABLE.
-    let streaming = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
-    let failed = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let streaming = open_stream(&ctx, t, ai("a1", "Analyst")).await;
+    let failed = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let ended = command(
         &ctx,
         &FailMessage {
@@ -287,7 +283,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
     )
     .await;
     message_confirmed(&ctx, ended, MessageStatus::Failed, "failing an AI message").await;
-    let cancelled = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let cancelled = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let ended = command(
         &ctx,
         &CancelMessage {
@@ -305,7 +301,7 @@ async fn t19_only_its_author_edits_a_completed_user_message_in_place_and_its_pla
         "cancelling an AI message",
     )
     .await;
-    let gone = say(&ctx, t, Some(m2b), &a, "a message A deletes").await;
+    let gone = say(&ctx, t, &a, "a message A deletes").await;
     let deleted = command(&ctx, &deletion_of(t, gone, a.id)).await;
     message_confirmed(&ctx, deleted, MessageStatus::Completed, "A deleting it").await;
     for (message, what) in [

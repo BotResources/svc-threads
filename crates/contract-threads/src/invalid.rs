@@ -5,7 +5,7 @@
 //! [`ErrorCode`]), published under the library's name: the refusal then also
 //! names the library's `object_id` and `location` when the library gives them.
 //! The others are Threads' rules on a message (a user message holding an
-//! annotation, a parent of another thread, …) and on its stream.
+//! annotation, an AI turn of another agent, …) and on its stream.
 
 use br_llm_messages::ErrorCode;
 
@@ -57,8 +57,6 @@ wire_enum! {
         /// A string holding U+0000, which the store cannot keep (Postgres
         /// refuses it in `text` and `jsonb`).
         NulCharacter => "nul_character",
-        /// The parent is not a message of the thread.
-        ParentNotInThread => "parent_not_in_thread",
         // ── Threads' own rules on a stream ──────────────────────────────────
         /// A chunk the contract cannot read.
         ChunkUnreadable => "chunk_unreadable",
@@ -70,9 +68,7 @@ wire_enum! {
         ResponseStillProducing => "response_still_producing",
         /// A closure pushed on the stream: closing the turn is Threads'.
         ClosureByWriter => "closure_by_writer",
-        // ── the deprecated v1 forms ─────────────────────────────────────────
-        /// A `STREAMING` opening by `message.store` v1: stream with v2.
-        StreamingV1 => "streaming_v1",
+        // ── the deprecated 0.4 form ─────────────────────────────────────────
         /// Content of the 0.4 form the 2.0 model has no place for, or JSON
         /// that is not 0.4's.
         V1NotConvertible => "v1_not_convertible",

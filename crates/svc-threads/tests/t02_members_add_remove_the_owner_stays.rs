@@ -123,7 +123,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
     assert_eq!(settled_revision(&ctx, t).await, revision_before);
 
     // Given A sets their read mark on T, at a message of T.
-    let m1 = say(&ctx, t, None, &o, "first words").await;
+    let m1 = say(&ctx, t, &o, "first words").await;
     let marked = ctx
         .run(
             &a.passport,
@@ -176,7 +176,7 @@ async fn t02_members_are_added_and_removed_the_owner_stays_and_the_kv_follows() 
         feed.until_revoked(&format!("A loses T over {transport}"), t)
             .await;
     }
-    say(&ctx, t, Some(m1), &o, "after A left").await;
+    say(&ctx, t, &o, "after A left").await;
     for (feed, transport) in [(&mut a_feed_sse, "SSE"), (&mut a_feed_ws, "WS")] {
         feed.silent_or_ended(&format!("a removed member's {transport} view"))
             .await;

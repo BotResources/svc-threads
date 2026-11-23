@@ -5,7 +5,7 @@ use contract_threads::llm::{
 };
 use contract_threads::{
     AiDelivery, DeleteMessage, LibraryJson, MessageInvalidError, MessageStatus, MessageTurn,
-    PlacedAnnotation, ReasonCode, StoreMessageV2, v1,
+    PlacedAnnotation, ReasonCode, StoreMessageV3,
 };
 use futures_util::future::BoxFuture;
 use service_engine::pipeline::Reaction;
@@ -22,6 +22,7 @@ use super::{MessageCause, message_cause, store, watch};
 use crate::command::{Call, Inbound, MessageOutcome, Refusal, answer_message};
 use crate::fault::Fault;
 use crate::slices::artifact::lifecycle;
+use crate::slices::artifact::{self, state::RemovalReason};
 use crate::slices::thread::ThreadCause;
 use crate::slices::thread::state::{Thread, ThreadState};
 use crate::slices::thread::transitions::Applied;
@@ -83,53 +84,15 @@ macro_rules! refuse_on {
 }
 pub(super) use refuse_on;
 
-struct Store<'a> {
-    message_id: Uuid,
-    thread_id: Uuid,
-    parent_message_id: Option<Uuid>,
-    job_id: Option<Uuid>,
-    body: StoreBody<'a>,
-}
-
-enum StoreBody<'a> {
-    V2(&'a MessageTurn),
-    V1(&'a v1::NewMessage),
-}
-
-pub fn store_v2<'r>(
+/// `message.store` v3: a message stored at the end of its thread's list.
+pub fn store_v3<'r>(
     cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<StoreMessageV2>,
+    Inbound(command): Inbound<StoreMessageV3>,
 ) -> BoxFuture<'r, Result<(), Fault>> {
     Box::pin(async move {
         let mut call = Call::of(cx, &command)?;
         call.meta = call.meta.with_impersonator(command.impersonator_id);
-        let store = Store {
-            message_id: command.message_id,
-            thread_id: command.thread_id,
-            parent_message_id: command.parent_message_id,
-            job_id: command.job_id,
-            body: StoreBody::V2(&command.message),
-        };
-        let verdict = store_message(cx, &call, &store).await?;
-        answer_message(cx, &call, command.thread_id, command.message_id, verdict)
-    })
-}
-
-pub fn store_v1<'r>(
-    cx: &'r mut Reaction<'r>,
-    Inbound(command): Inbound<v1::StoreMessage>,
-) -> BoxFuture<'r, Result<(), Fault>> {
-    Box::pin(async move {
-        let mut call = Call::of(cx, &command)?;
-        call.meta = call.meta.with_impersonator(command.impersonator_id);
-        let store = Store {
-            message_id: command.message_id,
-            thread_id: command.thread_id,
-            parent_message_id: command.parent_message_id,
-            job_id: command.job_id,
-            body: StoreBody::V1(&command.message),
-        };
-        let verdict = store_message(cx, &call, &store).await?;
+        let verdict = store_message(cx, &call, &command).await?;
         answer_message(cx, &call, command.thread_id, command.message_id, verdict)
     })
 }
@@ -238,17 +201,10 @@ fn holds_a_human_message(turn: &Turn) -> bool {
     }
 }
 
-fn unstorable(body: &StoreBody<'_>) -> Option<Refusal> {
-    match body {
-        StoreBody::V2(message) => nul_refusal(message),
-        StoreBody::V1(message) => nul_refusal(message),
-    }
-}
-
-fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refusal> {
-    let storable = || unstorable(body).map_or(Ok(()), Err);
-    match body {
-        StoreBody::V2(MessageTurn::User(user)) => {
+fn judge_content(message_id: Uuid, message: &MessageTurn) -> Result<Judged, Refusal> {
+    let storable = || nul_refusal(message).map_or(Ok(()), Err);
+    match message {
+        MessageTurn::User(user) => {
             storable()?;
             let (turn, human) = user_turn(message_id, &user.entry)?;
             if !user.annotations.is_empty() {
@@ -260,7 +216,7 @@ fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refus
                 Vec::new(),
             )
         }
-        StoreBody::V2(MessageTurn::Ai(ai)) => {
+        MessageTurn::Ai(ai) => {
             let (agent, author) = ai_author(ai.agent_id, &ai.author_name)?;
             storable()?;
             let message_author = MessageAuthor::Agent {
@@ -294,43 +250,6 @@ fn judge_content(message_id: Uuid, body: &StoreBody<'_>) -> Result<Judged, Refus
                 }
             }
         }
-        StoreBody::V1(v1::NewMessage::User(user)) => {
-            storable()?;
-            super::v1::precheck(&user.blocks)?;
-            let (turn, annotations) =
-                super::v1::user_turn(message_id, user.author_user_id, &user.blocks)
-                    .map_err(|fault| fault.refusal())?;
-            if !annotations.is_empty() {
-                return Err(invalid(MessageInvalidError::AnnotationInUserMessage));
-            }
-            whole(
-                (turn.into(), MessageStatus::Completed),
-                user_author(user.author_user_id),
-                Vec::new(),
-            )
-        }
-        StoreBody::V1(v1::NewMessage::Ai(ai)) => {
-            let agent = AgentId::parse(&ai.author.id).map_err(|error| refusal_of(&error))?;
-            let (agent, author) = ai_author(agent.as_uuid(), &ai.author.name)?;
-            storable()?;
-            match &ai.delivery {
-                v1::AiDelivery::Streaming => Err(invalid(MessageInvalidError::StreamingV1)),
-                v1::AiDelivery::Completed { items } => {
-                    super::v1::precheck(super::v1::item_blocks(items))?;
-                    let (turn, annotations) =
-                        super::v1::ai_turn(message_id, agent, author.clone(), items)
-                            .map_err(|fault| fault.refusal())?;
-                    whole(
-                        closed_whole(turn.into())?,
-                        MessageAuthor::Agent {
-                            agent,
-                            name: author,
-                        },
-                        annotations,
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -345,7 +264,7 @@ fn user_author(user_id: Uuid) -> MessageAuthor {
 async fn store_message(
     cx: &mut Reaction<'_>,
     call: &Call,
-    command: &Store<'_>,
+    command: &StoreMessageV3,
 ) -> Result<Verdict, Fault> {
     let mut thread = refuse_on!(writable_thread(cx, command.thread_id).await?);
     refuse_on!(crate::command::minted("message_id", command.message_id));
@@ -357,28 +276,7 @@ async fn store_message(
             Refusal::new(ReasonCode::KeyReused).with("message_id", command.message_id)
         ));
     }
-    if let Some(parent) = command.parent_message_id {
-        match store::thread_of(cx.connection(), parent).await? {
-            None => {
-                return Ok(Err(
-                    Refusal::new(ReasonCode::MessageNotFound).with("parent_message_id", parent)
-                ));
-            }
-            Some(of) if of != thread.id => {
-                return Ok(Err(invalid(MessageInvalidError::ParentNotInThread)
-                    .with("parent_message_id", parent)));
-            }
-            Some(_) => {}
-        }
-    }
-    if let StoreBody::V1(v1::NewMessage::User(user)) = &command.body
-        && !thread.is_member(user.author_user_id)
-    {
-        return Ok(Err(
-            Refusal::new(ReasonCode::NotAMember).with("user_id", user.author_user_id)
-        ));
-    }
-    let judged = refuse_on!(judge_content(command.message_id, &command.body));
+    let judged = refuse_on!(judge_content(command.message_id, &command.message));
     if let MessageAuthor::User { user_id, .. } = &judged.author
         && !thread.is_member(*user_id)
     {
@@ -406,13 +304,16 @@ async fn store_message(
     }
     let artifacts = refuse_on!(lifecycle::ready(cx, thread.id, &judged.content.artifacts()).await?);
 
-    let now = call.meta.occurred_at;
+    // The list's order is the store order: under the thread's lock, after the
+    // thread's latest message, whatever the clock of the pod that dispatched
+    // the command.
+    let latest = store::latest_created_at(cx.connection(), thread.id).await?;
+    let now = store::list_position(call.meta.occurred_at, latest);
     let status = judged.status;
     let message = transitions::store(
         NewMessage {
             id: command.message_id,
             thread_id: thread.id,
-            parent_message_id: command.parent_message_id,
             author: judged.author,
             job_id: command.job_id,
             status,
@@ -459,7 +360,14 @@ async fn delete_message(
     let mut state = refuse_on!(message_of(cx, command.thread_id, command.message_id).await?);
     let applied = refuse_on!(state.delete(command.acting_user_id, &call.meta)?);
     if applied == Applied::Changed {
-        lifecycle::delete_all_of_message(cx, state.thread_id, state.id, &call.meta).await?;
+        let artifacts =
+            artifact::store::ids_of_messages(cx.connection(), state.thread_id, &[state.id]).await?;
+        artifact::remove_artifacts(
+            cx,
+            &artifacts,
+            Some((RemovalReason::MessageDeleted, &call.meta)),
+        )
+        .await?;
         cx.save(&state).await?;
         cx.impact_caused::<Message, _>(
             &state.id,
@@ -551,7 +459,7 @@ mod tests {
     }
 
     fn judge(message: Uuid, turn: &MessageTurn) -> Result<Judged, Refusal> {
-        judge_content(message, &StoreBody::V2(turn))
+        judge_content(message, turn)
     }
 
     fn error_of(refusal: &Refusal) -> &str {
@@ -902,69 +810,5 @@ mod tests {
         let refused = judge(message, &turn).unwrap_err();
         assert_eq!(refused.code, ReasonCode::MessageInvalid);
         assert_eq!(error_of(&refused), "nul_character");
-    }
-
-    #[test]
-    fn a_v1_message_meets_the_0_4_judgement_of_its_block_ids_before_it_is_converted() {
-        let block = |id: Uuid| -> v1::Block {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "kind": "TEXT", "content": { "type": "text", "text": "hi" }
-            }))
-            .unwrap()
-        };
-        let id = v7();
-        let user = |blocks: Vec<v1::Block>| {
-            v1::NewMessage::User(v1::UserMessage {
-                author_user_id: v7(),
-                blocks,
-            })
-        };
-        let refused =
-            judge_content(v7(), &StoreBody::V1(&user(vec![block(id), block(id)]))).unwrap_err();
-        assert_eq!(refused.code, ReasonCode::KeyReused);
-        assert_eq!(refused.params["block_id"], serde_json::json!(id));
-        let refused =
-            judge_content(v7(), &StoreBody::V1(&user(vec![block(Uuid::new_v4())]))).unwrap_err();
-        assert_eq!(refused.code, ReasonCode::IdNotUuidV7);
-        let ai = v1::NewMessage::Ai(v1::AiMessage {
-            author: v1::AiAuthor {
-                id: v7().to_string(),
-                name: "Analyst".into(),
-            },
-            delivery: v1::AiDelivery::Completed {
-                items: vec![v1::Item::Step(v1::StepItem {
-                    stop_reason: serde_json::json!({ "type": "end_turn" }),
-                    usage: None,
-                    model: None,
-                    blocks: vec![block(Uuid::new_v4())],
-                })],
-            },
-        });
-        assert_eq!(
-            judge_content(v7(), &StoreBody::V1(&ai)).unwrap_err().code,
-            ReasonCode::IdNotUuidV7
-        );
-    }
-
-    #[test]
-    fn a_v1_streaming_opening_is_invalid_and_a_v1_ai_author_must_be_a_uuidv7() {
-        let streaming = v1::NewMessage::Ai(v1::AiMessage {
-            author: v1::AiAuthor {
-                id: v7().to_string(),
-                name: "Analyst".into(),
-            },
-            delivery: v1::AiDelivery::Streaming,
-        });
-        let refused = judge_content(v7(), &StoreBody::V1(&streaming)).unwrap_err();
-        assert_eq!(error_of(&refused), "streaming_v1");
-        let free_text = v1::NewMessage::Ai(v1::AiMessage {
-            author: v1::AiAuthor {
-                id: "a1".into(),
-                name: "Analyst".into(),
-            },
-            delivery: v1::AiDelivery::Completed { items: Vec::new() },
-        });
-        let refused = judge_content(v7(), &StoreBody::V1(&free_text)).unwrap_err();
-        assert_eq!(refused.code, ReasonCode::MessageInvalid);
     }
 }

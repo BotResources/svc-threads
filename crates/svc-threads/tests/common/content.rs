@@ -243,9 +243,15 @@ pub fn reply(text: &str) -> Vec<TurnEntry> {
 
 /// An agent's mail, sent by `from` from conversation `source`.
 pub fn mail(from: &Agent, source: Uuid, content: Vec<PlainBlock>) -> TurnEntry {
+    mail_as(Uuid::now_v7(), from, source, content)
+}
+
+/// An agent's mail under the entry id `mail`: the mail's own id, by which a
+/// runner finds it again.
+pub fn mail_as(mail: Uuid, from: &Agent, source: Uuid, content: Vec<PlainBlock>) -> TurnEntry {
     TurnEntry::from(
         AgentMail::new(
-            entry_id(),
+            EntryId::from_uuid(mail).expect("a mail id is a UUIDv7"),
             from.id,
             from.author(),
             conversation_id(source),

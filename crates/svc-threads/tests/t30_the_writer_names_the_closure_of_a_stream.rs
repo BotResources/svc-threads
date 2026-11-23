@@ -34,8 +34,8 @@ struct Streaming {
     seal: StreamSeal,
 }
 
-async fn streaming(ctx: &TestContext, thread: Uuid, parent: Uuid, shape: Shape) -> Streaming {
-    let message = open_stream(ctx, thread, Some(parent), ai("a1", "Analyst")).await;
+async fn streaming(ctx: &TestContext, thread: Uuid, shape: Shape) -> Streaming {
+    let message = open_stream(ctx, thread, ai("a1", "Analyst")).await;
     let mut response = Streamed::start(message, None);
     match shape {
         Shape::Producing => {
@@ -165,10 +165,10 @@ async fn t30_budget_exhausted_completes_a_turn_with_a_producing_response_or_an_o
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
 
     for shape in [Shape::Producing, Shape::Calling] {
-        let s = streaming(&ctx, t, m1, shape).await;
+        let s = streaming(&ctx, t, shape).await;
         let sent = complete_v2(&ctx, t, &s, naming(&budget())).await;
         message_confirmed(&ctx, sent, MessageStatus::Completed, "budget exhausted").await;
         ended_as(
@@ -183,7 +183,7 @@ async fn t30_budget_exhausted_completes_a_turn_with_a_producing_response_or_an_o
         .await;
     }
 
-    let s = streaming(&ctx, t, m1, Shape::Calling).await;
+    let s = streaming(&ctx, t, Shape::Calling).await;
     let sent = fail_v2(&ctx, t, &s, naming(&budget())).await;
     message_confirmed(
         &ctx,
@@ -212,11 +212,11 @@ async fn t30_completed_still_needs_a_whole_turn_named_or_not() {
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
 
     for shape in [Shape::Producing, Shape::Calling] {
         for closure in [None, naming(&ClosureReason::completed())] {
-            let s = streaming(&ctx, t, m1, shape).await;
+            let s = streaming(&ctx, t, shape).await;
             let sent = complete_v2(&ctx, t, &s, closure).await;
             message_confirmed(
                 &ctx,
@@ -239,7 +239,7 @@ async fn t30_completed_still_needs_a_whole_turn_named_or_not() {
     }
 
     for named_completed in [false, true] {
-        let s = streaming(&ctx, t, m1, Shape::Whole).await;
+        let s = streaming(&ctx, t, Shape::Whole).await;
         let closure = named_completed
             .then(|| naming(&named(ClosureReason::completed())))
             .flatten();
@@ -273,7 +273,7 @@ async fn t30_the_status_follows_the_reason_a_failure_names() {
     let ctx = TestContext::setup().await;
     let (a, b) = (ctx.enrol("ada").await, ctx.enrol("bob").await);
     let t = create_thread(&ctx, Some(&a), &[&b]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
     let mut b_feed = Live::thread(&ctx, &b.passport, t).await;
 
     let cases = [
@@ -303,7 +303,7 @@ async fn t30_the_status_follows_the_reason_a_failure_names() {
         ),
     ];
     for (closure, status, kind, detail) in cases {
-        let s = streaming(&ctx, t, m1, Shape::Producing).await;
+        let s = streaming(&ctx, t, Shape::Producing).await;
         let sent = fail_v2(&ctx, t, &s, closure).await;
         message_confirmed(&ctx, sent, status, kind).await;
         ended_as(&ctx, &a, t, s.message, status, kind, detail).await;
@@ -329,8 +329,8 @@ async fn t30_a_closure_the_library_cannot_read_is_refused_and_the_message_stays_
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
-    let s = streaming(&ctx, t, m1, Shape::Producing).await;
+    say(&ctx, t, &a, "Go on").await;
+    let s = streaming(&ctx, t, Shape::Producing).await;
     let before = facts::of(&ctx.pool, "message", s.message).await.len();
 
     for unreadable in [json!({ "type": "failed" }), json!({ "type": "sleeping" })] {
@@ -383,9 +383,9 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Go on").await;
+    say(&ctx, t, &a, "Go on").await;
 
-    let message = open_stream(&ctx, t, Some(m1), ai("a1", "Analyst")).await;
+    let message = open_stream(&ctx, t, ai("a1", "Analyst")).await;
     let mut response = Streamed::start(message, None);
     response.text(&["fine"], true);
     let mut chunks = response.chunks();
@@ -410,7 +410,7 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
     .await;
     ended_as(&ctx, &a, t, message, MessageStatus::Failed, "failed", None).await;
 
-    let s = streaming(&ctx, t, m1, Shape::Calling).await;
+    let s = streaming(&ctx, t, Shape::Calling).await;
     let sent = command(
         &ctx,
         &completion(t, s.message, s.seal.last_seq, &s.seal.hash),
@@ -434,7 +434,7 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
     )
     .await;
 
-    let s = streaming(&ctx, t, m1, Shape::Producing).await;
+    let s = streaming(&ctx, t, Shape::Producing).await;
     let sent = command(
         &ctx,
         &FailMessage {
@@ -462,13 +462,8 @@ async fn t30_a_stream_the_library_refused_fails_whatever_reason_is_named_and_v1_
 
 const NOTE: &str = "careful";
 
-async fn push_unready(
-    ctx: &TestContext,
-    thread: Uuid,
-    parent: Uuid,
-    unready: Uuid,
-) -> (Uuid, StreamSeal) {
-    let message = open_stream(ctx, thread, Some(parent), ai("a1", "Analyst")).await;
+async fn push_unready(ctx: &TestContext, thread: Uuid, unready: Uuid) -> (Uuid, StreamSeal) {
+    let message = open_stream(ctx, thread, ai("a1", "Analyst")).await;
     let mut answer = Streamed::start(message, None);
     answer.text(&["the report follows"], true);
     answer.complete(ResponseEnding::finished());
@@ -479,13 +474,13 @@ async fn push_unready(
     (message, StreamSeal { last_seq, hash })
 }
 
-async fn waiting(ctx: &TestContext, thread: Uuid, parent: Uuid, unready: Uuid) -> Streaming {
-    let (message, seal) = push_unready(ctx, thread, parent, unready).await;
+async fn waiting(ctx: &TestContext, thread: Uuid, unready: Uuid) -> Streaming {
+    let (message, seal) = push_unready(ctx, thread, unready).await;
     Streaming { message, seal }
 }
 
-async fn abandoned(ctx: &TestContext, thread: Uuid, parent: Uuid, unready: Uuid) -> Uuid {
-    push_unready(ctx, thread, parent, unready).await.0
+async fn abandoned(ctx: &TestContext, thread: Uuid, unready: Uuid) -> Uuid {
+    push_unready(ctx, thread, unready).await.0
 }
 
 async fn message_ledger(ctx: &TestContext, message: Uuid) -> Vec<(i64, String)> {
@@ -540,12 +535,12 @@ async fn t30_a_closing_that_gives_completed_is_refused_while_the_artifact_is_not
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    say(&ctx, t, &a, "Send me the report").await;
     let runner = ctx.service_account(true);
     let file = File::csv("quarter,revenue\nQ3,42\n");
     let z = Uuid::now_v7();
     let access = request_upload(&ctx, &runner.passport, t, z, &file).await;
-    let s = waiting(&ctx, t, m1, z).await;
+    let s = waiting(&ctx, t, z).await;
     holds_both_annotations(&ctx, &a, t, s.message).await;
     let facts_before = message_ledger(&ctx, s.message).await;
     let mut a_feed = Live::thread(&ctx, &a.passport, t).await;
@@ -618,12 +613,12 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     let ctx = TestContext::setup().await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    say(&ctx, t, &a, "Send me the report").await;
     let runner = ctx.service_account(true);
     let z = Uuid::now_v7();
     request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
 
-    let fail_v1 = waiting(&ctx, t, m1, z).await;
+    let fail_v1 = waiting(&ctx, t, z).await;
     holds_both_annotations(&ctx, &a, t, fail_v1.message).await;
     let sent = command(
         &ctx,
@@ -637,7 +632,7 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     .await;
     message_confirmed(&ctx, sent, MessageStatus::Failed, "fail").await;
 
-    let fail_v2 = waiting(&ctx, t, m1, z).await;
+    let fail_v2 = waiting(&ctx, t, z).await;
     holds_both_annotations(&ctx, &a, t, fail_v2.message).await;
     let sent = command(
         &ctx,
@@ -652,7 +647,7 @@ async fn t30_a_fail_or_a_cancel_drops_the_annotation_of_an_artifact_not_ready_an
     .await;
     message_confirmed(&ctx, sent, MessageStatus::Failed, "fail naming interrupted").await;
 
-    let cancel = waiting(&ctx, t, m1, z).await;
+    let cancel = waiting(&ctx, t, z).await;
     holds_both_annotations(&ctx, &a, t, cancel.message).await;
     let sent = command(
         &ctx,
@@ -685,11 +680,11 @@ async fn t30_a_silence_drops_the_annotation_of_an_artifact_not_ready_and_keeps_t
     .await;
     let a = ctx.enrol("ada").await;
     let t = create_thread(&ctx, Some(&a), &[]).await;
-    let m1 = say(&ctx, t, None, &a, "Send me the report").await;
+    say(&ctx, t, &a, "Send me the report").await;
     let runner = ctx.service_account(true);
     let z = Uuid::now_v7();
     request_upload(&ctx, &runner.passport, t, z, &File::csv("pending\n")).await;
-    let message = abandoned(&ctx, t, m1, z).await;
+    let message = abandoned(&ctx, t, z).await;
     holds_both_annotations(&ctx, &a, t, message).await;
 
     tokio::time::sleep(SHORT_STREAM_IDLE * 2).await;

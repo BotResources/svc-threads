@@ -37,11 +37,15 @@ member's read mark — and serves them, live, to their members.
   without asking it, and the resources of each thread
   (`threads.resources.{thread_id}`: every key with its ids), so that the
   service owning a key knows which threads reference its objects.
+- A thread's messages form one list, in the order they were stored
+  (`created_at`, then id). A message names no other message. A command
+  erases the end of the list (`message.erase`), for an edit, a regeneration or
+  a deletion in a conversation.
 - Threads runs no AI logic. A conversation's title is set by command
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.11.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.12.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -78,6 +82,89 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
 
+## Deploy: 0.11 → 0.12
+
+0.12 drops the message tree: a thread's messages form one list. Nothing of it
+is additive.
+
+- **Senders move with Threads.** `message.store` v3 replaces v1 and v2, which
+  named a parent. Threads answers both with `message.refused`
+  `COMMAND_VERSION_RETIRED` and stores nothing. Every service that stores
+  messages (the agents service, the runners) is upgraded to v3
+  (`contract-threads` 0.10.0) in the same rollout.
+- **Clients move with Threads.** `MessageView.parentMessageId` is gone, and
+  `branchTip` is gone from `threadsMessages`, `threadsThreadDeltas` and
+  `threadsContext`. A query that still names them fails GraphQL validation.
+  A runner reads the conversation up to a message with
+  `threadsContext(threadId, agentId, upTo)`.
+- **Migration `9800000008` removes messages.** A thread that held branches
+  keeps its active branch (the chain of parents ending at its most recent
+  message). For each message of that branch, it also keeps the latest answer
+  to it of each agent whose answer is not on the branch. Every other message
+  goes, with its content, read marks and artifacts. A thread whose messages
+  hang from more than one root keeps only the root of its most recent message.
+  - Each removed artifact ends its facts on `Removed` (reason
+    `PRUNED_AT_UPGRADE`).
+  - The ids the removed messages held stay reserved in their thread
+    (`threads.erased_identity`, as for an erased message).
+  - The chunks the engine's accumulator still held for a removed `STREAMING`
+    message are deleted. A chunk its writer pushes after the upgrade is kept by
+    the engine until its seal retention (24 h by default) sweeps it, and is
+    shown nowhere.
+  - The column `parent_message_id`, its key and its index go.
+  - One transaction, under the migrator's lock: all or nothing.
+  - The removed artifacts' bytes are purged once 0.12 serves (`released_bytes`
+    cron, a queue in `threads.released_blob`).
+  - The facts already recorded are left as they are.
+- **The list is ordered by date.** A kept message dated before a kept message
+  it answered moves before it in the list. From 0.12 on, a message is always
+  dated after the latest message of its thread.
+- **Count what goes before the rollout**, read-only, on the 0.11 database:
+  the messages removed, the user messages among them, the threads touched,
+  and the kept messages dated before a kept message they answered:
+
+  ```sql
+  WITH RECURSIVE tip AS (
+      SELECT DISTINCT ON (thread_id) id FROM threads.message
+      ORDER BY thread_id, created_at DESC, id DESC
+  ), branch AS (
+      SELECT m.id, m.parent_message_id FROM threads.message m JOIN tip USING (id)
+      UNION ALL
+      SELECT p.id, p.parent_message_id FROM threads.message p
+      JOIN branch b ON p.id = b.parent_message_id
+  ), answer AS (
+      SELECT id, parent_message_id, created_at,
+             COALESCE(author_agent_id::text, author_ai_id) AS agent
+      FROM threads.message
+      WHERE parent_message_id IS NOT NULL
+        AND (author_agent_id IS NOT NULL OR author_ai_id IS NOT NULL)
+  ), kept AS (
+      SELECT id FROM branch
+      UNION
+      (SELECT DISTINCT ON (a.parent_message_id, a.agent) a.id
+       FROM answer a JOIN branch b ON b.id = a.parent_message_id
+       WHERE NOT EXISTS (SELECT 1 FROM answer o JOIN branch ob ON ob.id = o.id
+                         WHERE o.parent_message_id = a.parent_message_id
+                           AND o.agent = a.agent)
+       ORDER BY a.parent_message_id, a.agent, a.created_at DESC, a.id DESC)
+  ), removed AS (
+      SELECT m.* FROM threads.message m
+      WHERE NOT EXISTS (SELECT 1 FROM kept k WHERE k.id = m.id)
+  )
+  SELECT 'messages removed' AS what, count(*) FROM removed
+  UNION ALL
+  SELECT 'user messages removed', count(*) FROM removed WHERE author_user_id IS NOT NULL
+  UNION ALL
+  SELECT 'threads touched', count(DISTINCT thread_id) FROM removed
+  UNION ALL
+  SELECT 'kept before a kept message they answered', count(*)
+  FROM threads.message c JOIN threads.message p ON p.id = c.parent_message_id
+  WHERE c.id IN (SELECT id FROM kept) AND p.id IN (SELECT id FROM kept)
+    AND (c.created_at, c.id) < (p.created_at, p.id);
+  ```
+
+- **Take a database backup** right before `migrate`: it is the only way back.
+
 ## Deploy: 0.10 → 0.11
 
 0.11 publishes one more KV family, `threads.resources.*`, and its manifest
@@ -89,8 +176,8 @@ before it, the family is empty.
 
 ## Deploy: 0.9 → 0.10
 
-`threadsContext` takes an optional `branchTip`: the context of the branch
-ending at that message instead of the active branch. Nothing is migrated; a
+`threadsContext` takes an optional `branchTip` (removed in 0.12): the context
+of the branch ending at that message instead of the active branch. Nothing is migrated; a
 read without it is unchanged, so runners and Threads roll out in any order (a
 runner naming a tip needs this release).
 
