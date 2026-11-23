@@ -2,9 +2,9 @@
 //! holding `threads:runner`, for any thread.
 //!
 //! - `context`: a thread's context — the agent context of the agent a runner
-//!   names (the library's projected thread), or the whole branch as a
-//!   `br-llm-messages/5` conversation — the active branch, or the one ending at
-//!   the message the runner names; plus its members, its resources and the
+//!   names (the library's projected thread), or the whole conversation as a
+//!   `br-llm-messages/5` conversation — the thread's whole list, or the list up
+//!   to the message the runner names; plus its members, its resources and the
 //!   attached artifacts of the conversation's messages (read, and signed on
 //!   demand, by the artifact capability: `artifact::context`);
 //! - `graphql`: the roots — `threadsContext`, and `threadsSetTitle`, whose

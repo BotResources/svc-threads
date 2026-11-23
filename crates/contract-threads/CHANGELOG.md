@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD tags a version only once its heading
 exists.
 
+## 0.12.0 - 2026-11-23
+
+The published language of Threads 0.12 (registry patch 0.12.0): a thread's
+messages form one list, in the order they were stored. A message names no
+other message. The version follows the service's (0.9.0 to 0.12.0): no
+0.10 or 0.11 of this crate exists.
+
+### Added
+
+- `StoreMessageV3` (`integration.cmd.threads.message.store.v3`,
+  `command_type` `message.store`): `{ message_id, thread_id, job_id?,
+  acting_user_id?, impersonator_id?, message: MessageTurn }`, the v2 form
+  without `parent_message_id`. A `parent_message_id` a sender still writes is
+  not read.
+- `EraseMessages` (`integration.cmd.threads.message.erase.v1`,
+  `command_type` `message.erase`): `{ thread_id, message_id, including,
+  acting_user_id? }`. It erases every message stored after `message_id`, and
+  `message_id` itself when `including` is set. It is answered by
+  `message.confirmed` / `message.refused` like every message command.
+- `ReasonCode::CommandVersionRetired` (`COMMAND_VERSION_RETIRED`): the answer
+  to `message.store` v1 and v2.
+- `RETIRED_STORE_VERSIONS` (`[1, 2]`): the `message.store` versions Threads
+  answers `COMMAND_VERSION_RETIRED`.
+
+### Removed
+
+- `StoreMessageV2` and `parent_message_id`: `message.store` v2 is retired.
+  A consumer still on it keeps sending it from an earlier tag of this crate
+  and receives `COMMAND_VERSION_RETIRED`.
+- `v1::StoreMessage` and its message forms (`v1::NewMessage`,
+  `v1::UserMessage`, `v1::AiMessage`, `v1::AiAuthor`, `v1::AiDelivery`):
+  `message.store` v1 is retired. The 0.4 content forms (`v1::Block`,
+  `v1::BlockBody`, `v1::Item`, `v1::StepItem`, `v1::ToolResultsItem`,
+  `v1::Citation`, `v1::BlockKind`) stay. The `blocks` of a `message.edit` in
+  the 0.4 form and the upgrade of what Threads 0.4 stored still read them.
+- `MessageInvalidError::ParentNotInThread` (`parent_not_in_thread`) and
+  `MessageInvalidError::StreamingV1` (`streaming_v1`): no message names a
+  parent, and no v1 store is judged.
+
+### Unchanged
+
+- Every other command, the four answer events, the chunk format, and the
+  members, summary and resources KV values with their manifests.
+
 ## 0.9.0 - 2026-11-18
 
 The published language of Threads 0.11: the resources of each thread, a new

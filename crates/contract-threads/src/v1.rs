@@ -1,95 +1,17 @@
-//! The 0.4 forms of a message's content, still accepted while they are
-//! deprecated: `message.store` v1 (`integration.cmd.threads.message.store.v1`)
-//! and the `blocks` of a `message.edit`. Threads converts them to the
-//! library's 2.0 model when they arrive (`StoreMessageV2` is the form to send).
+//! The 0.4 form of a message's content, still read in two places: the `blocks`
+//! of a `message.edit` in the 0.4 form (deprecated, converted when it
+//! arrives), and the rows the upgrade converts from what Threads 0.4 stored.
+//! `message.store` v1, which carried a whole message in this form, is retired:
+//! Threads answers it `COMMAND_VERSION_RETIRED`.
 //!
 //! The library of 0.4 (`br-llm-messages/3`) is gone: its blocks, stop reasons
 //! and usages travel here as the raw JSON 0.4 wrote, read by Threads' conversion.
-//! A `STREAMING` opening by v1 is refused `MESSAGE_INVALID`: the chunks of a
-//! 0.4 writer are no longer the message stream's.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::annotation::{ArtifactRef, JobRef, Notice, ThreadRef};
-use crate::coords::{MESSAGE_AGGREGATE, ThreadsCommand};
 use crate::wire::wire_enum;
-
-/// `message.store` v1 — deprecated: a message in the 0.4 decomposition, which
-/// Threads converts to the library's 2.0 model, answered on the same events as
-/// [`crate::StoreMessageV2`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StoreMessage {
-    pub message_id: Uuid,
-    pub thread_id: Uuid,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_message_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acting_user_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impersonator_id: Option<Uuid>,
-    pub message: NewMessage,
-}
-
-impl ThreadsCommand for StoreMessage {
-    const AGGREGATE: &'static str = MESSAGE_AGGREGATE;
-    const VERB: &'static str = "store";
-
-    fn thread_id(&self) -> Uuid {
-        self.thread_id
-    }
-
-    fn acting_user_id(&self) -> Option<Uuid> {
-        self.acting_user_id
-    }
-}
-
-/// The message itself: by a user, or by an AI.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum NewMessage {
-    #[serde(rename = "USER")]
-    User(UserMessage),
-    #[serde(rename = "AI")]
-    Ai(AiMessage),
-}
-
-/// A user input, holding its blocks directly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UserMessage {
-    pub author_user_id: Uuid,
-    pub blocks: Vec<Block>,
-}
-
-/// A turn of an AI.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AiMessage {
-    pub author: AiAuthor,
-    #[serde(flatten)]
-    pub delivery: AiDelivery,
-}
-
-/// The AI that wrote a message. In the 2.0 model its id is the library's agent
-/// id: a v1 author whose id is not a UUIDv7 is refused `ID_NOT_UUIDV7`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AiAuthor {
-    pub id: String,
-    pub name: String,
-}
-
-/// How an AI message arrives.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status")]
-pub enum AiDelivery {
-    #[serde(rename = "COMPLETED")]
-    Completed { items: Vec<Item> },
-    /// Refused `MESSAGE_INVALID` (`streaming_v1`): stream with
-    /// `message.store` v2.
-    #[serde(rename = "STREAMING")]
-    Streaming,
-}
 
 /// One item of an AI message: a step or a tool results item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -260,47 +182,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_v1_store_still_decodes_as_0_4_sent_it() {
-        let (message_id, thread_id, author, block) = (
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-        );
-        let wire = json!({
-            "message_id": message_id,
-            "thread_id": thread_id,
-            "message": {
-                "kind": "USER",
-                "author_user_id": author,
-                "blocks": [{ "id": block, "kind": "TEXT", "content": { "type": "text", "text": "hi" } }]
-            }
+    fn a_0_4_block_and_item_still_decode_as_0_4_wrote_them() {
+        let block = json!({ "id": Uuid::now_v7(), "kind": "TEXT", "content": { "type": "text", "text": "hi" } });
+        let parsed: Block = serde_json::from_value(block.clone()).unwrap();
+        assert_eq!(parsed.body, BlockBody::text("hi"));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), block);
+        let item = json!({
+            "kind": "STEP",
+            "stop_reason": { "type": "end_turn" },
+            "usage": { "input_tokens": 3, "output_tokens": 5 },
+            "blocks": [block]
         });
-        let store: StoreMessage = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&store).unwrap(), wire);
-        let NewMessage::User(user) = &store.message else {
-            panic!("a user message");
-        };
-        assert_eq!(user.blocks[0].body, BlockBody::text("hi"));
-        assert_eq!(StoreMessage::coords().version, 1);
-        assert_eq!(StoreMessage::command_type(), "message.store");
-    }
-
-    #[test]
-    fn a_v1_ai_message_keeps_its_items_as_0_4_wrote_them() {
-        let wire = json!({
-            "kind": "AI",
-            "author": { "id": "a1", "name": "Analyst" },
-            "status": "COMPLETED",
-            "items": [{
-                "kind": "STEP",
-                "stop_reason": { "type": "end_turn" },
-                "usage": { "input_tokens": 3, "output_tokens": 5 },
-                "blocks": [{ "id": Uuid::now_v7(), "kind": "TEXT", "content": { "type": "text", "text": "done" } }]
-            }]
-        });
-        let message: NewMessage = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&message).unwrap(), wire);
+        let parsed: Item = serde_json::from_value(item.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), item);
     }
 
     #[test]

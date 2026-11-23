@@ -6,11 +6,13 @@
 //! - `store`: its row, soft EDA; it lists its blob reference, so deleting it
 //!   releases its bytes;
 //! - `lifecycle`: the upload request, attaching (by a message naming it), the
-//!   end of the upload window, removal with a message or a thread, and the
-//!   purge of the bytes once a removal committed;
+//!   end of the upload window, removal with a message (deleted or erased) or a
+//!   thread, and the purge of the bytes once a removal committed;
 //! - `view`: the download's two gates — a member of its thread, or a runner for
 //!   an attached artifact of any thread;
 //! - `read_access`: the time-bounded read access both sign through;
+//! - `release`: the purge of the bytes of the artifacts a migration removed,
+//!   queued by it in `threads.released_blob`;
 //! - `context`: what a runner receives of artifacts with a thread's context;
 //! - `label`: what a member reads of an artifact beside the `ARTIFACT`
 //!   annotation naming it (name, media type, size), joined at read time;
@@ -32,6 +34,7 @@ pub mod graphql;
 pub mod label;
 pub mod lifecycle;
 pub mod read_access;
+pub mod release;
 pub mod state;
 pub mod store;
 pub mod view;
@@ -42,7 +45,7 @@ use service_engine::{BlobPolicy, Blobs, Engine};
 
 use crate::principal::ThreadsPrincipal;
 
-pub use lifecycle::{delete_all_of_message, delete_all_of_thread};
+pub use lifecycle::{delete_all_of_erased, delete_all_of_message, delete_all_of_thread};
 
 /// The largest artifact Threads stores. The specification names no bound; this
 /// one is to ratify.
@@ -76,6 +79,7 @@ pub fn register(engine: &mut Engine<ThreadsPrincipal>) -> Result<(), EngineError
         lifecycle::upload_window_ended,
     )?;
     engine.register_reaction("threads-artifact-bytes-released", lifecycle::bytes_released)?;
+    engine.register_cron(release::ReleasedBytes)?;
     engine.register_schema_slice(SliceFragment::derive::<
         graphql::ArtifactQuery,
         graphql::ArtifactMutation,

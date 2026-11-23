@@ -88,6 +88,7 @@ literal_enum! {
         ReadMarkSet => "READ_MARK_SET",
         MessageStored => "MESSAGE_STORED",
         MessageClosed => "MESSAGE_CLOSED",
+        MessagesErased => "MESSAGES_ERASED",
     }
 }
 

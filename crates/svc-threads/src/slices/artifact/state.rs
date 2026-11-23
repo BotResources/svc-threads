@@ -120,6 +120,8 @@ literal_enum! {
         NeverAttached => "NEVER_ATTACHED",
         /// Its message was deleted.
         MessageDeleted => "MESSAGE_DELETED",
+        /// Its message was erased with the end of its thread.
+        MessageErased => "MESSAGE_ERASED",
     }
 }
 
