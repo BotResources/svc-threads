@@ -153,11 +153,19 @@ DELETE FROM threads.artifact a USING pruned_artifact p WHERE a.id = p.id;
 -- The chunks the engine's accumulator still holds for a removed message (only
 -- a `STREAMING` one has any: a closed stream's chunks went with its seal),
 -- under the stream's key, the message id as JSON. The same rows the engine's
--- seal deletes; no pod serves while `migrate` runs.
-DELETE FROM service_engine.accumulator_chunk c
-USING pruned_message p
-WHERE c.accumulator IN ('turn_content', 'message_content')
-  AND c.key = to_jsonb(p.id::text);
+-- seal deletes; no pod serves while `migrate` runs. The engine creates its
+-- own schema: a database that only ever received these migrations (the one
+-- the schema document is drawn from) has no such table and no chunk to drop.
+DO $$
+BEGIN
+    IF to_regclass('service_engine.accumulator_chunk') IS NOT NULL THEN
+        DELETE FROM service_engine.accumulator_chunk c
+        USING pruned_message p
+        WHERE c.accumulator IN ('turn_content', 'message_content')
+          AND c.key = to_jsonb(p.id::text);
+    END IF;
+END
+$$;
 
 -- Before the removed messages: one may still be the parent of another.
 ALTER TABLE threads.message DROP CONSTRAINT message_parent_fkey;

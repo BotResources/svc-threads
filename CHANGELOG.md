@@ -14,9 +14,12 @@ heading exists.
 Threads 0.12 (registry patch 0.12.0): a thread's messages form one list, in the
 order they were stored (`created_at`, then id). A message names no other
 message, so a thread has no branch. A new command erases the end of a thread.
-`contract-threads` 0.12.0 carries the new commands (see its changelog).
+`contract-threads` 0.10.0 carries the new commands (see its changelog).
 Breaking: senders, clients and runners move with Threads (README, *Deploy:
 0.11 → 0.12*).
+
+The list migration (`9800000008`) also runs on a database that holds no
+engine schema, such as the one the registry's schema document is drawn from.
 
 ### Added
 
