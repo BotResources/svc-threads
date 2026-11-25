@@ -15,6 +15,11 @@
 //!   that held branches when they upgrade to the list, and the
 //!   `message.store` v2 a consumer still on it sends, now retired (T40). Taken
 //!   from `THREADS_BRANCHES_RELEASE_BIN`, or built once.
+//! - `svc-threads` 0.12.0, the last release whose user messages carry no
+//!   observed time, the one a deployment upgrades from to this version: it
+//!   stores the user messages to which the upgrade then gives the time they
+//!   were stored (T41). Its commands and reads are this version's. Taken from
+//!   `THREADS_UNTIMED_RELEASE_BIN`, or built once.
 //!
 //! A release's binary is built once from its tag (`cargo install --git`, the
 //! repository of this crate).
@@ -43,14 +48,17 @@ use super::{PUSH_TIMEOUT, TestContext, gql};
 /// The tag of the release the upgrade starts from.
 pub const PREVIOUS_RELEASE_TAG: &str = "svc-threads/v0.4.0";
 
-/// The tag of the last release before this version: the one a deployment runs
-/// when it upgrades to this one (T38, the threads it stored before the
-/// resources were published).
+/// The tag of the last release before the resources were published: the
+/// threads it stored get their entry at the upgrade (T38).
 pub const LAST_RELEASE_TAG: &str = "svc-threads/v0.10.1";
 
 /// The tag of the last release with branches: the one whose threads upgrade
 /// to the list (T40).
 pub const BRANCHES_RELEASE_TAG: &str = "svc-threads/v0.11.0";
+
+/// The tag of the last release whose user messages carry no observed time:
+/// the one a deployment runs when it upgrades to this version (T41).
+pub const UNTIMED_RELEASE_TAG: &str = "svc-threads/v0.12.0";
 
 /// The binary of the previous release.
 pub fn binary() -> PathBuf {
@@ -91,6 +99,21 @@ pub fn branches_release_binary() -> PathBuf {
                 BRANCHES_RELEASE_TAG,
                 "svc-threads-0.11.0",
                 "THREADS_BRANCHES_RELEASE_BIN",
+            )
+        })
+        .clone()
+}
+
+/// The binary of the last release whose user messages carry no observed
+/// time, built once from its tag, or taken from `THREADS_UNTIMED_RELEASE_BIN`.
+pub fn untimed_release_binary() -> PathBuf {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            release_binary(
+                UNTIMED_RELEASE_TAG,
+                "svc-threads-0.12.0",
+                "THREADS_UNTIMED_RELEASE_BIN",
             )
         })
         .clone()

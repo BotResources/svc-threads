@@ -213,6 +213,41 @@ in that output.
   Threads commanded meanwhile (T27 proves it nothing, from before an untitled
   thread's first message).
 
+## 0.13.0 additions — the time a user message's turn carries
+
+No command, query or published language changes. A runner's context gives a
+user message's input turn the library's observed time: the time Threads stored
+the message, its `created_at` (T41).
+
+- **The oracle's reading of the time.** `content::created_at(view)` reads a
+  message's `createdAt` as a member reads it, an instant;
+  `content::instant_of(observed)` reads an observed time as one. The two are
+  compared as instants, to the microsecond, never as text: GraphQL writes
+  `createdAt` with as many fraction digits as it needs, and the intent fixes
+  the instant, not how the observed time is written.
+- **The runner's context, read for the time.** `content::turns_of`,
+  `turn_in` and `raw_turn` read a context's turns, whole or as an agent
+  context, loaded by the library and raw. `content::carries_its_created_at`
+  checks a user message's input turn carries its `createdAt` as an instant,
+  in the library and in the raw JSON, and answers the time as written;
+  `carries_no_time` checks a turn carries none; `carries_the_writers_time`
+  checks it carries exactly the time its writer gave.
+- **The library oracle of a user turn.** The library compares an observed time
+  as written. T11 and T31 therefore take the time the context shows, check it
+  with `carries_its_created_at`, and give that value to the turn they expect
+  (`content::observed_as`).
+- **The 0.4 conversion (T26).** After the upgrade from 0.4.0, the user
+  messages M1 and M5 (edited on 0.4) carry their `createdAt` in the runner's
+  context, and the AI messages M2, M3 and M6 carry none. T40 compares turn ids
+  only and is unchanged.
+- **The upgrade (T41).** `svc-threads` 0.12.0, the last release whose user
+  messages carry no observed time and the one a deployment upgrades from, is
+  built once from its tag (`previous::untimed_release_binary`,
+  `TestContext::setup_untimed_release`; `THREADS_UNTIMED_RELEASE_BIN` skips
+  the build). Its commands and reads are this version's.
+- **Scenario.** T41 (`t41_a_user_messages_turn_carries_the_time_threads_stored_it.rs`,
+  two tests: the reads and the edit; the upgrade).
+
 ## 0.12.0 changes — one list
 
 Threads drops the message tree: a thread's messages are one list, ordered by

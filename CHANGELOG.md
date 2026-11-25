@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Release headings are plain `## x.y.z`: CD publishes a version only once its
 heading exists.
 
+## 0.13.0 - 2026-11-25
+
+Threads 0.13 (registry patch 0.13.0): a user message's turn carries, as the
+library's observed time of the turn, the time Threads stored it, its
+`created_at`. A runner reading a thread's context finds that time on each user
+message, the same on every read: a front agent can write each message's time
+next to it without the bytes of earlier messages changing from one reply to the
+next, so the provider's prompt cache holds. No command, query or published
+language changes: `contract-threads` stays 0.10.0.
+
+### Added
+
+- A user message is stored with its turn's `observed_at` set to its
+  `created_at`, written in UTC to the microsecond (`2026-11-25T17:41:43.528123Z`).
+  An edit does not change it. An AI message keeps the time its writer gave its
+  turn, or none: Threads chooses no time for it.
+- Migration `9800000009_user_message_observed_at`: every user message already
+  stored takes its `created_at` as its turn's `observed_at`. A message stored
+  by 0.4 or earlier takes its time from this migration too; its conversion at
+  `serve` keeps it.
+
 ## 0.12.0 - 2026-11-23
 
 Threads 0.12 (registry patch 0.12.0): a thread's messages form one list, in the

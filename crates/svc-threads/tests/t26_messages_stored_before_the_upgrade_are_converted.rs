@@ -65,6 +65,12 @@
 //! `parent_message_id`, a schema change, not a row converted — and no table
 //! the new version adds holds a row of these messages.
 //!
+//! The runner's context also carries 0.13's upgrade: "every user message
+//! already stored takes its `created_at` as the observed time of its turn".
+//! M1 and M5 (edited on 0.4) carry their `createdAt`, compared as an instant
+//! (`content::carries_its_created_at`, as in T41); the AI messages carry no
+//! observed time.
+//!
 //! Channels: the answers (4); the messages, threads, read marks and artifacts
 //! as members read them, before and after (2); the fact log and the store; a
 //! runner's context; the readiness of the upgraded boot and what it says.
@@ -75,7 +81,8 @@ use std::collections::BTreeSet;
 
 use common::artifacts::{File, download_url, fetch, upload};
 use common::content::{
-    closure_kind, complete_entry, entries_of, kinds_of, opaque, text_as, to_json, turn_of,
+    carries_its_created_at, carries_no_time, closure_kind, complete_entry, entries_of, kinds_of,
+    opaque, text_as, to_json, turn_of,
 };
 use common::facts;
 use common::flows::{
@@ -592,8 +599,17 @@ async fn t26_messages_stored_by_the_previous_version_are_converted_once_keeping_
         common::flows::message_ids(&ctx, &o.passport, t).await,
         messages.to_vec()
     );
-    let conversation = conversation_of(&context(&ctx, &runner.passport, t, None).await);
+    let read = context(&ctx, &runner.passport, t, None).await;
+    let conversation = conversation_of(&read);
     assert_eq!(turn_ids(&conversation), vec![m1, m2, m3, m5, m6]);
+    // And (0.13) each user message 0.4 stored carries, as the observed time
+    // of its turn, the time Threads stored it, its createdAt — M5, edited on
+    // 0.4, as M1 — and the AI messages carry none.
+    carries_its_created_at(&read, &v1, "M1, stored by 0.4");
+    carries_its_created_at(&read, &v5, "M5, stored and edited by 0.4");
+    for (message, what) in [(m2, "M2"), (m3, "M3"), (m6, "M6")] {
+        carries_no_time(&read, message, what);
+    }
 
     // And T2 is still resolved; members, resources, read marks and artifacts
     // are unchanged; no fact is added and no version is raised.

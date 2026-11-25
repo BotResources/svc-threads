@@ -28,8 +28,10 @@
 //!
 //! The oracle of each agent context is the library itself, as in T11: the
 //! turns as members read them (`content::turn_of`, the complete entries only),
-//! projected for g by `Perspective::of(g)`; an own turn still `STREAMING`
-//! comes with its complete entries, so no pending response is passed for it.
+//! U1's carrying the time the context shows, checked as an instant against
+//! U1's `createdAt` (`content::carries_its_created_at`, 0.13), projected for g
+//! by `Perspective::of(g)`; an own turn still `STREAMING` comes with its
+//! complete entries, so no pending response is passed for it.
 //! m1 is a mail of another agent, h, received inside g's turn; m2 is the mail
 //! g itself stored, alone in an input turn.
 //!
@@ -44,9 +46,9 @@ mod common;
 use std::time::Duration;
 
 use common::content::{
-    Streamed, after, ai_turn, annotation_chunk, closed, closure_kind, conversation_id, draft_entry,
-    draft_text, entries_of, entry_chunk, input_turn, kinds_of, mail_as, result_of, results, said,
-    text, to_json, turn_of, warning,
+    Streamed, after, ai_turn, annotation_chunk, carries_its_created_at, closed, closure_kind,
+    conversation_id, draft_entry, draft_text, entries_of, entry_chunk, input_turn, kinds_of,
+    mail_as, observed_as, result_of, results, said, text, to_json, turn_of, warning,
 };
 use common::facts;
 use common::flows::{
@@ -91,7 +93,7 @@ async fn t31_a_restarted_runner_closes_its_left_open_turn_finds_its_stored_mail_
     let runner = ctx.service_account(true);
     let nats = ctx.nats.url();
     let u1 = say(&ctx, t, &a, "Review this").await;
-    let u1_turn = turn_of(&message_view(&ctx, &a.passport, t, u1).await);
+    let u1_view = message_view(&ctx, &a.passport, t, u1).await;
 
     // When g's runner opens G1 STREAMING and pushes a response calling c1,
     // c1's result, h's mail m1 under the mail's id, then part of a text
@@ -128,8 +130,14 @@ async fn t31_a_restarted_runner_closes_its_left_open_turn_finds_its_stored_mail_
     let read = context(&ctx, &runner.passport, t, Some(&g)).await;
 
     // Then G1 is there as g's own turn, open, with its response, c1's result
-    // and m1 — the library's agent context for g, value for value.
+    // and m1 — the library's agent context for g, value for value; U1's turn
+    // carries the time Threads stored it, its createdAt (0.13), checked as an
+    // instant and expected of the library as the context wrote it.
     let found = projected_of(&read);
+    let u1_turn = observed_as(
+        turn_of(&u1_view),
+        carries_its_created_at(&read, &u1_view, "U1's turn"),
+    );
     let g1_open = Turn::from(
         AITurn::from_parts(common::content::turn_id(g1), g.id, g.author(), own_entries)
             .expect("an open AI turn the library accepts"),

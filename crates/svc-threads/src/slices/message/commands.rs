@@ -309,6 +309,12 @@ async fn store_message(
     // the command.
     let latest = store::latest_created_at(cx.connection(), thread.id).await?;
     let now = store::list_position(call.meta.occurred_at, latest);
+    // A user message's turn carries the time Threads stored it, its
+    // `created_at`; an AI message keeps the time its writer gave its turn.
+    let observed_at = match judged.author {
+        MessageAuthor::User { .. } => Some(store::observed_at_of(now)?),
+        MessageAuthor::Agent { .. } => judged.observed_at,
+    };
     let status = judged.status;
     let message = transitions::store(
         NewMessage {
@@ -318,7 +324,7 @@ async fn store_message(
             job_id: command.job_id,
             status,
             turn_kind: judged.turn_kind,
-            observed_at: judged.observed_at,
+            observed_at,
             content: judged.content,
             created_at: now,
         },

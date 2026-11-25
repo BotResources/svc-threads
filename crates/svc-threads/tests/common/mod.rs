@@ -210,8 +210,9 @@ impl TestContext {
         Self::boot_on(previous::binary(), Handshake::Accept, Windows::default()).await
     }
 
-    /// The nominal boot of the last release (`svc-threads` 0.10.1): what a
-    /// deployment ran right before upgrading to this version.
+    /// The nominal boot of the last release before the resources were
+    /// published (`svc-threads` 0.10.1): what a deployment ran, and stored its
+    /// threads with, before their resources were published.
     pub async fn setup_last_release() -> Self {
         Self::boot_on(
             previous::last_release_binary(),
@@ -227,6 +228,18 @@ impl TestContext {
     pub async fn setup_branches_release() -> Self {
         Self::boot_on(
             previous::branches_release_binary(),
+            Handshake::Accept,
+            Windows::default(),
+        )
+        .await
+    }
+
+    /// The nominal boot of the last release whose user messages carry no
+    /// observed time (`svc-threads` 0.12.0): what a deployment ran, and stored
+    /// its messages with, right before upgrading to this version.
+    pub async fn setup_untimed_release() -> Self {
+        Self::boot_on(
+            previous::untimed_release_binary(),
             Handshake::Accept,
             Windows::default(),
         )
