@@ -9,12 +9,13 @@
 //! complete entry as the library's entry, a response still produced or
 //! interrupted as the library's draft snapshot.
 
+use chrono::{DateTime, Utc};
 use contract_threads::llm::{
     AITurn, AgentId, AgentMail, AgentRequest, Author, Base64Data, BlockId, BlockStart, Citation,
     CitationId, CitationSource, ClosureReason, ContentBlock, ConversationId, DeltaOp,
     DraftSnapshot, EntryId, Finalization, HumanId, HumanMessage, ImageBlock, ImageSource,
-    IncomingEntry, InputTurn, MediaType, ModelName, ModelResponse, OpaqueJson, PlainBlock,
-    QueuePosition, RedactedThinkingBlock, ReplayFormat, ReplayMaterial, ReplayPayload,
+    IncomingEntry, InputTurn, MediaType, ModelName, ModelResponse, ObservedAt, OpaqueJson,
+    PlainBlock, QueuePosition, RedactedThinkingBlock, ReplayFormat, ReplayMaterial, ReplayPayload,
     RequestAccepted, RequestId, RequestOrigin, ResponseDelta, ResponseDraft, ResponseEnding,
     ResponseMetadata, RuntimeNotice, RuntimeToolCall, RuntimeToolResult, RuntimeToolResults,
     StructuredBlock, TaskCompleted, TaskFailed, TaskId, TaskStarted, TextBlock, ThinkingBlock,
@@ -650,6 +651,129 @@ pub fn turn_of(view: &Value) -> Turn {
         }
         other => panic!("a turn kind, got {other:?}: {view}"),
     }
+}
+
+// ── the time a turn carries (0.13) ──────────────────────────────────────────
+
+/// When Threads stored a message: its `createdAt` as a member reads it, an
+/// instant. GraphQL writes it in RFC 3339 with as many fraction digits as it
+/// needs: it is compared as an instant, never as text.
+pub fn created_at(view: &Value) -> DateTime<Utc> {
+    let written = view["createdAt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a message view with a createdAt: {view}"));
+    DateTime::parse_from_rfc3339(written)
+        .unwrap_or_else(|e| panic!("createdAt is RFC 3339 ({e}): {view}"))
+        .with_timezone(&Utc)
+}
+
+/// An observed time of the library, as an instant.
+pub fn instant_of(observed: &ObservedAt) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(observed.as_str())
+        .unwrap_or_else(|e| panic!("an observed time is RFC 3339 ({e}): {observed:?}"))
+        .with_timezone(&Utc)
+}
+
+/// `turn`, an input turn, carrying `observed` as its observed time: how a
+/// library oracle expects a user message's turn once a runner's context
+/// showed that time ([`carries_its_created_at`]). The time is taken from the
+/// context, checked there as an instant, never rewritten: the library compares
+/// it as written, and the intent fixes the instant, not how it is written.
+pub fn observed_as(turn: Turn, observed: ObservedAt) -> Turn {
+    match turn {
+        Turn::InputTurn(input) => Turn::from(input.with_observed_at(observed)),
+        other => panic!("a user message's turn is an input turn: {other:?}"),
+    }
+}
+
+/// Every turn of a runner's context, loaded by the library: its whole
+/// conversation, or its agent context when it names an agent.
+pub fn turns_of(context: &Value) -> Vec<Turn> {
+    if context["conversation"].is_null() {
+        super::flows::projected_of(context).turns().to_vec()
+    } else {
+        super::flows::conversation_of(context).turns().to_vec()
+    }
+}
+
+/// The turn of message `id` in a runner's context, loaded by the library.
+pub fn turn_in(context: &Value, id: Uuid) -> Turn {
+    turns_of(context)
+        .into_iter()
+        .find(|turn| turn.id().as_uuid() == id)
+        .unwrap_or_else(|| panic!("the turn of {id} is in the context: {context}"))
+}
+
+/// The turn of message `id` in a runner's context, as raw JSON.
+pub fn raw_turn(context: &Value, id: Uuid) -> Value {
+    let form = if context["conversation"].is_null() {
+        "projectedThread"
+    } else {
+        "conversation"
+    };
+    context[form]["turns"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a context holding turns: {context}"))
+        .iter()
+        .find(|turn| turn["id"] == json!(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("the turn of {id} is in the context: {context}"))
+}
+
+/// The user message `view` reads as, in a runner's `context` (0.13): an input
+/// turn whose observed time is its `createdAt`, the same instant to the
+/// microsecond, carried in the raw JSON as the library writes it. Answers that
+/// observed time, as written.
+pub fn carries_its_created_at(context: &Value, view: &Value, what: &str) -> ObservedAt {
+    let id = super::flows::uuid_of(&view["id"]);
+    let turn = turn_in(context, id);
+    assert!(turn.as_input().is_some(), "{what}: an input turn: {turn:?}");
+    let observed = turn.observed_at().cloned().unwrap_or_else(|| {
+        panic!(
+            "{what}: carries an observed time: {}",
+            raw_turn(context, id)
+        )
+    });
+    assert_eq!(
+        instant_of(&observed),
+        created_at(view),
+        "{what}: its observed time {observed:?} is its createdAt {}",
+        view["createdAt"]
+    );
+    assert_eq!(
+        raw_turn(context, id)["observed_at"],
+        json!(observed.as_str()),
+        "{what}: the raw turn carries it"
+    );
+    observed
+}
+
+/// Message `id` reads, in a runner's `context`, as a turn carrying no
+/// observed time: none loaded by the library, no `observed_at` in the raw
+/// JSON.
+pub fn carries_no_time(context: &Value, id: Uuid, what: &str) {
+    let raw = raw_turn(context, id);
+    assert_eq!(
+        turn_in(context, id).observed_at(),
+        None,
+        "{what}: no observed time: {raw}"
+    );
+    assert!(
+        raw.get("observed_at").is_none(),
+        "{what}: no observed_at in the raw turn: {raw}"
+    );
+}
+
+/// Message `id` reads, in a runner's `context`, as a turn carrying exactly the
+/// time its writer gave it, as written.
+pub fn carries_the_writers_time(context: &Value, id: Uuid, written: &str, what: &str) {
+    let raw = raw_turn(context, id);
+    assert_eq!(
+        turn_in(context, id).observed_at().map(ObservedAt::as_str),
+        Some(written),
+        "{what}: the writer's time, exactly: {raw}"
+    );
+    assert_eq!(raw["observed_at"], json!(written), "{what}: {raw}");
 }
 
 /// The closure of a message view's turn, if closed.

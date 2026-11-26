@@ -37,7 +37,11 @@
 //! The oracle is the library: every turn stored, in the order stored, plus the
 //! draft of the response a2 still produces, projected by `Perspective::of`;
 //! the service's answer must equal it, value for value. The whole
-//! conversation (no agent) is the library's load of the thread in order.
+//! conversation (no agent) is the library's load of the thread in order. Each
+//! user message's input turn carries, as its observed time, the time Threads
+//! stored it (0.13, T41): the time a1's context shows, checked as an instant
+//! against the message's `createdAt` as a member reads it, is the one the
+//! library oracle is given.
 //!
 //! Channels: the runner's context (2), the members' read of the annotations,
 //! the refusals (1).
@@ -48,10 +52,10 @@ use std::collections::BTreeMap;
 
 use common::artifacts::{File, upload};
 use common::content::{
-    Streamed, after, ai_turn, annotation_view, artifact, call, cited, closed, conversation_id,
-    draft_entry, draft_text, entries_of, entry_view, human, input_turn, mail, model_response,
-    redacted_thinking, request, response_image, result_of, results, runtime_notice, said, task,
-    task_started, text, thinking, to_json, turn_id, warning,
+    Streamed, after, ai_turn, annotation_view, artifact, call, carries_its_created_at, cited,
+    closed, conversation_id, draft_entry, draft_text, entries_of, entry_view, human, input_turn,
+    mail, model_response, observed_as, redacted_thinking, request, response_image, result_of,
+    results, runtime_notice, said, task, task_started, text, thinking, to_json, turn_id, warning,
 };
 use common::flows::{
     ai, command, context, context_answer, conversation_of, create, creation, message_confirmed,
@@ -257,11 +261,24 @@ async fn t11_a_runner_reads_the_agent_context_sorted_by_threads_or_the_whole_con
     )
     .await;
     kept.push(Turn::from(input_turn(m9, vec![m9_entry])));
-    let stored = Conversation::from_parts(conversation_id(t), kept.clone())
-        .expect("the messages the context keeps are a conversation the library accepts");
     let pending = [PendingResponse::from(r8.draft())];
 
     let for_a1 = context(&ctx, &runner.passport, t, Some(&analyst)).await;
+
+    // Each question's input turn carries the time Threads stored it, its
+    // createdAt as a member reads it (0.13): checked as an instant, then
+    // expected of the library as the context wrote it.
+    for (question, reader) in [(m1, &a), (m3, &b), (m9, &b)] {
+        let view = common::flows::message_view(&ctx, &reader.passport, t, question).await;
+        let observed = carries_its_created_at(&for_a1, &view, "a question's turn");
+        let at = kept
+            .iter()
+            .position(|turn| turn.id().as_uuid() == question)
+            .expect("the question is kept");
+        kept[at] = observed_as(kept[at].clone(), observed);
+    }
+    let stored = Conversation::from_parts(conversation_id(t), kept.clone())
+        .expect("the messages the context keeps are a conversation the library accepts");
 
     assert_eq!(for_a1["threadId"], Value::String(t.to_string()));
     let mut members: Vec<(String, String)> = for_a1["members"]

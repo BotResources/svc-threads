@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
+use chrono::{DateTime, SecondsFormat, SubsecRound, TimeDelta, Utc};
 
 use contract_threads::llm::{
     ActorRef, AgentId, Author, BlockId, BlockRecord, ContentBlockKind, EntryId, EntryRecord,
@@ -533,6 +533,13 @@ pub fn list_position(now: DateTime<Utc>, latest: Option<DateTime<Utc>>) -> DateT
         Some(latest) => now.max(latest + TimeDelta::microseconds(1)),
         None => now,
     }
+}
+
+/// The library's observed time of a turn stored at `at`, written to the
+/// microsecond in UTC as Threads keeps `created_at` (`list_position` already
+/// cut `at` there): the time a user message's turn carries.
+pub fn observed_at_of(at: DateTime<Utc>) -> Result<ObservedAt, EngineError> {
+    ObservedAt::new(at.to_rfc3339_opts(SecondsFormat::Micros, true)).map_err(corrupt)
 }
 
 /// The end of a thread's list from a named message: the named message's own

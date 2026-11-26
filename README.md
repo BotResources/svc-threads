@@ -45,7 +45,7 @@ member's read mark — and serves them, live, to their members.
   (`thread.set_title`) or by a runner (`threadsSetTitle`, for any thread);
   naming a conversation is the commanding services' and the runners' concern.
 
-**Status: 0.12.0.** See [CHANGELOG.md](CHANGELOG.md).
+**Status: 0.13.0.** See [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -81,6 +81,16 @@ role), the NATS streams `INTEGRATION_CMD`, `INTEGRATION_EVT` (bounded
 `max_age`) and `STREAMING_threads` (subjects `stream.threads.>`, `max_age`
 within 24 h), the `PUBLISHED_LANGUAGE` KV bucket, and an S3-compatible bucket
 honouring POST-policy checksum conditions.
+
+## Deploy: 0.12 → 0.13
+
+0.13 is additive: no command, query or published language changes.
+
+- **A user message's turn carries its stored time.** Threads sets the turn's
+  `observed_at` to the message's `created_at`; migration `9800000009` gives it
+  to every user message already stored. A runner that writes each message's
+  time from it (the front agent's time notice) is deployed after Threads 0.13,
+  never before: against 0.12 it finds no time on any user message.
 
 ## Deploy: 0.11 → 0.12
 
